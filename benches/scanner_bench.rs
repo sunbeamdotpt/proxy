@@ -50,6 +50,7 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            cache: None,
         },
         RouteConfig {
             host_prefix: "src".into(),
@@ -62,6 +63,7 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            cache: None,
         },
         RouteConfig {
             host_prefix: "docs".into(),
@@ -74,6 +76,7 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            cache: None,
         },
     ];
 

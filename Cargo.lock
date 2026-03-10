@@ -3584,6 +3584,7 @@ dependencies = [
  "opentelemetry_sdk",
  "pin-project-lite",
  "pingora",
+ "pingora-cache",
  "pingora-core",
  "pingora-http",
  "pingora-proxy",

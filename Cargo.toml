@@ -12,7 +12,8 @@ path = "src/lib.rs"
 pingora       = { version = "0.8", features = ["rustls"] }
 pingora-proxy = { version = "0.8", features = ["rustls"] }
 pingora-core  = { version = "0.8", features = ["rustls"] }
-pingora-http  = "0.8"
+pingora-http   = "0.8"
+pingora-cache  = { version = "0.8", features = ["rustls"] }
 
 # HTTP header constants
 http = "1"

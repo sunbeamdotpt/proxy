@@ -190,6 +190,25 @@ pub struct HeaderRule {
     pub value: String,
 }
 
+/// Per-route HTTP response cache configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CacheConfig {
+    #[serde(default = "default_cache_enabled")]
+    pub enabled: bool,
+    /// Default TTL in seconds when the upstream response has no Cache-Control header.
+    #[serde(default = "default_cache_ttl")]
+    pub default_ttl_secs: u64,
+    /// Seconds to serve stale content while revalidating in the background.
+    #[serde(default)]
+    pub stale_while_revalidate_secs: u32,
+    /// Max cacheable response body size in bytes (0 = no limit).
+    #[serde(default)]
+    pub max_file_size: usize,
+}
+
+fn default_cache_enabled() -> bool { true }
+fn default_cache_ttl() -> u64 { 60 }
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RouteConfig {
     pub host_prefix: String,
@@ -220,6 +239,9 @@ pub struct RouteConfig {
     /// Extra response headers added to every response for this route.
     #[serde(default)]
     pub response_headers: Vec<HeaderRule>,
+    /// HTTP response cache configuration for this route.
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
 }
 
 impl Config {

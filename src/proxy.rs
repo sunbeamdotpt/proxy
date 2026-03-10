@@ -12,6 +12,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
+use pingora_cache::{CacheKey, CacheMeta, ForcedFreshness, HitHandler, NoCacheReason, RespCacheable};
 use pingora_core::{upstreams::peer::HttpPeer, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
@@ -47,7 +48,7 @@ pub struct SunbeamProxy {
 pub struct RequestCtx {
     pub route: Option<RouteConfig>,
     pub start_time: Instant,
-    /// Unique request identifier (UUID v4).
+    /// Unique request identifier (monotonic hex counter).
     pub request_id: String,
     /// Tracing span for this request.
     pub span: tracing::Span,
@@ -477,7 +478,7 @@ impl ProxyHttp for SunbeamProxy {
             }
         };
 
-        // Store route early so downstream hooks can access it.
+        // Store route early so request_cache_filter can access it.
         ctx.route = Some(route.clone());
 
         // ── Static file serving ──────────────────────────────────────────
@@ -592,11 +593,13 @@ impl ProxyHttp for SunbeamProxy {
 
         // Prepare body rewrite rules if the route has them.
         if !route.body_rewrites.is_empty() {
+            // We'll check content-type in upstream_response_filter; store rules now.
             ctx.body_rewrite_rules = route
                 .body_rewrites
                 .iter()
                 .map(|br| (br.find.clone(), br.replace.clone()))
                 .collect();
+            // Store the content-type filter info on the route for later.
         }
 
         // Handle Expect: 100-continue before connecting to upstream.
@@ -612,6 +615,152 @@ impl ProxyHttp for SunbeamProxy {
         }
 
         Ok(false)
+    }
+
+    // ── Cache hooks ────────────────────────────────────────────────────
+    // Runs AFTER request_filter (detection pipeline) and BEFORE upstream.
+    // On cache hit, the response is served directly — no upstream request,
+    // no request modifications, no body rewriting.
+
+    fn request_cache_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut RequestCtx,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        // Only cache GET/HEAD.
+        let method = &session.req_header().method;
+        if method != http::Method::GET && method != http::Method::HEAD {
+            return Ok(());
+        }
+
+        let cache_cfg = match ctx.route.as_ref().and_then(|r| r.cache.as_ref()) {
+            Some(c) if c.enabled => c,
+            _ => return Ok(()),
+        };
+
+        // Skip cache if body rewrites are active (need per-response rewriting).
+        if !ctx.body_rewrite_rules.is_empty() {
+            return Ok(());
+        }
+
+        // Skip cache if auth subrequest captured headers (per-user content).
+        if !ctx.auth_headers.is_empty() {
+            return Ok(());
+        }
+
+        session.cache.enable(
+            &*crate::cache::CACHE_BACKEND,
+            None, // no eviction manager
+            None, // no predictor
+            None, // no cache lock
+            None, // no option overrides
+        );
+
+        if cache_cfg.max_file_size > 0 {
+            session
+                .cache
+                .set_max_file_size_bytes(cache_cfg.max_file_size);
+        }
+
+        Ok(())
+    }
+
+    fn cache_key_callback(
+        &self,
+        session: &Session,
+        _ctx: &mut RequestCtx,
+    ) -> Result<CacheKey> {
+        let req = session.req_header();
+        let host = req
+            .headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let path = req.uri.path();
+        let key = match req.uri.query() {
+            Some(q) => format!("{host}{path}?{q}"),
+            None => format!("{host}{path}"),
+        };
+        Ok(CacheKey::new("", key, ""))
+    }
+
+    fn response_cache_filter(
+        &self,
+        _session: &Session,
+        resp: &ResponseHeader,
+        ctx: &mut RequestCtx,
+    ) -> Result<RespCacheable> {
+        use std::time::{Duration, SystemTime};
+
+        // Only cache 2xx responses.
+        if !resp.status.is_success() {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+        }
+
+        let cache_cfg = match ctx.route.as_ref().and_then(|r| r.cache.as_ref()) {
+            Some(c) => c,
+            None => {
+                return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+            }
+        };
+
+        // Respect Cache-Control: no-store, private.
+        if let Some(cc) = resp
+            .headers
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+        {
+            let cc_lower = cc.to_ascii_lowercase();
+            if cc_lower.contains("no-store") || cc_lower.contains("private") {
+                return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+            }
+            if let Some(ttl) = crate::cache::parse_cache_ttl(&cc_lower) {
+                if ttl == 0 {
+                    return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+                }
+                let meta = CacheMeta::new(
+                    SystemTime::now() + Duration::from_secs(ttl),
+                    SystemTime::now(),
+                    cache_cfg.stale_while_revalidate_secs,
+                    0,
+                    resp.clone(),
+                );
+                return Ok(RespCacheable::Cacheable(meta));
+            }
+        }
+
+        // No Cache-Control or no max-age: use route's default TTL.
+        let meta = CacheMeta::new(
+            SystemTime::now() + Duration::from_secs(cache_cfg.default_ttl_secs),
+            SystemTime::now(),
+            cache_cfg.stale_while_revalidate_secs,
+            0,
+            resp.clone(),
+        );
+        Ok(RespCacheable::Cacheable(meta))
+    }
+
+    async fn cache_hit_filter(
+        &self,
+        _session: &mut Session,
+        _meta: &CacheMeta,
+        _hit_handler: &mut HitHandler,
+        _is_fresh: bool,
+        _ctx: &mut RequestCtx,
+    ) -> Result<Option<ForcedFreshness>>
+    where
+        Self::CTX: Send + Sync,
+    {
+        metrics::CACHE_STATUS.with_label_values(&["hit"]).inc();
+        Ok(None)
+    }
+
+    fn cache_miss(&self, session: &mut Session, _ctx: &mut RequestCtx) {
+        metrics::CACHE_STATUS.with_label_values(&["miss"]).inc();
+        session.cache.cache_miss();
     }
 
     async fn upstream_peer(
@@ -661,6 +810,7 @@ impl ProxyHttp for SunbeamProxy {
                 rewrites: vec![],
                 body_rewrites: vec![],
                 response_headers: vec![],
+                cache: None,
             });
             return Ok(Box::new(HttpPeer::new(
                 backend_addr(&pr.backend),
@@ -1081,6 +1231,7 @@ mod tests {
             }],
             body_rewrites: vec![],
             response_headers: vec![],
+            cache: None,
         }];
         let compiled = SunbeamProxy::compile_rewrites(&routes);
         assert_eq!(compiled.len(), 1);

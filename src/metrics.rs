@@ -72,6 +72,19 @@ pub static RATE_LIMIT_DECISIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     c
 });
 
+pub static CACHE_STATUS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "sunbeam_cache_status_total",
+            "Cache hit/miss counts",
+        ),
+        &["status"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
 pub static ACTIVE_CONNECTIONS: LazyLock<Gauge> = LazyLock::new(|| {
     let g = Gauge::new(
         "sunbeam_active_connections",

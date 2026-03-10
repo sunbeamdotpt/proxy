@@ -166,6 +166,7 @@ mod tests {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            cache: None,
         }];
         ScannerDetector::new(&model, &routes)
     }

@@ -9,5 +9,6 @@ pub mod dual_stack;
 pub mod proxy;
 pub mod rate_limit;
 pub mod scanner;
+pub mod cache;
 pub mod ssh;
 pub mod static_files;
