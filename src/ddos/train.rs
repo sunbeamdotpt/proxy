@@ -91,17 +91,12 @@ impl HeuristicThresholds {
     }
 }
 
-/// Ddostrainresult.
 pub struct DdosTrainResult {
-    /// Model.
     pub model: SerializedModel,
-    /// Attack count.
     pub attack_count: usize,
-    /// Normal count.
     pub normal_count: usize,
 }
 
-/// Trainargs.
 pub struct TrainArgs {
     /// Input.
     pub input: String,
@@ -297,12 +292,12 @@ pub fn parse_logs(input: &str) -> Result<FxHashMap<String, LogIpState>> {
         state.statuses.push(entry.fields.status);
         state.durations.push(entry.fields.duration_ms.min(u32::MAX as u64) as u32);
         state.content_lengths.push(entry.fields.content_length.min(u32::MAX as u64) as u32);
-        state.has_cookies.push(entry.fields.has_cookies);
+        state.has_cookies.push(entry.fields.has_cookies.unwrap_or(false));
         state.has_referer.push(
-            !entry.fields.referer.is_empty() && entry.fields.referer != "-",
+            entry.fields.referer.as_deref().map(|r| r != "-").unwrap_or(false),
         );
         state.has_accept_language.push(
-            !entry.fields.accept_language.is_empty() && entry.fields.accept_language != "-",
+            entry.fields.accept_language.as_deref().map(|a| a != "-").unwrap_or(false),
         );
         state.suspicious_paths.push(
             crate::ddos::features::is_suspicious_path(&entry.fields.path),
@@ -396,7 +391,6 @@ fn label_ips(
     Ok(ip_labels)
 }
 
-/// Run.
 pub fn run(args: TrainArgs) -> Result<()> {
     eprintln!("Parsing logs from {}...", args.input);
 

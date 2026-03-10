@@ -224,6 +224,7 @@ fn bench_extract_features(c: &mut Criterion) {
 }
 
 fn bench_ensemble_scanner_full(c: &mut Criterion) {
+    // Raw features simulating a scanner probe
     let raw: [f32; 12] = [0.8, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 1.0];
     c.bench_function("ensemble::scanner full predict", |b| {
         b.iter(|| scanner_ensemble_predict(black_box(&raw)))

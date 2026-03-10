@@ -20,12 +20,14 @@ use sunbeam_proxy::ddos::model::DDoSAction;
 
 fn default_ddos_config() -> DDoSConfig {
     DDoSConfig {
+        model_path: Some(String::new()),
+        k: 5,
         threshold: 0.6,
         window_secs: 60,
         window_capacity: 1000,
         min_events: 10,
         enabled: true,
-        observe_only: false,
+        use_ensemble: false,
     }
 }
 

@@ -63,12 +63,218 @@ pub const DEFAULT_FRAGMENTS: &[&str] = &[
 const ATTACK_EXTENSIONS: &[&str] = &[".env", ".sql", ".bak", ".git/config"];
 const TRAVERSAL_MARKERS: &[&str] = &["..", "%00", "%0a"];
 
-/// Labeledsample.
 pub struct LabeledSample {
-    /// Features.
     pub features: ScannerFeatureVector,
-    /// Label.
     pub label: f64, // 1.0 = attack, 0.0 = normal
+}
+
+pub struct ScannerTrainResult {
+    pub model: ScannerModel,
+    pub train_metrics: Metrics,
+    pub test_metrics: Metrics,
+}
+
+/// Core training pipeline: parse logs, label, train, evaluate. Returns the trained model and metrics.
+pub fn train_and_evaluate(
+    args: &TrainScannerArgs,
+    learning_rate: f64,
+    epochs: usize,
+    class_weight_multiplier: f64,
+) -> Result<ScannerTrainResult> {
+    let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
+    let fragment_hashes: FxHashSet<u64> = fragments
+        .iter()
+        .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+        .collect();
+    let extension_hashes: FxHashSet<u64> = features::SUSPICIOUS_EXTENSIONS_LIST
+        .iter()
+        .map(|e| fx_hash_bytes(e.as_bytes()))
+        .collect();
+
+    let mut samples: Vec<LabeledSample> = Vec::new();
+    let file = std::fs::File::open(&args.input)
+        .with_context(|| format!("opening {}", args.input))?;
+    let reader = std::io::BufReader::new(file);
+    let mut log_hosts: FxHashSet<u64> = FxHashSet::default();
+    let mut parsed_entries: Vec<(AuditFields, String)> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: AuditLog = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let host_prefix = entry
+            .fields
+            .host
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
+        parsed_entries.push((entry.fields, host_prefix));
+    }
+
+    for (fields, host_prefix) in &parsed_entries {
+        let has_cookies = fields.has_cookies.unwrap_or(false);
+        let has_referer = fields
+            .referer
+            .as_ref()
+            .map(|r| r != "-" && !r.is_empty())
+            .unwrap_or(false);
+        let has_accept_language = fields
+            .accept_language
+            .as_ref()
+            .map(|a| a != "-" && !a.is_empty())
+            .unwrap_or(false);
+
+        let feats = features::extract_features(
+            &fields.method,
+            &fields.path,
+            host_prefix,
+            has_cookies,
+            has_referer,
+            has_accept_language,
+            "-",
+            &fields.user_agent,
+            fields.content_length,
+            &fragment_hashes,
+            &extension_hashes,
+            &log_hosts,
+        );
+
+        let label = if let Some(ref gt) = fields.label {
+            match gt.as_str() {
+                "attack" | "anomalous" => Some(1.0),
+                "normal" => Some(0.0),
+                _ => None,
+            }
+        } else {
+            label_request(
+                &fields.path,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                &fields.user_agent,
+                host_prefix,
+                fields.status,
+                &log_hosts,
+                &fragment_hashes,
+            )
+        };
+
+        if let Some(l) = label {
+            samples.push(LabeledSample {
+                features: feats,
+                label: l,
+            });
+        }
+    }
+
+    if args.csic {
+        let csic_entries = crate::scanner::csic::fetch_csic_dataset()?;
+        for (_, host_prefix) in &csic_entries {
+            log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
+        }
+        for (fields, host_prefix) in &csic_entries {
+            let has_cookies = fields.has_cookies.unwrap_or(false);
+            let has_referer = fields
+                .referer
+                .as_ref()
+                .map(|r| r != "-" && !r.is_empty())
+                .unwrap_or(false);
+            let has_accept_language = fields
+                .accept_language
+                .as_ref()
+                .map(|a| a != "-" && !a.is_empty())
+                .unwrap_or(false);
+
+            let feats = features::extract_features(
+                &fields.method,
+                &fields.path,
+                host_prefix,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                "-",
+                &fields.user_agent,
+                fields.content_length,
+                &fragment_hashes,
+                &extension_hashes,
+                &log_hosts,
+            );
+
+            let label = match fields.label.as_deref() {
+                Some("attack" | "anomalous") => 1.0,
+                Some("normal") => 0.0,
+                _ => continue,
+            };
+
+            samples.push(LabeledSample {
+                features: feats,
+                label,
+            });
+        }
+    }
+
+    if let Some(wordlist_dir) = &args.wordlists {
+        ingest_wordlists(
+            wordlist_dir,
+            &mut samples,
+            &mut fragments,
+            &fragment_hashes,
+            &extension_hashes,
+            &log_hosts,
+        )?;
+    }
+
+    if samples.is_empty() {
+        anyhow::bail!("no training samples found");
+    }
+
+    // Stratified 80/20 train/test split
+    let (train_samples, test_samples) = stratified_split(&mut samples, 0.8, 42);
+
+    // Compute normalization params from training set only
+    let train_feature_vecs: Vec<ScannerFeatureVector> =
+        train_samples.iter().map(|s| s.features).collect();
+    let norm_params = ScannerNormParams::from_data(&train_feature_vecs);
+
+    let train_normalized: Vec<ScannerFeatureVector> =
+        train_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+
+    // Train logistic regression with configurable params
+    let weights = train_logistic_regression_weighted(
+        &train_normalized,
+        &train_samples,
+        epochs,
+        learning_rate,
+        class_weight_multiplier,
+    );
+
+    let model = ScannerModel {
+        weights,
+        threshold: args.threshold,
+        norm_params: norm_params.clone(),
+        fragments,
+    };
+
+    let train_metrics = evaluate(&train_normalized, &train_samples, &weights, args.threshold);
+
+    let test_feature_vecs: Vec<ScannerFeatureVector> =
+        test_samples.iter().map(|s| s.features).collect();
+    let test_normalized: Vec<ScannerFeatureVector> =
+        test_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let test_metrics = evaluate(&test_normalized, &test_samples, &weights, args.threshold);
+
+    Ok(ScannerTrainResult {
+        model,
+        train_metrics,
+        test_metrics,
+    })
 }
 
 /// Scannertrainresult.
@@ -511,15 +717,10 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     Ok(())
 }
 
-/// Metrics.
 pub struct Metrics {
-    /// Tp.
     pub tp: u32,
-    /// Fp.
     pub fp: u32,
-    /// Tn.
     pub tn: u32,
-    /// Fn .
     pub fn_: u32,
 }
 
