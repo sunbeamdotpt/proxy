@@ -877,3 +877,311 @@ upstream_path_prefix = "{prefix}"
         prop_assert!(cfg.strip_prefix);
     }
 }
+
+// ─── Cluster bandwidth meter ────────────────────────────────────────────────
+
+use sunbeam_proxy::cluster::bandwidth::{
+    gbps_to_bytes_per_sec, BandwidthLimiter, BandwidthLimitResult, BandwidthMeter,
+    BandwidthTracker, ClusterBandwidthState,
+};
+
+proptest! {
+    /// Recording any non-negative byte counts never panics.
+    #[test]
+    fn meter_record_never_panics(
+        bytes_in in 0u64..=u64::MAX / 2,
+        bytes_out in 0u64..=u64::MAX / 2,
+    ) {
+        let meter = BandwidthMeter::new(30);
+        meter.record_sample(bytes_in, bytes_out);
+        let rate = meter.aggregate_rate();
+        prop_assert!(rate.bytes_in_per_sec >= 0.0);
+        prop_assert!(rate.bytes_out_per_sec >= 0.0);
+    }
+
+    /// Aggregate rate is always non-negative regardless of input.
+    #[test]
+    fn meter_rate_always_non_negative(
+        samples in proptest::collection::vec((0u64..1_000_000_000, 0u64..1_000_000_000), 0..100),
+        window_secs in 1u64..=300,
+    ) {
+        let meter = BandwidthMeter::new(window_secs);
+        for (bytes_in, bytes_out) in &samples {
+            meter.record_sample(*bytes_in, *bytes_out);
+        }
+        let rate = meter.aggregate_rate();
+        prop_assert!(rate.bytes_in_per_sec >= 0.0);
+        prop_assert!(rate.bytes_out_per_sec >= 0.0);
+        prop_assert!(rate.total_per_sec >= 0.0);
+        prop_assert_eq!(rate.total_per_sec, rate.bytes_in_per_sec + rate.bytes_out_per_sec);
+    }
+
+    /// total_per_sec always equals in + out.
+    #[test]
+    fn meter_total_is_sum_of_in_and_out(
+        bytes_in in 0u64..1_000_000_000,
+        bytes_out in 0u64..1_000_000_000,
+    ) {
+        let meter = BandwidthMeter::new(30);
+        meter.record_sample(bytes_in, bytes_out);
+        let rate = meter.aggregate_rate();
+        let diff = (rate.total_per_sec - (rate.bytes_in_per_sec + rate.bytes_out_per_sec)).abs();
+        prop_assert!(diff < 0.001, "total should equal in + out, diff={diff}");
+    }
+
+    /// MiB/s conversion uses power-of-2 (1 MiB = 1048576 bytes).
+    #[test]
+    fn meter_mib_conversion_power_of_2(
+        bytes_in in 0u64..10_000_000_000,
+        bytes_out in 0u64..10_000_000_000,
+    ) {
+        let meter = BandwidthMeter::new(30);
+        meter.record_sample(bytes_in, bytes_out);
+        let rate = meter.aggregate_rate();
+        let expected_in_mib = rate.bytes_in_per_sec / 1_048_576.0;
+        let expected_out_mib = rate.bytes_out_per_sec / 1_048_576.0;
+        let diff_in = (rate.in_mib_per_sec() - expected_in_mib).abs();
+        let diff_out = (rate.out_mib_per_sec() - expected_out_mib).abs();
+        prop_assert!(diff_in < 0.0001, "MiB/s in conversion wrong: diff={diff_in}");
+        prop_assert!(diff_out < 0.0001, "MiB/s out conversion wrong: diff={diff_out}");
+    }
+
+    /// Sample count matches the number of samples within the window.
+    #[test]
+    fn meter_sample_count_matches_insertions(
+        n in 0usize..200,
+    ) {
+        let meter = BandwidthMeter::new(60); // large window so nothing expires
+        for _ in 0..n {
+            meter.record_sample(100, 200);
+        }
+        let rate = meter.aggregate_rate();
+        prop_assert_eq!(rate.sample_count, n);
+    }
+
+    /// Bandwidth tracker atomic record + snapshot is consistent.
+    #[test]
+    fn tracker_record_snapshot_consistent(
+        ops in proptest::collection::vec((0u64..1_000_000, 0u64..1_000_000), 1..50),
+    ) {
+        let tracker = BandwidthTracker::new();
+        let mut expected_in = 0u64;
+        let mut expected_out = 0u64;
+        for (bytes_in, bytes_out) in &ops {
+            tracker.record(*bytes_in, *bytes_out);
+            expected_in += bytes_in;
+            expected_out += bytes_out;
+        }
+        let snap = tracker.snapshot_and_reset();
+        prop_assert_eq!(snap.bytes_in, expected_in);
+        prop_assert_eq!(snap.bytes_out, expected_out);
+        prop_assert_eq!(snap.request_count, ops.len() as u64);
+        prop_assert_eq!(snap.cumulative_in, expected_in);
+        prop_assert_eq!(snap.cumulative_out, expected_out);
+    }
+
+    /// After snapshot_and_reset, interval counters are zero but cumulative persists.
+    #[test]
+    fn tracker_cumulative_persists_after_reset(
+        first_in in 0u64..1_000_000,
+        first_out in 0u64..1_000_000,
+        second_in in 0u64..1_000_000,
+        second_out in 0u64..1_000_000,
+    ) {
+        let tracker = BandwidthTracker::new();
+        tracker.record(first_in, first_out);
+        let _ = tracker.snapshot_and_reset();
+        tracker.record(second_in, second_out);
+        let snap = tracker.snapshot_and_reset();
+        // Interval counters reflect only second batch.
+        prop_assert_eq!(snap.bytes_in, second_in);
+        prop_assert_eq!(snap.bytes_out, second_out);
+        prop_assert_eq!(snap.request_count, 1);
+        // Cumulative reflects both batches.
+        prop_assert_eq!(snap.cumulative_in, first_in + second_in);
+        prop_assert_eq!(snap.cumulative_out, first_out + second_out);
+    }
+
+    /// ClusterBandwidthState peer count matches distinct peer IDs.
+    #[test]
+    fn cluster_state_peer_count(
+        peer_count in 1usize..20,
+    ) {
+        let state = ClusterBandwidthState::new(30);
+        for i in 0..peer_count {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            state.update_peer(id, (i as u64) * 1000, (i as u64) * 2000);
+        }
+        prop_assert_eq!(
+            state.peer_count.load(std::sync::atomic::Ordering::Relaxed),
+            peer_count as u64
+        );
+    }
+
+    /// ClusterBandwidthState totals are sum of all peers.
+    #[test]
+    fn cluster_state_totals_are_sum(
+        values in proptest::collection::vec((0u64..1_000_000, 0u64..1_000_000), 1..20),
+    ) {
+        let state = ClusterBandwidthState::new(30);
+        let mut expected_in = 0u64;
+        let mut expected_out = 0u64;
+        for (i, (cum_in, cum_out)) in values.iter().enumerate() {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            state.update_peer(id, *cum_in, *cum_out);
+            expected_in += cum_in;
+            expected_out += cum_out;
+        }
+        prop_assert_eq!(
+            state.total_bytes_in.load(std::sync::atomic::Ordering::Relaxed),
+            expected_in
+        );
+        prop_assert_eq!(
+            state.total_bytes_out.load(std::sync::atomic::Ordering::Relaxed),
+            expected_out
+        );
+    }
+
+    /// Updating the same peer replaces (not adds) its contribution.
+    #[test]
+    fn cluster_state_update_replaces(
+        first_in in 0u64..1_000_000,
+        first_out in 0u64..1_000_000,
+        second_in in 0u64..1_000_000,
+        second_out in 0u64..1_000_000,
+    ) {
+        let state = ClusterBandwidthState::new(30);
+        let id = [42u8; 32];
+        state.update_peer(id, first_in, first_out);
+        state.update_peer(id, second_in, second_out);
+        prop_assert_eq!(
+            state.total_bytes_in.load(std::sync::atomic::Ordering::Relaxed),
+            second_in
+        );
+        prop_assert_eq!(
+            state.total_bytes_out.load(std::sync::atomic::Ordering::Relaxed),
+            second_out
+        );
+        prop_assert_eq!(
+            state.peer_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// Window of 0 seconds is not valid in practice, but window_secs=1 works correctly.
+    #[test]
+    fn meter_small_window_no_panic(
+        window_secs in 1u64..=5,
+        bytes_in in 0u64..1_000_000,
+        bytes_out in 0u64..1_000_000,
+    ) {
+        let meter = BandwidthMeter::new(window_secs);
+        meter.record_sample(bytes_in, bytes_out);
+        let rate = meter.aggregate_rate();
+        // Rate = bytes / window_secs.
+        let expected_in = bytes_in as f64 / window_secs as f64;
+        let diff = (rate.bytes_in_per_sec - expected_in).abs();
+        prop_assert!(diff < 1.0, "expected ~{expected_in}, got {}", rate.bytes_in_per_sec);
+    }
+
+    // ─── Bandwidth limiter ─────────────────────────────────────────────────
+
+    /// Limiter with limit=0 always allows regardless of traffic.
+    #[test]
+    fn limiter_unlimited_always_allows(
+        samples in proptest::collection::vec((0u64..10_000_000_000, 0u64..10_000_000_000), 0..50),
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(1));
+        for (bi, bo) in &samples {
+            meter.record_sample(*bi, *bo);
+        }
+        let limiter = BandwidthLimiter::new(meter, 0);
+        prop_assert_eq!(limiter.check(), BandwidthLimitResult::Allow);
+    }
+
+    /// When traffic is strictly under the limit, check() always returns Allow.
+    #[test]
+    fn limiter_under_cap_allows(
+        bytes_in in 0u64..50_000_000, // max 50MB
+        bytes_out in 0u64..50_000_000,
+        window_secs in 1u64..=60,
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(window_secs));
+        meter.record_sample(bytes_in, bytes_out);
+        // Set limit to 10 Gbps (1.25 GB/s) — well above anything the test generates.
+        let limiter = BandwidthLimiter::new(meter, gbps_to_bytes_per_sec(10.0));
+        prop_assert_eq!(limiter.check(), BandwidthLimitResult::Allow);
+    }
+
+    /// When traffic exceeds the limit, check() returns Reject.
+    #[test]
+    fn limiter_over_cap_rejects(
+        // Generate enough traffic to exceed even 10 Gbps
+        count in 5usize..20,
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(1)); // 1s window
+        // Each sample: 1 GB — over 1s window that's count GB/s
+        for _ in 0..count {
+            meter.record_sample(1_000_000_000, 1_000_000_000);
+        }
+        // Limit to 1 Gbps = 125 MB/s. Actual rate = count * 2 GB/s >> 125 MB/s
+        let limiter = BandwidthLimiter::new(meter, gbps_to_bytes_per_sec(1.0));
+        prop_assert_eq!(limiter.check(), BandwidthLimitResult::Reject);
+    }
+
+    /// set_limit changes the enforcement threshold at runtime.
+    #[test]
+    fn limiter_set_limit_consistent(
+        initial_gbps in 0.1f64..100.0,
+        new_gbps in 0.1f64..100.0,
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(30));
+        let limiter = BandwidthLimiter::new(meter, gbps_to_bytes_per_sec(initial_gbps));
+        prop_assert_eq!(limiter.limit(), gbps_to_bytes_per_sec(initial_gbps));
+        limiter.set_limit(gbps_to_bytes_per_sec(new_gbps));
+        prop_assert_eq!(limiter.limit(), gbps_to_bytes_per_sec(new_gbps));
+    }
+
+    /// gbps_to_bytes_per_sec conversion is correct: 1 Gbps = 125_000_000 B/s.
+    #[test]
+    fn gbps_conversion_correct(
+        gbps in 0.0f64..1000.0,
+    ) {
+        let bytes = gbps_to_bytes_per_sec(gbps);
+        let expected = (gbps * 125_000_000.0) as u64;
+        prop_assert_eq!(bytes, expected);
+    }
+
+    /// Limiter check never panics regardless of meter state.
+    #[test]
+    fn limiter_check_never_panics(
+        limit in 0u64..=u64::MAX / 2,
+        window_secs in 1u64..=300,
+        samples in proptest::collection::vec((0u64..u64::MAX / 4, 0u64..u64::MAX / 4), 0..20),
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(window_secs));
+        for (bi, bo) in &samples {
+            meter.record_sample(*bi, *bo);
+        }
+        let limiter = BandwidthLimiter::new(meter, limit);
+        let result = limiter.check();
+        prop_assert!(result == BandwidthLimitResult::Allow || result == BandwidthLimitResult::Reject);
+    }
+
+    /// current_rate returns the same value as meter.aggregate_rate.
+    #[test]
+    fn limiter_current_rate_matches_meter(
+        bytes_in in 0u64..1_000_000_000,
+        bytes_out in 0u64..1_000_000_000,
+    ) {
+        let meter = std::sync::Arc::new(BandwidthMeter::new(30));
+        meter.record_sample(bytes_in, bytes_out);
+        let limiter = BandwidthLimiter::new(meter.clone(), 0);
+        let limiter_rate = limiter.current_rate();
+        let meter_rate = meter.aggregate_rate();
+        let diff = (limiter_rate.total_per_sec - meter_rate.total_per_sec).abs();
+        prop_assert!(diff < 0.001, "limiter rate should match meter rate");
+    }
+}
