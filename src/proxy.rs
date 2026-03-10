@@ -43,6 +43,8 @@ pub struct SunbeamProxy {
     pub compiled_rewrites: Vec<(String, Vec<CompiledRewrite>)>,
     /// Shared reqwest client for auth subrequests.
     pub http_client: reqwest::Client,
+    /// Parsed bypass CIDRs — IPs in these ranges skip the detection pipeline.
+    pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
 }
 
 pub struct RequestCtx {
@@ -277,6 +279,14 @@ impl ProxyHttp for SunbeamProxy {
         //   - "ddos" log  = all HTTPS traffic  (scanner training data)
         //   - "scanner" log = traffic that passed DDoS (rate-limit training data)
         //   - "rate_limit" log = traffic that passed scanner (validation data)
+
+        // Skip the detection pipeline for trusted IPs (localhost, pod network).
+        if extract_client_ip(session)
+            .map(|ip| crate::rate_limit::cidr::is_bypassed(ip, &self.pipeline_bypass_cidrs))
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
 
         // DDoS detection: check the client IP against the KNN model.
         if let Some(detector) = &self.ddos_detector {
@@ -1217,6 +1227,33 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         assert_eq!(id.len(), 36);
         assert!(uuid::Uuid::parse_str(&id).is_ok());
+    }
+
+    #[test]
+    fn test_pipeline_bypass_cidrs_parsed() {
+        use crate::rate_limit::cidr::{parse_cidrs, is_bypassed};
+        let cidrs = parse_cidrs(&[
+            "10.42.0.0/16".into(),
+            "127.0.0.0/8".into(),
+            "::1/128".into(),
+        ]);
+        // Pod network
+        assert!(is_bypassed("10.42.1.5".parse().unwrap(), &cidrs));
+        // Localhost IPv4
+        assert!(is_bypassed("127.0.0.1".parse().unwrap(), &cidrs));
+        // Localhost IPv6
+        assert!(is_bypassed("::1".parse().unwrap(), &cidrs));
+        // External IP should not be bypassed
+        assert!(!is_bypassed("8.8.8.8".parse().unwrap(), &cidrs));
+        assert!(!is_bypassed("192.168.1.1".parse().unwrap(), &cidrs));
+    }
+
+    #[test]
+    fn test_pipeline_bypass_empty_cidrs_blocks_nothing() {
+        use crate::rate_limit::cidr::{parse_cidrs, is_bypassed};
+        let cidrs = parse_cidrs(&[]);
+        assert!(!is_bypassed("127.0.0.1".parse().unwrap(), &cidrs));
+        assert!(!is_bypassed("10.42.0.1".parse().unwrap(), &cidrs));
     }
 
     #[test]

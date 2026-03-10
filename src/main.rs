@@ -365,6 +365,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
         rate_limiter,
         compiled_rewrites,
         http_client,
+        pipeline_bypass_cidrs: crate::rate_limit::cidr::parse_cidrs(
+            &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
+        ),
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
