@@ -13,8 +13,8 @@ float inputs. They cannot be proved inside Lean because `Float` operations are
 `@[extern]` (opaque to the kernel). The axioms form a documented trust boundary:
 we trust the C runtime's `exp` implementation.
 
-When TorchLean ships its verified Float32 kernel, these axioms can be replaced
-with proofs against that kernel.
+When TorchLean (arXiv:2602.22631) ships its verified Float32 kernel, these
+axioms can be replaced with proofs against that kernel.
 -/
 
 /-- Sigmoid output is always positive: exp(-x) ≥ 0 ⟹ 1+exp(-x) ≥ 1 ⟹ 1/(1+exp(-x)) > 0. -/

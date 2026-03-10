@@ -2,13 +2,23 @@ import Sunbeam.Model.Basic
 
 namespace Sunbeam
 
-/-- A decision tree node (inductive = automatic termination for structural recursion). -/
+/-- A decision tree node (inductive = automatic termination for structural recursion).
+
+This is an abstract specification of the Rust packed-array representation:
+  `type PackedNode = (u8, f32, u16, u16)` — `(feature_index, threshold, left, right)`
+Leaf nodes in Rust use `feature_index = 255`; the threshold encodes the decision:
+  `< 0.25` → Allow, `> 0.75` → Block, otherwise → Defer.
+Here we use an inductive type so that structural recursion gives automatic termination. -/
 inductive TreeNode where
   | leaf (decision : Decision) : TreeNode
   | split (featureIdx : Nat) (threshold : Float) (left right : TreeNode) : TreeNode
   deriving Repr
 
-/-- Tree prediction by structural recursion (termination is automatic). -/
+/-- Tree prediction by structural recursion (termination is automatic).
+
+Corresponds to `ensemble::tree::tree_predict` in Rust, which loops over a flat
+packed-node array. The semantic behavior is identical: split nodes compare
+`input[featureIdx]` against `threshold` and branch left/right. -/
 def treePredictAux {n : Nat} (input : Fin n → Float) : TreeNode → Decision
   | .leaf d => d
   | .split idx thr left right =>
