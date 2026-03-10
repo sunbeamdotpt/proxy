@@ -10,35 +10,15 @@
 #![recursion_limit = "256"]
 /// Acme.
 pub mod acme;
-/// Audit.
-pub mod audit;
-/// Autotune.
-pub mod autotune;
-/// Cache.
 pub mod cache;
-/// Cluster.
 pub mod cluster;
-/// Config.
 pub mod config;
-/// Dataset.
-pub mod dataset;
-/// Ddos.
 pub mod ddos;
-/// Dual stack.
 pub mod dual_stack;
-/// Ensemble.
-pub mod ensemble;
-/// Metrics.
 pub mod metrics;
-/// Proxy.
 pub mod proxy;
-/// Rate limit.
 pub mod rate_limit;
-/// Scanner.
 pub mod scanner;
-/// Sni.
-pub mod sni;
-/// Ssh.
 pub mod ssh;
 /// Static files.
 pub mod static_files;

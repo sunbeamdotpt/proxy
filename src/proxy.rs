@@ -65,10 +65,6 @@ pub struct SunbeamProxy {
     pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
     /// Optional cluster handle for multi-node bandwidth tracking.
     pub cluster: Option<Arc<ClusterHandle>>,
-    /// When true, DDoS detector logs decisions but never blocks traffic.
-    pub ddos_observe_only: bool,
-    /// When true, scanner detector logs decisions but never blocks traffic.
-    pub scanner_observe_only: bool,
 }
 
 /// Requestctx.
