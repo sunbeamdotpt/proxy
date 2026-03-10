@@ -2,6 +2,7 @@ use crate::acme::AcmeRoutes;
 use crate::config::RouteConfig;
 use crate::ddos::detector::DDoSDetector;
 use crate::ddos::model::DDoSAction;
+use crate::metrics;
 use crate::rate_limit::key;
 use crate::rate_limit::limiter::{RateLimitResult, RateLimiter};
 use crate::scanner::allowlist::BotAllowlist;
@@ -20,7 +21,6 @@ use std::time::Instant;
 pub struct SunbeamProxy {
     pub routes: Vec<RouteConfig>,
     /// Per-challenge route table populated by the Ingress watcher.
-    /// Maps `/.well-known/acme-challenge/<token>` → solver service address.
     pub acme_routes: AcmeRoutes,
     /// Optional KNN-based DDoS detector.
     pub ddos_detector: Option<Arc<DDoSDetector>>,
@@ -35,6 +35,10 @@ pub struct SunbeamProxy {
 pub struct RequestCtx {
     pub route: Option<RouteConfig>,
     pub start_time: Instant,
+    /// Unique request identifier (UUID v4).
+    pub request_id: String,
+    /// Tracing span for this request.
+    pub span: tracing::Span,
     /// Resolved solver backend address for this ACME challenge, if applicable.
     pub acme_backend: Option<String>,
     /// Path prefix to strip before forwarding to the upstream (e.g. "/kratos").
@@ -91,7 +95,7 @@ fn extract_client_ip(session: &Session) -> Option<IpAddr> {
 }
 
 /// Strip the scheme prefix from a backend URL like `http://host:port`.
-fn backend_addr(backend: &str) -> &str {
+pub fn backend_addr(backend: &str) -> &str {
     backend
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -110,9 +114,12 @@ impl ProxyHttp for SunbeamProxy {
     type CTX = RequestCtx;
 
     fn new_ctx(&self) -> RequestCtx {
+        let request_id = uuid::Uuid::new_v4().to_string();
         RequestCtx {
             route: None,
             start_time: Instant::now(),
+            request_id,
+            span: tracing::Span::none(),
             acme_backend: None,
             downstream_scheme: "https",
             strip_prefix: None,
@@ -129,6 +136,19 @@ impl ProxyHttp for SunbeamProxy {
         Self::CTX: Send + Sync,
     {
         ctx.downstream_scheme = if is_plain_http(session) { "http" } else { "https" };
+
+        // Create the request-scoped tracing span.
+        let method = session.req_header().method.to_string();
+        let host = extract_host(session);
+        let path = session.req_header().uri.path().to_string();
+        ctx.span = tracing::info_span!("request",
+            request_id = %ctx.request_id,
+            method = %method,
+            host = %host,
+            path = %path,
+        );
+
+        metrics::ACTIVE_CONNECTIONS.inc();
 
         if is_plain_http(session) {
             let path = session.req_header().uri.path().to_string();
@@ -157,7 +177,6 @@ impl ProxyHttp for SunbeamProxy {
             }
 
             // All other plain-HTTP traffic.
-            let host = extract_host(session);
             let prefix = host.split('.').next().unwrap_or("");
 
             // Routes that explicitly opt out of HTTPS enforcement pass through.
@@ -242,6 +261,8 @@ impl ProxyHttp for SunbeamProxy {
                     "pipeline"
                 );
 
+                metrics::DDOS_DECISIONS.with_label_values(&[decision]).inc();
+
                 if matches!(ddos_action, DDoSAction::Block) {
                     let mut resp = ResponseHeader::build(429, None)?;
                     resp.insert_header("Retry-After", "60")?;
@@ -325,6 +346,10 @@ impl ProxyHttp for SunbeamProxy {
                 "pipeline"
             );
 
+            metrics::SCANNER_DECISIONS
+                .with_label_values(&[decision, &reason])
+                .inc();
+
             if decision == "block" {
                 let mut resp = ResponseHeader::build(403, None)?;
                 resp.insert_header("Content-Length", "0")?;
@@ -362,6 +387,10 @@ impl ProxyHttp for SunbeamProxy {
                     has_cookies = cookie.is_some(),
                     "pipeline"
                 );
+
+                metrics::RATE_LIMIT_DECISIONS
+                    .with_label_values(&[decision])
+                    .inc();
 
                 if let RateLimitResult::Reject { retry_after } = rl_result {
                     let mut resp = ResponseHeader::build(429, None)?;
@@ -491,6 +520,15 @@ impl ProxyHttp for SunbeamProxy {
                 )
             })?;
 
+        // Forward X-Request-Id to upstream.
+        upstream_req.insert_header("x-request-id", &ctx.request_id).map_err(|e| {
+            pingora_core::Error::because(
+                pingora_core::ErrorType::InternalError,
+                "failed to insert x-request-id",
+                e,
+            )
+        })?;
+
         if ctx.route.as_ref().map(|r| r.websocket).unwrap_or(false) {
             for name in &[CONNECTION, UPGRADE] {
                 if let Some(val) = session.req_header().headers.get(name.clone()) {
@@ -535,6 +573,20 @@ impl ProxyHttp for SunbeamProxy {
         Ok(())
     }
 
+    /// Add X-Request-Id response header so clients can correlate.
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut RequestCtx,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let _ = upstream_response.insert_header("x-request-id", &ctx.request_id);
+        Ok(())
+    }
+
     /// Emit a structured JSON audit log line for every request.
     async fn logging(
         &self,
@@ -544,10 +596,15 @@ impl ProxyHttp for SunbeamProxy {
     ) where
         Self::CTX: Send + Sync,
     {
+        metrics::ACTIVE_CONNECTIONS.dec();
+
         let status = session
             .response_written()
             .map_or(0, |r| r.status.as_u16());
         let duration_ms = ctx.start_time.elapsed().as_millis() as u64;
+        let duration_secs = ctx.start_time.elapsed().as_secs_f64();
+        let method_str = session.req_header().method.to_string();
+        let host = extract_host(session);
         let backend = ctx
             .route
             .as_ref()
@@ -562,6 +619,12 @@ impl ProxyHttp for SunbeamProxy {
                     .unwrap_or_else(|| "-".to_string())
             });
         let error_str = error.map(|e| e.to_string());
+
+        // Record Prometheus metrics.
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&[&method_str, &host, &status.to_string(), backend])
+            .inc();
+        metrics::REQUEST_DURATION.observe(duration_secs);
 
         let content_length: u64 = session
             .req_header()
@@ -609,8 +672,9 @@ impl ProxyHttp for SunbeamProxy {
 
         tracing::info!(
             target = "audit",
+            request_id = %ctx.request_id,
             method  = %session.req_header().method,
-            host    = %extract_host(session),
+            host    = %host,
             path    = %session.req_header().uri.path(),
             query,
             client_ip,
@@ -678,6 +742,8 @@ mod tests {
         let ctx = RequestCtx {
             route: None,
             start_time: Instant::now(),
+            request_id: "1".to_string(),
+            span: tracing::Span::none(),
             acme_backend: None,
             strip_prefix: None,
             downstream_scheme: "https",
@@ -704,5 +770,12 @@ mod tests {
         assert!(req.headers.get("expect").is_none(), "expect header should be gone after remove_header");
         // Content-Length must survive the strip.
         assert!(req.headers.get("content-length").is_some());
+    }
+
+    #[test]
+    fn test_request_id_is_uuid_v4() {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(id.len(), 36);
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
     }
 }

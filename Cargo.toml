@@ -52,6 +52,9 @@ dns-lookup  = "2"
 # Prometheus metrics
 prometheus  = "0.13"
 
+# Request IDs
+uuid = { version = "1", features = ["v4"] }
+
 # Rustls crypto provider — must be installed before any TLS init
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 
