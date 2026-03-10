@@ -15,6 +15,7 @@ pub struct ScannerDetector {
     weights: [f64; NUM_SCANNER_WEIGHTS],
     threshold: f64,
     norm_params: ScannerNormParams,
+    use_ensemble: bool,
 }
 
 impl ScannerDetector {
@@ -42,6 +43,39 @@ impl ScannerDetector {
             weights: model.weights,
             threshold: model.threshold,
             norm_params: model.norm_params.clone(),
+            use_ensemble: false,
+        }
+    }
+
+    /// Create a detector that uses the ensemble (decision tree + MLP) path
+    /// instead of the linear model. No model file needed — weights are compiled in.
+    pub fn new_ensemble(routes: &[RouteConfig]) -> Self {
+        let fragment_hashes: FxHashSet<u64> = crate::scanner::train::DEFAULT_FRAGMENTS
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+
+        let extension_hashes: FxHashSet<u64> = SUSPICIOUS_EXTENSIONS_LIST
+            .iter()
+            .map(|e| fx_hash_bytes(e.as_bytes()))
+            .collect();
+
+        let configured_hosts: FxHashSet<u64> = routes
+            .iter()
+            .map(|r| fx_hash_bytes(r.host_prefix.as_bytes()))
+            .collect();
+
+        Self {
+            fragment_hashes,
+            extension_hashes,
+            configured_hosts,
+            weights: [0.0; NUM_SCANNER_WEIGHTS],
+            threshold: 0.5,
+            norm_params: ScannerNormParams {
+                mins: [0.0; NUM_SCANNER_FEATURES],
+                maxs: [1.0; NUM_SCANNER_FEATURES],
+            },
+            use_ensemble: true,
         }
     }
 
@@ -85,6 +119,25 @@ impl ScannerDetector {
                 score: -1.0,
                 reason: "allowlist:host+browser",
             };
+        }
+
+        if self.use_ensemble {
+            // Ensemble path: extract f32 features → decision tree + MLP.
+            let raw_f32 = features::extract_features_f32(
+                method, path, host_prefix,
+                has_cookies, has_referer, has_accept_language,
+                accept, user_agent, content_length,
+                &self.fragment_hashes, &self.extension_hashes, &self.configured_hosts,
+            );
+            let ev = crate::ensemble::scanner::scanner_ensemble_predict(&raw_f32);
+            crate::metrics::SCANNER_ENSEMBLE_PATH
+                .with_label_values(&[match ev.path {
+                    crate::ensemble::scanner::EnsemblePath::TreeBlock => "tree_block",
+                    crate::ensemble::scanner::EnsemblePath::TreeAllow => "tree_allow",
+                    crate::ensemble::scanner::EnsemblePath::Mlp => "mlp",
+                }])
+                .inc();
+            return ev.into();
         }
 
         // 1. Extract 12 features

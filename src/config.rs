@@ -60,7 +60,8 @@ fn default_config_configmap() -> String { "pingora-config".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DDoSConfig {
-    pub model_path: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
     #[serde(default = "default_k")]
     pub k: usize,
     #[serde(default = "default_threshold")]
@@ -73,6 +74,8 @@ pub struct DDoSConfig {
     pub min_events: usize,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_use_ensemble")]
+    pub use_ensemble: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -97,7 +100,8 @@ pub struct BucketConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScannerConfig {
-    pub model_path: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
     #[serde(default = "default_scanner_threshold")]
     pub threshold: f64,
     #[serde(default = "default_scanner_enabled")]
@@ -111,6 +115,8 @@ pub struct ScannerConfig {
     /// TTL (seconds) for verified bot IP cache entries.
     #[serde(default = "default_bot_cache_ttl")]
     pub bot_cache_ttl_secs: u64,
+    #[serde(default = "default_use_ensemble")]
+    pub use_ensemble: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -130,6 +136,7 @@ pub struct BotAllowlistRule {
 }
 
 fn default_bot_cache_ttl() -> u64 { 86400 } // 24h
+fn default_use_ensemble() -> bool { true }
 
 fn default_scanner_threshold() -> f64 { 0.5 }
 fn default_scanner_enabled() -> bool { true }

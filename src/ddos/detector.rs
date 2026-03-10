@@ -15,6 +15,7 @@ pub struct DDoSDetector {
     window_secs: u64,
     window_capacity: usize,
     min_events: usize,
+    use_ensemble: bool,
 }
 
 fn shard_index(ip: &IpAddr) -> usize {
@@ -34,6 +35,24 @@ impl DDoSDetector {
             window_secs: config.window_secs,
             window_capacity: config.window_capacity,
             min_events: config.min_events,
+            use_ensemble: false,
+        }
+    }
+
+    /// Create a detector that uses the ensemble (decision tree + MLP) path.
+    /// A dummy model is still needed for fallback, but ensemble inference
+    /// takes priority when `use_ensemble` is true.
+    pub fn new_ensemble(model: TrainedModel, config: &DDoSConfig) -> Self {
+        let shards = (0..NUM_SHARDS)
+            .map(|_| RwLock::new(FxHashMap::default()))
+            .collect();
+        Self {
+            model,
+            shards,
+            window_secs: config.window_secs,
+            window_capacity: config.window_capacity,
+            min_events: config.min_events,
+            use_ensemble: true,
         }
     }
 
@@ -79,6 +98,24 @@ impl DDoSDetector {
         }
 
         let features = state.extract_features(self.window_secs);
+
+        if self.use_ensemble {
+            // Cast f64 features to f32 array for ensemble inference.
+            let mut f32_features = [0.0f32; 14];
+            for (i, &v) in features.iter().enumerate().take(14) {
+                f32_features[i] = v as f32;
+            }
+            let ev = crate::ensemble::ddos::ddos_ensemble_predict(&f32_features);
+            crate::metrics::DDOS_ENSEMBLE_PATH
+                .with_label_values(&[match ev.path {
+                    crate::ensemble::ddos::DDoSEnsemblePath::TreeBlock => "tree_block",
+                    crate::ensemble::ddos::DDoSEnsemblePath::TreeAllow => "tree_allow",
+                    crate::ensemble::ddos::DDoSEnsemblePath::Mlp => "mlp",
+                }])
+                .inc();
+            return ev.action;
+        }
+
         self.model.classify(&features)
     }
 

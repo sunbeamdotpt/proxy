@@ -167,6 +167,30 @@ fn path_has_traversal(path: &str) -> f64 {
     0.0
 }
 
+pub const NUM_SCANNER_FEATURES_F32: usize = NUM_SCANNER_FEATURES;
+pub type ScannerFeatureVectorF32 = [f32; NUM_SCANNER_FEATURES];
+
+/// Same as `extract_features` but returns f32 for ensemble inference.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_features_f32(
+    method: &str, path: &str, host_prefix: &str,
+    has_cookies: bool, has_referer: bool, has_accept_language: bool,
+    accept: &str, user_agent: &str, content_length: u64,
+    fragment_hashes: &FxHashSet<u64>,
+    extension_hashes: &FxHashSet<u64>,
+    configured_hosts: &FxHashSet<u64>,
+) -> ScannerFeatureVectorF32 {
+    let f64_features = extract_features(
+        method, path, host_prefix, has_cookies, has_referer, has_accept_language,
+        accept, user_agent, content_length, fragment_hashes, extension_hashes, configured_hosts,
+    );
+    let mut out = [0.0f32; NUM_SCANNER_FEATURES];
+    for i in 0..NUM_SCANNER_FEATURES {
+        out[i] = f64_features[i] as f32;
+    }
+    out
+}
+
 pub fn fx_hash_bytes(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();

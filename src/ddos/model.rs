@@ -48,6 +48,21 @@ impl TrainedModel {
         })
     }
 
+    /// Create an empty model (no training points). Used when the ensemble
+    /// path is active and the KNN model is not needed.
+    pub fn empty(k: usize, threshold: f64) -> Self {
+        Self {
+            points: vec![],
+            labels: vec![],
+            norm_params: NormParams {
+                mins: [0.0; NUM_FEATURES],
+                maxs: [1.0; NUM_FEATURES],
+            },
+            k,
+            threshold,
+        }
+    }
+
     pub fn from_serialized(model: SerializedModel) -> Self {
         Self {
             points: model.points,
