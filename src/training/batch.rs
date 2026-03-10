@@ -13,22 +13,16 @@ use burn::prelude::*;
 /// A single normalized training item ready for batching.
 #[derive(Clone, Debug)]
 pub struct TrainingItem {
-    /// Features.
     pub features: Vec<f32>,
-    /// Label.
     pub label: i32,
-    /// Weight.
     pub weight: f32,
 }
 
 /// A batch of training items as tensors.
 #[derive(Clone, Debug)]
 pub struct TrainingBatch<B: Backend> {
-    /// Features.
     pub features: Tensor<B, 2>,
-    /// Labels.
     pub labels: Tensor<B, 1, Int>,
-    /// Weights.
     pub weights: Tensor<B, 2>,
 }
 

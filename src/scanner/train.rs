@@ -11,13 +11,9 @@ use serde::{Deserialize, Serialize};
 /// Legacy linear scanner model — kept for the `train-scanner` CLI command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerModel {
-    /// Weights.
     pub weights: [f64; NUM_SCANNER_WEIGHTS],
-    /// Threshold.
     pub threshold: f64,
-    /// Norm params.
     pub norm_params: ScannerNormParams,
-    /// Fragments.
     pub fragments: Vec<String>,
 }
 
@@ -119,17 +115,9 @@ pub fn train_and_evaluate(
     }
 
     for (fields, host_prefix) in &parsed_entries {
-        let has_cookies = fields.has_cookies.unwrap_or(false);
-        let has_referer = fields
-            .referer
-            .as_ref()
-            .map(|r| r != "-" && !r.is_empty())
-            .unwrap_or(false);
-        let has_accept_language = fields
-            .accept_language
-            .as_ref()
-            .map(|a| a != "-" && !a.is_empty())
-            .unwrap_or(false);
+        let has_cookies = fields.has_cookies;
+        let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -180,17 +168,9 @@ pub fn train_and_evaluate(
             log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
         }
         for (fields, host_prefix) in &csic_entries {
-            let has_cookies = fields.has_cookies.unwrap_or(false);
-            let has_referer = fields
-                .referer
-                .as_ref()
-                .map(|r| r != "-" && !r.is_empty())
-                .unwrap_or(false);
-            let has_accept_language = fields
-                .accept_language
-                .as_ref()
-                .map(|a| a != "-" && !a.is_empty())
-                .unwrap_or(false);
+            let has_cookies = fields.has_cookies;
+            let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+            let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
             let feats = features::extract_features(
                 &fields.method,

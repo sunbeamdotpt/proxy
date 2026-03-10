@@ -26,11 +26,8 @@ struct ProbeFields {
 /// Top-level JSON line written by the tracing JSON layer.
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct AuditLogLine {
-    /// Timestamp.
     pub timestamp: String,
-    /// Level.
     pub level: String,
-    /// Fields.
     pub fields: AuditFields,
     /// Span information injected by tracing layers.
     #[serde(default)]
@@ -58,72 +55,50 @@ pub struct AuditFields {
 
     // --- request identity ---
     #[serde(default)]
-    /// Request id.
     pub request_id: String,
-    /// Method.
     pub method: String,
-    /// Host.
     pub host: String,
-    /// Path.
     pub path: String,
     #[serde(default)]
-    /// Query.
     pub query: String,
-    /// Client ip.
     pub client_ip: String,
 
     // --- response ---
     #[serde(deserialize_with = "flexible_u16")]
-    /// Status.
     pub status: u16,
     #[serde(deserialize_with = "flexible_u64")]
-    /// Duration ms.
     pub duration_ms: u64,
     #[serde(default, deserialize_with = "flexible_u64_default")]
-    /// Content length.
     pub content_length: u64,
     #[serde(default, deserialize_with = "flexible_u64_default")]
-    /// Response bytes.
     pub response_bytes: u64,
 
     // --- headers ---
     #[serde(default = "default_dash")]
-    /// User agent.
     pub user_agent: String,
     #[serde(default = "default_dash")]
-    /// Referer.
     pub referer: String,
     #[serde(default = "default_dash")]
-    /// Accept language.
     pub accept_language: String,
     #[serde(default = "default_dash")]
-    /// Accept.
     pub accept: String,
     #[serde(default = "default_dash")]
-    /// Accept encoding.
     pub accept_encoding: String,
     #[serde(default)]
-    /// Has cookies.
     pub has_cookies: bool,
     #[serde(default = "default_dash")]
-    /// Connection.
     pub connection: String,
 
     // --- infra ---
     #[serde(default = "default_dash")]
-    /// Cf country.
     pub cf_country: String,
     #[serde(default)]
-    /// Backend.
     pub backend: String,
     #[serde(default)]
-    /// Error.
     pub error: String,
     #[serde(default = "default_dash")]
-    /// Http version.
     pub http_version: String,
     #[serde(default)]
-    /// Header count.
     pub header_count: u16,
 
     // --- training only (not emitted by proxy, but present in external datasets) ---
@@ -203,7 +178,6 @@ fn default_dash() -> String {
     "-".to_string()
 }
 
-/// Flexible u64.
 pub fn flexible_u64<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<u64, D::Error> {
@@ -235,7 +209,6 @@ fn flexible_u64_default<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-/// Flexible u16.
 pub fn flexible_u16<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<u16, D::Error> {

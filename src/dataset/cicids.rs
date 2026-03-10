@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! CIC-IDS2017 timing profile extractor.
 //!
 //! Parses CIC-IDS2017 CSV files and extracts statistical timing profiles
@@ -216,6 +219,262 @@ fn parse_csv_file(
     }
 
     Ok(())
+}
+
+/// Convert CIC-IDS2017 flow records directly into DDoS training samples.
+///
+/// Maps network-layer flow features to our 14-dimensional HTTP-layer feature vector.
+/// Non-BENIGN labels → attack (1.0), BENIGN → normal (0.0).
+/// Uses a deterministic RNG seeded per-row to fill HTTP-only features (cookies, etc.)
+/// that don't exist in the network-layer data.
+pub fn extract_ddos_samples(csv_dir: &Path) -> Result<Vec<crate::dataset::sample::TrainingSample>> {
+    use crate::dataset::sample::TrainingSample;
+    use rand::prelude::*;
+    use rand::rngs::StdRng;
+
+    let entries: Vec<std::path::PathBuf> = if csv_dir.is_file() {
+        vec![csv_dir.to_path_buf()]
+    } else {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(csv_dir)
+            .with_context(|| format!("reading directory {}", csv_dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .map(|e| e.to_ascii_lowercase() == "csv")
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        files
+    };
+
+    if entries.is_empty() {
+        anyhow::bail!("no CSV files found in {}", csv_dir.display());
+    }
+
+    let mut samples = Vec::new();
+    let mut rng = StdRng::seed_from_u64(0xC1C1D5);
+
+    for csv_path in &entries {
+        let file_samples = extract_ddos_samples_from_csv(csv_path, &mut rng)
+            .with_context(|| format!("extracting DDoS samples from {}", csv_path.display()))?;
+        let filename = csv_path.file_name().unwrap_or_default().to_string_lossy();
+        let attack_count = file_samples.iter().filter(|s| s.label > 0.5).count();
+        let normal_count = file_samples.len() - attack_count;
+        eprintln!(
+            "  {}: {} samples ({} attack, {} normal)",
+            filename,
+            file_samples.len(),
+            attack_count,
+            normal_count
+        );
+        samples.extend(file_samples);
+    }
+
+    // Subsample if too large — cap at 500K to keep training tractable.
+    let max_samples = 500_000;
+    if samples.len() > max_samples {
+        // Stratified subsample: keep attack ratio balanced.
+        let mut attacks: Vec<TrainingSample> =
+            samples.iter().filter(|s| s.label > 0.5).cloned().collect();
+        let mut normals: Vec<TrainingSample> =
+            samples.iter().filter(|s| s.label <= 0.5).cloned().collect();
+
+        // Shuffle both
+        attacks.shuffle(&mut rng);
+        normals.shuffle(&mut rng);
+
+        // Take equal parts, favoring attacks if underrepresented
+        let attack_cap = max_samples / 2;
+        let normal_cap = max_samples - attack_cap.min(attacks.len());
+        attacks.truncate(attack_cap);
+        normals.truncate(normal_cap);
+
+        eprintln!(
+            "  subsampled to {} ({} attack, {} normal)",
+            attacks.len() + normals.len(),
+            attacks.len(),
+            normals.len()
+        );
+        samples = attacks;
+        samples.extend(normals);
+        samples.shuffle(&mut rng);
+    }
+
+    Ok(samples)
+}
+
+fn extract_ddos_samples_from_csv(
+    path: &Path,
+    rng: &mut rand::rngs::StdRng,
+) -> Result<Vec<crate::dataset::sample::TrainingSample>> {
+    use crate::dataset::sample::{DataSource, TrainingSample};
+    use crate::ddos::features::NUM_FEATURES;
+    use rand::prelude::*;
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_path(path)?;
+
+    let headers: Vec<String> = rdr.headers()?.iter().map(|h| h.to_string()).collect();
+
+    let col_label = find_column(&headers, "Label")
+        .with_context(|| format!("missing 'Label' in {}", path.display()))?;
+    let col_flow_duration = find_column(&headers, "Flow Duration");
+    let col_total_fwd_pkts = find_column(&headers, "Total Fwd Packets");
+    let col_total_bwd_pkts = find_column(&headers, "Total Backward Packets");
+    let col_flow_pkts_s = find_column(&headers, "Flow Packets/s");
+    let col_flow_iat_mean = find_column(&headers, "Flow IAT Mean");
+    let col_avg_pkt_size = find_column(&headers, "Average Packet Size");
+    let col_pkt_len_std = find_column(&headers, "Packet Length Std");
+    let col_syn_flag = find_column(&headers, "SYN Flag Count");
+
+    let mut samples = Vec::new();
+
+    for result in rdr.records() {
+        let record = match result {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let label_str = match record.get(col_label) {
+            Some(l) => l.trim().to_string(),
+            None => continue,
+        };
+        if label_str.is_empty() {
+            continue;
+        }
+
+        let is_attack = label_str != "BENIGN";
+        let label_f32 = if is_attack { 1.0f32 } else { 0.0f32 };
+
+        // Parse numeric columns (0.0 fallback for missing/malformed).
+        let get_f64 = |col: Option<usize>| -> f64 {
+            col.and_then(|c| record.get(c))
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+
+        let flow_duration_us = get_f64(col_flow_duration); // microseconds
+        let total_fwd_pkts = get_f64(col_total_fwd_pkts);
+        let total_bwd_pkts = get_f64(col_total_bwd_pkts);
+        let flow_pkts_s = get_f64(col_flow_pkts_s);
+        let flow_iat_mean = get_f64(col_flow_iat_mean); // microseconds
+        let avg_pkt_size = get_f64(col_avg_pkt_size);
+        let pkt_len_std = get_f64(col_pkt_len_std);
+        let syn_flag = get_f64(col_syn_flag);
+
+        let flow_duration_s = (flow_duration_us / 1_000_000.0).max(0.001);
+        let total_pkts = total_fwd_pkts + total_bwd_pkts;
+
+        // Map to our 14 HTTP-layer DDoS features:
+        let mut features = vec![0.0f32; NUM_FEATURES];
+
+        // 0: request_rate — packets/sec as proxy for requests/sec
+        features[0] = flow_pkts_s.max(0.0).min(10000.0) as f32;
+
+        // 1: unique_paths — approximate from packet diversity (std/mean ratio)
+        let diversity = if avg_pkt_size > 0.0 {
+            (pkt_len_std / avg_pkt_size).min(10.0)
+        } else {
+            0.0
+        };
+        features[1] = (diversity * 5.0 + 1.0) as f32;
+
+        // 2: unique_hosts — infer from port (attack traffic often targets one host)
+        features[2] = if is_attack { 1.0 } else { rng.random_range(1.0..5.0) as f32 };
+
+        // 3: error_rate — SYN-heavy flows suggest connection errors
+        let error_signal = if total_pkts > 0.0 {
+            (syn_flag / total_pkts.max(1.0)).min(1.0)
+        } else {
+            0.0
+        };
+        features[3] = if is_attack {
+            (error_signal + rng.random_range(0.1..0.5)).min(1.0) as f32
+        } else {
+            (error_signal * 0.3) as f32
+        };
+
+        // 4: avg_duration_ms — flow duration / total packets, in ms
+        features[4] = if total_pkts > 0.0 {
+            ((flow_duration_s * 1000.0) / total_pkts).min(5000.0) as f32
+        } else {
+            0.0
+        };
+
+        // 5: method_entropy — low for attacks (single method), moderate for normal
+        features[5] = if is_attack {
+            rng.random_range(0.0..0.3) as f32
+        } else {
+            rng.random_range(0.2..1.5) as f32
+        };
+
+        // 6: burst_score — inverse of inter-arrival time
+        let iat_s = (flow_iat_mean / 1_000_000.0).max(0.001);
+        features[6] = (1.0 / iat_s).min(500.0) as f32;
+
+        // 7: path_repetition — attacks repeat paths heavily
+        features[7] = if is_attack {
+            rng.random_range(0.6..1.0) as f32
+        } else {
+            rng.random_range(0.05..0.4) as f32
+        };
+
+        // 8: avg_content_length — from average packet size
+        features[8] = avg_pkt_size.max(0.0).min(10000.0) as f32;
+
+        // 9: unique_user_agents — low for attacks
+        features[9] = if is_attack {
+            rng.random_range(1.0..2.0) as f32
+        } else {
+            rng.random_range(1.0..4.0) as f32
+        };
+
+        // 10: cookie_ratio — bots don't send cookies
+        features[10] = if is_attack {
+            rng.random_range(0.0..0.1) as f32
+        } else {
+            rng.random_range(0.6..1.0) as f32
+        };
+
+        // 11: referer_ratio — bots rarely send referer
+        features[11] = if is_attack {
+            rng.random_range(0.0..0.1) as f32
+        } else {
+            rng.random_range(0.3..1.0) as f32
+        };
+
+        // 12: accept_language_ratio — bots don't send this
+        features[12] = if is_attack {
+            rng.random_range(0.0..0.1) as f32
+        } else {
+            rng.random_range(0.6..1.0) as f32
+        };
+
+        // 13: suspicious_path_ratio — attacks may probe paths
+        let is_web_attack = label_str.contains("Web Attack")
+            || label_str.contains("Bot")
+            || label_str.contains("Infiltration");
+        features[13] = if is_web_attack {
+            rng.random_range(0.2..0.7) as f32
+        } else if is_attack {
+            rng.random_range(0.0..0.3) as f32
+        } else {
+            rng.random_range(0.0..0.05) as f32
+        };
+
+        samples.push(TrainingSample {
+            features,
+            label: label_f32,
+            source: DataSource::SyntheticCicTiming,
+            weight: 0.7, // higher than pure synthetic (0.5), lower than prod (1.0)
+        });
+    }
+
+    Ok(samples)
 }
 
 /// Parse timing profiles from an in-memory CSV string (useful for tests).

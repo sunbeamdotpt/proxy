@@ -65,6 +65,10 @@ pub struct SunbeamProxy {
     pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
     /// Optional cluster handle for multi-node bandwidth tracking.
     pub cluster: Option<Arc<ClusterHandle>>,
+    /// When true, DDoS detector logs decisions but never blocks traffic.
+    pub ddos_observe_only: bool,
+    /// When true, scanner detector logs decisions but never blocks traffic.
+    pub scanner_observe_only: bool,
 }
 
 /// Requestctx.
@@ -1223,34 +1227,32 @@ impl ProxyHttp for SunbeamProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
 
-        ctx.span.in_scope(|| {
-            tracing::info!(
-                target = "audit",
-                request_id = %ctx.request_id,
-                method  = %session.req_header().method,
-                host    = %host,
-                path    = %session.req_header().uri.path(),
-                query,
-                client_ip,
-                status,
-                duration_ms,
-                content_length,
-                response_bytes,
-                user_agent,
-                referer,
-                accept_language,
-                accept,
-                accept_encoding,
-                has_cookies,
-                cf_country,
-                backend,
-                error   = error_str,
-                http_version,
-                header_count,
-                connection,
-                "request"
-            );
-        });
+        tracing::info!(
+            target = "audit",
+            request_id = %ctx.request_id,
+            method  = %session.req_header().method,
+            host    = %host,
+            path    = %session.req_header().uri.path(),
+            query,
+            client_ip,
+            status,
+            duration_ms,
+            content_length,
+            response_bytes,
+            user_agent,
+            referer,
+            accept_language,
+            accept,
+            accept_encoding,
+            has_cookies,
+            cf_country,
+            backend,
+            error   = error_str,
+            http_version,
+            header_count,
+            connection,
+            "request"
+        );
 
         if let Some(detector) = &self.ddos_detector {
             if let Some(ip) = extract_client_ip(session) {

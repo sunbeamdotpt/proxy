@@ -14,24 +14,16 @@ use std::io::BufRead;
 /// which produces bincode model files for offline evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrafficLabel {
-    /// Normal.
     Normal,
-    /// Attack.
     Attack,
 }
 
 #[derive(Serialize, Deserialize)]
-/// Serializedmodel.
 pub struct SerializedModel {
-    /// Points.
     pub points: Vec<FeatureVector>,
-    /// Labels.
     pub labels: Vec<TrafficLabel>,
-    /// Norm params.
     pub norm_params: NormParams,
-    /// K.
     pub k: usize,
-    /// Threshold.
     pub threshold: f64,
 }
 
@@ -292,12 +284,12 @@ pub fn parse_logs(input: &str) -> Result<FxHashMap<String, LogIpState>> {
         state.statuses.push(entry.fields.status);
         state.durations.push(entry.fields.duration_ms.min(u32::MAX as u64) as u32);
         state.content_lengths.push(entry.fields.content_length.min(u32::MAX as u64) as u32);
-        state.has_cookies.push(entry.fields.has_cookies.unwrap_or(false));
+        state.has_cookies.push(entry.fields.has_cookies);
         state.has_referer.push(
-            entry.fields.referer.as_deref().map(|r| r != "-").unwrap_or(false),
+            !entry.fields.referer.is_empty() && entry.fields.referer != "-",
         );
         state.has_accept_language.push(
-            entry.fields.accept_language.as_deref().map(|a| a != "-").unwrap_or(false),
+            !entry.fields.accept_language.is_empty() && entry.fields.accept_language != "-",
         );
         state.suspicious_paths.push(
             crate::ddos::features::is_suspicious_path(&entry.fields.path),
