@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};

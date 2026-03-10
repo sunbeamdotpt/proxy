@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::config::{BucketConfig, RateLimitConfig};
 use crate::rate_limit::cidr::{self, CidrBlock};
 use crate::rate_limit::key::RateLimitKey;

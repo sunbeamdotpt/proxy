@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 /// Decision from a tree leaf node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeDecision {

@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::config::BotAllowlistRule;
 use crate::rate_limit::cidr::CidrBlock;
 use rustc_hash::FxHashMap;

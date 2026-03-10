@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use std::net::IpAddr;
 
 /// A parsed CIDR block for allowlist matching.

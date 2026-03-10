@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use futures::StreamExt;
 use k8s_openapi::api::networking::v1::Ingress;
 use kube::{runtime::watcher, Api, Client};

@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! Dual-stack TCP listener implementation inspired by `tokio_dual_stack`.
 //!
 //! This module provides a `DualStackTcpListener` that can listen on both IPv4 and IPv6

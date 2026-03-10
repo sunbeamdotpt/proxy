@@ -1,3 +1,6 @@
+# Copyright Sunbeam Studios 2026
+# SPDX-License-Identifier: Apache-2.0
+
 # ── Stage 1: build ──────────────────────────────────────────────
 FROM rust:slim AS builder
 
@@ -23,6 +26,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src benches && \
     echo 'fn main() {}' > src/main.rs && \
     echo 'fn main() {}' > benches/scanner_bench.rs && \
+    echo 'fn main() {}' > benches/ddos_bench.rs && \
     cargo build --release --target "$(cat /rust-target)" ; \
     rm -rf src benches
 
@@ -46,7 +50,6 @@ FROM cgr.dev/chainguard/static:latest
 
 COPY --from=builder /tini                       /tini
 COPY --from=builder /sunbeam-proxy              /usr/local/bin/sunbeam-proxy
-COPY models/ /models/
 
 EXPOSE 80 443
 

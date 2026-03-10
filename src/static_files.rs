@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use std::path::{Path, PathBuf};

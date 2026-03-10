@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 /// Gaussian Process surrogate with RBF kernel and Cholesky solver.
 /// Designed for <200 observations in 4-10 dimensions.
 

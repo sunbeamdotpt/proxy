@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use std::net::IpAddr;
 use sunbeam_proxy::config::{BucketConfig, RateLimitConfig};
 use sunbeam_proxy::rate_limit::key::{self, RateLimitKey};

@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! Integration test for dual-stack TCP listener functionality.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
