@@ -178,6 +178,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 1. Init telemetry (JSON logs + optional OTEL traces).
     telemetry::init(&cfg.telemetry.otlp_endpoint);
 
+    // 1b. Spawn metrics HTTP server (needs a tokio runtime for the TCP listener).
+    let metrics_port = cfg.telemetry.metrics_port;
+
     // 2. Load DDoS detection model if configured.
     let ddos_detector = if let Some(ddos_cfg) = &cfg.ddos {
         if ddos_cfg.enabled {
@@ -366,7 +369,22 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     server.add_service(svc);
 
-    // 5b. SSH TCP passthrough (port 22 → Gitea SSH), if configured.
+    // 5b. Spawn metrics + health HTTP server on its own thread.
+    if metrics_port > 0 {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("metrics runtime");
+            rt.block_on(async {
+                sunbeam_proxy::metrics::spawn_metrics_server(metrics_port);
+                // Keep the runtime alive.
+                std::future::pending::<()>().await;
+            });
+        });
+    }
+
+    // 5c. SSH TCP passthrough (port 22 → Gitea SSH), if configured.
     if let Some(ssh_cfg) = &cfg.ssh {
         let listen = ssh_cfg.listen.clone();
         let backend = ssh_cfg.backend.clone();

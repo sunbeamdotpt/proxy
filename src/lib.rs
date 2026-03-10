@@ -3,6 +3,7 @@
 // without going through the binary entry point.
 pub mod acme;
 pub mod config;
+pub mod metrics;
 pub mod ddos;
 pub mod dual_stack;
 pub mod proxy;

@@ -131,7 +131,12 @@ pub struct TlsFileConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetryConfig {
     pub otlp_endpoint: String,
+    /// Port for the Prometheus metrics scrape endpoint. 0 = disabled.
+    #[serde(default = "default_metrics_port")]
+    pub metrics_port: u16,
 }
+
+fn default_metrics_port() -> u16 { 9090 }
 
 /// A path-prefix sub-route within a virtual host.
 /// Matched longest-prefix-first when multiple entries share a prefix.
