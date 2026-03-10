@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sunbeam_proxy::config::RouteConfig;
 use sunbeam_proxy::ensemble::gen::scanner_weights;
@@ -5,43 +8,9 @@ use sunbeam_proxy::ensemble::mlp::mlp_predict_32;
 use sunbeam_proxy::ensemble::scanner::scanner_ensemble_predict;
 use sunbeam_proxy::ensemble::tree::tree_predict;
 use sunbeam_proxy::scanner::detector::ScannerDetector;
-use sunbeam_proxy::scanner::features::{
-    self, fx_hash_bytes, ScannerNormParams, NUM_SCANNER_FEATURES, NUM_SCANNER_WEIGHTS,
-};
-use sunbeam_proxy::scanner::model::ScannerModel;
+use sunbeam_proxy::scanner::features::{self, fx_hash_bytes};
 
 fn make_detector() -> ScannerDetector {
-    // Use realistic trained weights (from the base model)
-    let mut weights = [0.0f64; NUM_SCANNER_WEIGHTS];
-    weights[0] = 0.155;   // suspicious_path_score
-    weights[1] = 0.039;   // path_depth
-    weights[2] = 0.328;   // has_suspicious_extension
-    weights[3] = -1.376;  // has_cookies
-    weights[4] = -0.196;  // has_referer
-    weights[5] = -0.590;  // has_accept_language
-    weights[7] = -0.254;  // ua_category
-    weights[8] = 0.023;   // method_is_unusual
-    weights[11] = 0.001;  // path_has_traversal
-    weights[12] = 0.155;  // interaction:path*no_cookies
-    weights[13] = 1.051;  // interaction:no_host*no_lang
-    weights[14] = 0.461;  // bias
-
-    let model = ScannerModel {
-        weights,
-        threshold: 0.5,
-        norm_params: ScannerNormParams {
-            mins: [0.0; NUM_SCANNER_FEATURES],
-            maxs: [1.0; NUM_SCANNER_FEATURES],
-        },
-        fragments: vec![
-            ".env".into(), "wp-admin".into(), "wp-login".into(), "wp-includes".into(),
-            "wp-content".into(), "xmlrpc".into(), "phpinfo".into(), "phpmyadmin".into(),
-            "cgi-bin".into(), ".git".into(), ".htaccess".into(), ".htpasswd".into(),
-            "config.".into(), "admin".into(), "actuator".into(), "telescope".into(),
-            "debug".into(), "shell".into(), "eval-stdin".into(),
-        ],
-    };
-
     let routes = vec![
         RouteConfig {
             host_prefix: "admin".into(),
@@ -84,7 +53,7 @@ fn make_detector() -> ScannerDetector {
         },
     ];
 
-    ScannerDetector::new(&model, &routes)
+    ScannerDetector::new(&routes)
 }
 
 fn bench_check_normal_browser(c: &mut Criterion) {
@@ -95,9 +64,9 @@ fn bench_check_normal_browser(c: &mut Criterion) {
                 black_box("GET"),
                 black_box("/blog/hello-world"),
                 black_box("admin"),
-                black_box(true),   // has_cookies
-                black_box(true),   // has_referer
-                black_box(true),   // has_accept_language
+                black_box(true),
+                black_box(true),
+                black_box(true),
                 black_box("text/html,application/xhtml+xml"),
                 black_box("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"),
                 black_box(0),
@@ -208,10 +177,10 @@ fn bench_check_api_legitimate(c: &mut Criterion) {
             detector.check(
                 black_box("POST"),
                 black_box("/api/webhooks/github"),
-                black_box("unknown"),    // unknown host, no allowlist shortcut
+                black_box("unknown"),
                 black_box(false),
                 black_box(false),
-                black_box(true),         // has accept-language
+                black_box(true),
                 black_box("application/json"),
                 black_box("GitHub-Hookshot/abc123"),
                 black_box(1024),
@@ -255,7 +224,6 @@ fn bench_extract_features(c: &mut Criterion) {
 }
 
 fn bench_ensemble_scanner_full(c: &mut Criterion) {
-    // Raw features simulating a scanner probe
     let raw: [f32; 12] = [0.8, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 1.0];
     c.bench_function("ensemble::scanner full predict", |b| {
         b.iter(|| scanner_ensemble_predict(black_box(&raw)))

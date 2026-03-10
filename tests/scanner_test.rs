@@ -1,9 +1,14 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
+//! Scanner detection tests.
+//!
+//! The detector uses ensemble inference (decision tree + MLP) with compiled-in
+//! weights. These tests exercise the allowlist and ensemble classification paths.
+
 use sunbeam_proxy::config::RouteConfig;
 use sunbeam_proxy::scanner::detector::ScannerDetector;
-use sunbeam_proxy::scanner::features::{
-    ScannerNormParams, NUM_SCANNER_FEATURES, NUM_SCANNER_WEIGHTS,
-};
-use sunbeam_proxy::scanner::model::{ScannerAction, ScannerModel};
+use sunbeam_proxy::scanner::model::ScannerAction;
 
 fn test_routes() -> Vec<RouteConfig> {
     vec![
@@ -36,44 +41,8 @@ fn test_routes() -> Vec<RouteConfig> {
     ]
 }
 
-fn scanner_weights() -> [f64; NUM_SCANNER_WEIGHTS] {
-    let mut w = [0.0; NUM_SCANNER_WEIGHTS];
-    w[0] = 2.0;   // suspicious_path_score
-    w[2] = 2.0;   // has_suspicious_extension
-    w[3] = -2.0;  // has_cookies (negative = good)
-    w[4] = -1.0;  // has_referer
-    w[5] = -1.0;  // has_accept_language
-    w[6] = -0.5;  // accept_quality
-    w[7] = -1.0;  // ua_category (browser = good)
-    w[9] = -1.5;  // host_is_configured
-    w[11] = 2.0;  // path_has_traversal
-    w[12] = 1.5;  // interaction: suspicious_path AND no_cookies
-    w[13] = 1.0;  // interaction: unknown_host AND no_accept_lang
-    w[14] = 0.5;  // bias
-    w
-}
-
 fn make_detector() -> ScannerDetector {
-    let model = ScannerModel {
-        weights: scanner_weights(),
-        threshold: 0.5,
-        norm_params: ScannerNormParams {
-            mins: [0.0; NUM_SCANNER_FEATURES],
-            maxs: [1.0; NUM_SCANNER_FEATURES],
-        },
-        fragments: vec![
-            ".env".into(),
-            "wp-admin".into(),
-            "wp-login".into(),
-            "phpinfo".into(),
-            "phpmyadmin".into(),
-            ".git".into(),
-            "cgi-bin".into(),
-            ".htaccess".into(),
-            ".htpasswd".into(),
-        ],
-    };
-    ScannerDetector::new(&model, &test_routes())
+    ScannerDetector::new(&test_routes())
 }
 
 #[test]
@@ -113,7 +82,6 @@ fn env_probe_from_unknown_host_blocked() {
         "*/*", "curl/7.0", 0,
     );
     assert_eq!(v.action, ScannerAction::Block);
-    assert_eq!(v.reason, "model");
 }
 
 #[test]
@@ -125,7 +93,6 @@ fn wordpress_scan_blocked() {
         "*/*", "", 0,
     );
     assert_eq!(v.action, ScannerAction::Block);
-    assert_eq!(v.reason, "model");
 }
 
 #[test]
@@ -137,7 +104,6 @@ fn path_traversal_blocked() {
         "*/*", "python-requests/2.28", 0,
     );
     assert_eq!(v.action, ScannerAction::Block);
-    assert_eq!(v.reason, "model");
 }
 
 #[test]
@@ -149,7 +115,6 @@ fn legitimate_php_path_allowed() {
         "text/html", "Mozilla/5.0 Chrome/120", 0,
     );
     assert_eq!(v.action, ScannerAction::Allow);
-    // hits allowlist:host+cookies
 }
 
 #[test]
@@ -164,30 +129,4 @@ fn browser_on_known_host_without_cookies_allowed() {
     );
     assert_eq!(v.action, ScannerAction::Allow);
     assert_eq!(v.reason, "allowlist:host+browser");
-}
-
-#[test]
-fn model_serialization_roundtrip() {
-    let model = ScannerModel {
-        weights: scanner_weights(),
-        threshold: 0.5,
-        norm_params: ScannerNormParams {
-            mins: [0.0; NUM_SCANNER_FEATURES],
-            maxs: [1.0; NUM_SCANNER_FEATURES],
-        },
-        fragments: vec![".env".into(), "wp-admin".into()],
-    };
-
-    let dir = std::env::temp_dir().join("scanner_e2e_test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("test_scanner_model.bin");
-
-    model.save(&path).unwrap();
-    let loaded = ScannerModel::load(&path).unwrap();
-
-    assert_eq!(loaded.weights, model.weights);
-    assert_eq!(loaded.threshold, model.threshold);
-    assert_eq!(loaded.fragments, model.fragments);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
