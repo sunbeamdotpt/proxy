@@ -45,6 +45,11 @@ fn make_detector() -> ScannerDetector {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         },
         RouteConfig {
             host_prefix: "src".into(),
@@ -52,6 +57,11 @@ fn make_detector() -> ScannerDetector {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         },
         RouteConfig {
             host_prefix: "docs".into(),
@@ -59,6 +69,11 @@ fn make_detector() -> ScannerDetector {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         },
     ];
 

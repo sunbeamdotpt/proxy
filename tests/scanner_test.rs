@@ -13,6 +13,11 @@ fn test_routes() -> Vec<RouteConfig> {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         },
         RouteConfig {
             host_prefix: "api".into(),
@@ -20,6 +25,11 @@ fn test_routes() -> Vec<RouteConfig> {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         },
     ]
 }

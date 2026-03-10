@@ -10,3 +10,4 @@ pub mod proxy;
 pub mod rate_limit;
 pub mod scanner;
 pub mod ssh;
+pub mod static_files;

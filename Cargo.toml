@@ -55,6 +55,13 @@ prometheus  = "0.13"
 # Request IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Static file serving and body rewriting
+bytes = "1"
+regex = "1"
+
+# Auth subrequests
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+
 # Rustls crypto provider — must be installed before any TLS init
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 

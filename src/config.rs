@@ -149,6 +149,45 @@ pub struct PathRoute {
     pub strip_prefix: bool,
     #[serde(default)]
     pub websocket: bool,
+    /// URL for auth subrequest (like nginx `auth_request`).
+    /// If set, the proxy makes an HTTP request to this URL before forwarding.
+    /// A non-2xx response blocks the request with 403.
+    #[serde(default)]
+    pub auth_request: Option<String>,
+    /// Headers to capture from the auth subrequest response and forward upstream.
+    #[serde(default)]
+    pub auth_capture_headers: Vec<String>,
+    /// Prefix to prepend to the upstream path after stripping.
+    #[serde(default)]
+    pub upstream_path_prefix: Option<String>,
+}
+
+/// A URL rewrite rule: requests matching `pattern` are served the file at `target`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RewriteRule {
+    /// Regex pattern matched against the request path.
+    pub pattern: String,
+    /// Static file path to serve (relative to `static_root`).
+    pub target: String,
+}
+
+/// A find/replace rule applied to response bodies.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BodyRewrite {
+    /// String to find in the response body.
+    pub find: String,
+    /// String to replace it with.
+    pub replace: String,
+    /// Content-types to apply this rewrite to (e.g. `["text/html"]`).
+    #[serde(default)]
+    pub types: Vec<String>,
+}
+
+/// A response header to add to every response for this route.
+#[derive(Debug, Deserialize, Clone)]
+pub struct HeaderRule {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -165,6 +204,22 @@ pub struct RouteConfig {
     /// If the request path matches a sub-route, its backend is used instead.
     #[serde(default)]
     pub paths: Vec<PathRoute>,
+    /// Root directory for static file serving. If set, the proxy will try
+    /// to serve files from this directory before forwarding to the upstream.
+    #[serde(default)]
+    pub static_root: Option<String>,
+    /// Fallback file for SPA routing (e.g. "index.html").
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// URL rewrite rules applied before static file lookup.
+    #[serde(default)]
+    pub rewrites: Vec<RewriteRule>,
+    /// Response body find/replace rules (like nginx `sub_filter`).
+    #[serde(default)]
+    pub body_rewrites: Vec<BodyRewrite>,
+    /// Extra response headers added to every response for this route.
+    #[serde(default)]
+    pub response_headers: Vec<HeaderRule>,
 }
 
 impl Config {

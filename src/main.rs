@@ -342,6 +342,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
     //    Pingora's async proxy calls without cross-runtime waker concerns.
     let acme_routes: acme::AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
 
+    let compiled_rewrites = SunbeamProxy::compile_rewrites(&cfg.routes);
+    let http_client = reqwest::Client::new();
+
     let proxy = SunbeamProxy {
         routes: cfg.routes.clone(),
         acme_routes: acme_routes.clone(),
@@ -349,6 +352,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
         scanner_detector,
         bot_allowlist,
         rate_limiter,
+        compiled_rewrites,
+        http_client,
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 

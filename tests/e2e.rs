@@ -99,9 +99,15 @@ fn start_proxy_once(backend_port: u16) {
             // without needing TLS certificates in the test environment.
             disable_secure_redirection: true,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
-        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None };
+        let compiled_rewrites = SunbeamProxy::compile_rewrites(&routes);
+        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None, compiled_rewrites, http_client: reqwest::Client::new() };
 
         let opt = Opt {
             upgrade: false,

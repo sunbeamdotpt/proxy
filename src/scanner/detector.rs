@@ -161,6 +161,11 @@ mod tests {
             websocket: false,
             disable_secure_redirection: false,
             paths: vec![],
+            static_root: None,
+            fallback: None,
+            rewrites: vec![],
+            body_rewrites: vec![],
+            response_headers: vec![],
         }];
         ScannerDetector::new(&model, &routes)
     }
