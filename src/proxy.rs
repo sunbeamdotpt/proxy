@@ -1,10 +1,20 @@
 use crate::acme::AcmeRoutes;
 use crate::config::RouteConfig;
+use crate::ddos::detector::DDoSDetector;
+use crate::ddos::model::DDoSAction;
+use crate::rate_limit::key;
+use crate::rate_limit::limiter::{RateLimitResult, RateLimiter};
+use crate::scanner::allowlist::BotAllowlist;
+use crate::scanner::detector::ScannerDetector;
+use crate::scanner::model::ScannerAction;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
 use pingora_core::{upstreams::peer::HttpPeer, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub struct SunbeamProxy {
@@ -12,6 +22,14 @@ pub struct SunbeamProxy {
     /// Per-challenge route table populated by the Ingress watcher.
     /// Maps `/.well-known/acme-challenge/<token>` → solver service address.
     pub acme_routes: AcmeRoutes,
+    /// Optional KNN-based DDoS detector.
+    pub ddos_detector: Option<Arc<DDoSDetector>>,
+    /// Optional per-request scanner detector (hot-reloadable via ArcSwap).
+    pub scanner_detector: Option<Arc<ArcSwap<ScannerDetector>>>,
+    /// Optional verified-bot allowlist (bypasses scanner for known crawlers/agents).
+    pub bot_allowlist: Option<Arc<BotAllowlist>>,
+    /// Optional per-identity rate limiter.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 pub struct RequestCtx {
@@ -39,6 +57,37 @@ fn extract_host(session: &Session) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string()
+}
+
+/// Extract the real client IP, preferring trusted proxy headers.
+///
+/// Priority: CF-Connecting-IP → X-Real-IP → X-Forwarded-For (first) → socket addr.
+/// All traffic arrives via Cloudflare, so CF-Connecting-IP is the authoritative
+/// real client IP.  The socket address is the Cloudflare edge node.
+fn extract_client_ip(session: &Session) -> Option<IpAddr> {
+    let headers = &session.req_header().headers;
+
+    for header in &["cf-connecting-ip", "x-real-ip"] {
+        if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok()) {
+            if let Ok(ip) = val.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    // X-Forwarded-For: client, proxy1, proxy2 — take the first entry
+    if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = val.split(',').next() {
+            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    // Fallback: raw socket address
+    session
+        .client_addr()
+        .and_then(|addr| addr.as_inet().map(|a| a.ip()))
 }
 
 /// Strip the scheme prefix from a backend URL like `http://host:port`.
@@ -135,6 +184,193 @@ impl ProxyHttp for SunbeamProxy {
             resp.insert_header("Content-Length", "0")?;
             session.write_response_header(Box::new(resp), true).await?;
             return Ok(true);
+        }
+
+        // ── Detection pipeline ───────────────────────────────────────────
+        // Each layer emits an unfiltered pipeline log BEFORE acting on its
+        // decision.  This guarantees downstream training pipelines always
+        // have the full traffic picture:
+        //   - "ddos" log  = all HTTPS traffic  (scanner training data)
+        //   - "scanner" log = traffic that passed DDoS (rate-limit training data)
+        //   - "rate_limit" log = traffic that passed scanner (validation data)
+
+        // DDoS detection: check the client IP against the KNN model.
+        if let Some(detector) = &self.ddos_detector {
+            if let Some(ip) = extract_client_ip(session) {
+                let method = session.req_header().method.as_str();
+                let path = session.req_header().uri.path();
+                let host = extract_host(session);
+                let user_agent = session
+                    .req_header()
+                    .headers
+                    .get("user-agent")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+                let content_length: u64 = session
+                    .req_header()
+                    .headers
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let has_cookies = session.req_header().headers.get("cookie").is_some();
+                let has_referer = session.req_header().headers.get("referer").is_some();
+                let has_accept_language = session.req_header().headers.get("accept-language").is_some();
+                let accept = session
+                    .req_header()
+                    .headers
+                    .get("accept")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+                let ddos_action = detector.check(ip, method, path, &host, user_agent, content_length, has_cookies, has_referer, has_accept_language);
+                let decision = if matches!(ddos_action, DDoSAction::Block) { "block" } else { "allow" };
+
+                tracing::info!(
+                    target = "pipeline",
+                    layer       = "ddos",
+                    decision,
+                    method,
+                    host        = %host,
+                    path,
+                    client_ip   = %ip,
+                    user_agent,
+                    content_length,
+                    has_cookies,
+                    has_referer,
+                    has_accept_language,
+                    accept,
+                    "pipeline"
+                );
+
+                if matches!(ddos_action, DDoSAction::Block) {
+                    let mut resp = ResponseHeader::build(429, None)?;
+                    resp.insert_header("Retry-After", "60")?;
+                    resp.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Scanner detection: per-request classification of scanner/bot probes.
+        // The detector is behind ArcSwap for lock-free hot-reload.
+        if let Some(scanner_swap) = &self.scanner_detector {
+            let method = session.req_header().method.as_str();
+            let path = session.req_header().uri.path();
+            let host = extract_host(session);
+            let prefix = host.split('.').next().unwrap_or("");
+            let has_cookies = session.req_header().headers.get("cookie").is_some();
+            let has_referer = session.req_header().headers.get("referer").is_some();
+            let has_accept_language = session.req_header().headers.get("accept-language").is_some();
+            let accept = session
+                .req_header()
+                .headers
+                .get("accept")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let user_agent = session
+                .req_header()
+                .headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            let content_length: u64 = session
+                .req_header()
+                .headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let client_ip = extract_client_ip(session);
+
+            // Bot allowlist: verified crawlers/agents bypass the scanner model.
+            // CIDR rules are instant; DNS-verified IPs are cached after
+            // background reverse+forward lookup.
+            let bot_reason = self.bot_allowlist.as_ref().and_then(|al| {
+                client_ip.and_then(|ip| al.check(user_agent, ip))
+            });
+
+            let (decision, score, reason) = if let Some(bot_reason) = bot_reason {
+                ("allow", -1.0f64, bot_reason)
+            } else {
+                let scanner = scanner_swap.load();
+                let verdict = scanner.check(
+                    method, path, prefix, has_cookies, has_referer,
+                    has_accept_language, accept, user_agent, content_length,
+                );
+                let d = if matches!(verdict.action, ScannerAction::Block) { "block" } else { "allow" };
+                (d, verdict.score, verdict.reason)
+            };
+
+            let client_ip_str = client_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_default();
+
+            tracing::info!(
+                target = "pipeline",
+                layer       = "scanner",
+                decision,
+                score,
+                reason,
+                method,
+                host        = %host,
+                path,
+                client_ip   = client_ip_str,
+                user_agent,
+                content_length,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                accept,
+                "pipeline"
+            );
+
+            if decision == "block" {
+                let mut resp = ResponseHeader::build(403, None)?;
+                resp.insert_header("Content-Length", "0")?;
+                session.write_response_header(Box::new(resp), true).await?;
+                return Ok(true);
+            }
+        }
+
+        // Rate limiting: per-identity throttling.
+        if let Some(limiter) = &self.rate_limiter {
+            if let Some(ip) = extract_client_ip(session) {
+                let cookie = session
+                    .req_header()
+                    .headers
+                    .get("cookie")
+                    .and_then(|v| v.to_str().ok());
+                let auth = session
+                    .req_header()
+                    .headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok());
+                let rl_key = key::extract_key(cookie, auth, ip);
+                let rl_result = limiter.check(ip, rl_key);
+                let decision = if matches!(rl_result, RateLimitResult::Reject { .. }) { "block" } else { "allow" };
+
+                tracing::info!(
+                    target = "pipeline",
+                    layer       = "rate_limit",
+                    decision,
+                    method      = %session.req_header().method,
+                    host        = %extract_host(session),
+                    path        = %session.req_header().uri.path(),
+                    client_ip   = %ip,
+                    user_agent  = session.req_header().headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("-"),
+                    has_cookies = cookie.is_some(),
+                    "pipeline"
+                );
+
+                if let RateLimitResult::Reject { retry_after } = rl_result {
+                    let mut resp = ResponseHeader::build(429, None)?;
+                    resp.insert_header("Retry-After", retry_after.to_string())?;
+                    resp.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
+                }
+            }
         }
 
         // Reject unknown host prefixes with 404.
@@ -311,30 +547,92 @@ impl ProxyHttp for SunbeamProxy {
         let status = session
             .response_written()
             .map_or(0, |r| r.status.as_u16());
-        let duration_ms = ctx.start_time.elapsed().as_millis();
+        let duration_ms = ctx.start_time.elapsed().as_millis() as u64;
         let backend = ctx
             .route
             .as_ref()
             .map(|r| r.backend.as_str())
             .unwrap_or("-");
-        let client_ip = session
-            .client_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let client_ip = extract_client_ip(session)
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| {
+                session
+                    .client_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            });
         let error_str = error.map(|e| e.to_string());
+
+        let content_length: u64 = session
+            .req_header()
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let user_agent = session
+            .req_header()
+            .headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let referer = session
+            .req_header()
+            .headers
+            .get("referer")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let accept_language = session
+            .req_header()
+            .headers
+            .get("accept-language")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let accept = session
+            .req_header()
+            .headers
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let has_cookies = session
+            .req_header()
+            .headers
+            .get("cookie")
+            .is_some();
+        let cf_country = session
+            .req_header()
+            .headers
+            .get("cf-ipcountry")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let query = session.req_header().uri.query().unwrap_or("");
 
         tracing::info!(
             target = "audit",
             method  = %session.req_header().method,
             host    = %extract_host(session),
             path    = %session.req_header().uri.path(),
+            query,
             client_ip,
             status,
             duration_ms,
+            content_length,
+            user_agent,
+            referer,
+            accept_language,
+            accept,
+            has_cookies,
+            cf_country,
             backend,
             error   = error_str,
             "request"
         );
+
+        if let Some(detector) = &self.ddos_detector {
+            if let Some(ip) = extract_client_ip(session) {
+                detector.record_response(ip, status, duration_ms as u32);
+            }
+        }
     }
 }
 

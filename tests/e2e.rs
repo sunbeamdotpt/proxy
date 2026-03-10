@@ -101,7 +101,7 @@ fn start_proxy_once(backend_port: u16) {
             paths: vec![],
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
-        let proxy = SunbeamProxy { routes, acme_routes };
+        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None };
 
         let opt = Opt {
             upgrade: false,

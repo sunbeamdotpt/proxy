@@ -18,7 +18,101 @@ pub struct Config {
     pub routes: Vec<RouteConfig>,
     /// Optional SSH TCP passthrough (port 22 → Gitea SSH).
     pub ssh: Option<SshConfig>,
+    /// Optional KNN-based DDoS detection.
+    pub ddos: Option<DDoSConfig>,
+    /// Optional per-identity rate limiting.
+    pub rate_limit: Option<RateLimitConfig>,
+    /// Optional per-request scanner detection.
+    pub scanner: Option<ScannerConfig>,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DDoSConfig {
+    pub model_path: String,
+    #[serde(default = "default_k")]
+    pub k: usize,
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_window_secs")]
+    pub window_secs: u64,
+    #[serde(default = "default_window_capacity")]
+    pub window_capacity: usize,
+    #[serde(default = "default_min_events")]
+    pub min_events: usize,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RateLimitConfig {
+    #[serde(default = "default_rl_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bypass_cidrs: Vec<String>,
+    #[serde(default = "default_eviction_interval")]
+    pub eviction_interval_secs: u64,
+    #[serde(default = "default_stale_after")]
+    pub stale_after_secs: u64,
+    pub authenticated: BucketConfig,
+    pub unauthenticated: BucketConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BucketConfig {
+    pub burst: u32,
+    pub rate: f64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScannerConfig {
+    pub model_path: String,
+    #[serde(default = "default_scanner_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_scanner_enabled")]
+    pub enabled: bool,
+    /// How often (seconds) to check the model file for changes. 0 = no hot-reload.
+    #[serde(default = "default_scanner_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Bot allowlist rules. Verified bots bypass the scanner model.
+    #[serde(default)]
+    pub allowlist: Vec<BotAllowlistRule>,
+    /// TTL (seconds) for verified bot IP cache entries.
+    #[serde(default = "default_bot_cache_ttl")]
+    pub bot_cache_ttl_secs: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BotAllowlistRule {
+    /// Case-insensitive UA prefix to match, e.g. "Googlebot".
+    pub ua_prefix: String,
+    /// Human-readable label for pipeline logs.
+    pub reason: String,
+    /// Reverse-DNS hostname suffixes for verification.
+    /// e.g. ["googlebot.com", "google.com"]
+    #[serde(default)]
+    pub dns_suffixes: Vec<String>,
+    /// CIDR ranges for instant IP verification.
+    /// e.g. ["66.249.64.0/19"]
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+}
+
+fn default_bot_cache_ttl() -> u64 { 86400 } // 24h
+
+fn default_scanner_threshold() -> f64 { 0.5 }
+fn default_scanner_enabled() -> bool { true }
+fn default_scanner_poll_interval() -> u64 { 30 }
+
+fn default_rl_enabled() -> bool { true }
+fn default_eviction_interval() -> u64 { 300 }
+fn default_stale_after() -> u64 { 600 }
+
+fn default_k() -> usize { 5 }
+fn default_threshold() -> f64 { 0.6 }
+fn default_window_secs() -> u64 { 60 }
+fn default_window_capacity() -> usize { 1000 }
+fn default_min_events() -> usize { 10 }
+fn default_enabled() -> bool { true }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ListenConfig {

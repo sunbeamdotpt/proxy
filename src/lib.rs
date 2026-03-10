@@ -3,6 +3,9 @@
 // without going through the binary entry point.
 pub mod acme;
 pub mod config;
+pub mod ddos;
 pub mod dual_stack;
 pub mod proxy;
+pub mod rate_limit;
+pub mod scanner;
 pub mod ssh;

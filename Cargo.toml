@@ -37,6 +37,18 @@ opentelemetry-otlp    = { version = "0.27", features = ["http-proto", "reqwest-c
 serde_json = "1"
 anyhow     = "1"
 
+# DDoS detection (KNN classifier)
+clap        = { version = "4", features = ["derive"] }
+fnntw       = "0.4"
+bincode     = "1"
+rustc-hash  = "2"
+
+# Lock-free Arc swapping for hot-reload (scanner model)
+arc-swap    = "1"
+
+# Reverse DNS for bot IP verification
+dns-lookup  = "2"
+
 # Rustls crypto provider — must be installed before any TLS init
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 
@@ -44,6 +56,13 @@ rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 kube        = { version = "3", features = ["runtime", "client"] }
 k8s-openapi = { version = "0.27", features = ["v1_35"] }
 libc        = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scanner_bench"
+harness = false
 
 [profile.release]
 opt-level = 3
