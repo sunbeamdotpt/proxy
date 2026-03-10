@@ -27,6 +27,8 @@ pub struct Config {
     /// Kubernetes resource names and namespaces for watchers.
     #[serde(default)]
     pub kubernetes: KubernetesConfig,
+    /// Optional gossip-based cluster for multi-node state sharing.
+    pub cluster: Option<ClusterConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -273,6 +275,87 @@ pub struct RouteConfig {
     #[serde(default)]
     pub cache: Option<CacheConfig>,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClusterConfig {
+    #[serde(default = "default_cluster_enabled")]
+    pub enabled: bool,
+    /// Tenant UUID — isolates unrelated deployments.
+    pub tenant: String,
+    /// UDP port for gossip protocol.
+    #[serde(default = "default_gossip_port")]
+    pub gossip_port: u16,
+    /// Path to persist the node identity key.
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// Peer discovery configuration.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+    /// Bandwidth broadcast settings.
+    #[serde(default)]
+    pub bandwidth: Option<BandwidthClusterConfig>,
+    /// Model distribution settings.
+    #[serde(default)]
+    pub models: Option<ModelsConfig>,
+}
+
+fn default_cluster_enabled() -> bool { true }
+fn default_gossip_port() -> u16 { 11204 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DiscoveryConfig {
+    /// "k8s" or "bootstrap".
+    #[serde(default = "default_discovery_method")]
+    pub method: String,
+    /// Headless service for k8s DNS discovery.
+    #[serde(default)]
+    pub headless_service: Option<String>,
+    /// Static bootstrap peers ("endpointid@host:port").
+    #[serde(default)]
+    pub bootstrap_peers: Option<Vec<String>>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            method: default_discovery_method(),
+            headless_service: None,
+            bootstrap_peers: None,
+        }
+    }
+}
+
+fn default_discovery_method() -> String { "k8s".to_string() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BandwidthClusterConfig {
+    #[serde(default = "default_broadcast_interval")]
+    pub broadcast_interval_secs: u64,
+    #[serde(default = "default_stale_peer_timeout")]
+    pub stale_peer_timeout_secs: u64,
+    /// Sliding window size for aggregate bandwidth rate calculation.
+    #[serde(default = "default_meter_window")]
+    pub meter_window_secs: u64,
+}
+
+fn default_meter_window() -> u64 { 30 }
+
+fn default_broadcast_interval() -> u64 { 1 }
+fn default_stale_peer_timeout() -> u64 { 30 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModelsConfig {
+    #[serde(default = "default_model_dir")]
+    pub model_dir: String,
+    #[serde(default = "default_max_model_size")]
+    pub max_model_size_bytes: u64,
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: u32,
+}
+
+fn default_model_dir() -> String { "/models".to_string() }
+fn default_max_model_size() -> u64 { 52_428_800 } // 50MB
+fn default_chunk_size() -> u32 { 65_536 } // 64KB
 
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
