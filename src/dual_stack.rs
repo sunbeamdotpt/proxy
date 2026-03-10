@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpSocket;
 
 pin_project_lite::pin_project! {
     /// Future returned by [`DualStackTcpListener::accept`].
@@ -61,9 +62,41 @@ impl DualStackTcpListener {
     /// # Returns
     /// A `Result` containing the dual-stack listener if successful.
     pub async fn bind(ipv6_addr: &str, ipv4_addr: &str) -> Result<Self> {
-        let ip6 = TcpListener::bind(ipv6_addr).await?;
-        let ip4 = TcpListener::bind(ipv4_addr).await?;
-        
+        // Bind IPv6 with IPV6_V6ONLY=1 so it doesn't grab IPv4 too.
+        // Without this, [::]:port claims both stacks on Linux (default
+        // net.ipv6.bindv6only=0), causing the subsequent IPv4 bind to
+        // fail with EADDRINUSE.
+        let v6_sock = TcpSocket::new_v6()?;
+        v6_sock.set_reuseaddr(true)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = v6_sock.as_raw_fd();
+            let yes: libc::c_int = 1;
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_V6ONLY,
+                    &yes as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+        let v6_addr: SocketAddr = ipv6_addr.parse().map_err(|e| {
+            Error::new(ErrorKind::InvalidInput, format!("bad v6 addr: {e}"))
+        })?;
+        v6_sock.bind(v6_addr)?;
+        let ip6 = v6_sock.listen(1024)?;
+
+        let v4_sock = TcpSocket::new_v4()?;
+        v4_sock.set_reuseaddr(true)?;
+        let v4_addr: SocketAddr = ipv4_addr.parse().map_err(|e| {
+            Error::new(ErrorKind::InvalidInput, format!("bad v4 addr: {e}"))
+        })?;
+        v4_sock.bind(v4_addr)?;
+        let ip4 = v4_sock.listen(1024)?;
+
         Ok(Self {
             ip6,
             ip4,
