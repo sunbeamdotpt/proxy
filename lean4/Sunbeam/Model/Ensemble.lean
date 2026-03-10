@@ -2,14 +2,12 @@ import Sunbeam.Model.Basic
 import Sunbeam.Model.MLP
 import Sunbeam.Model.DecisionTree
 
-open Classical
-
 namespace Sunbeam
 
 /-- Ensemble: tree decides first; MLP handles only Defer cases. -/
-noncomputable def ensemblePredict {inputDim hiddenDim : Nat}
+def ensemblePredict {inputDim hiddenDim : Nat}
     (tree : TreeNode) (mlpWeights : MLPWeights inputDim hiddenDim)
-    (threshold : ℝ) (input : RealVec inputDim) : Decision :=
+    (threshold : Float) (input : FloatVec inputDim) : Decision :=
   match treePredictAux input tree with
   | Decision.block => Decision.block
   | Decision.allow => Decision.allow
@@ -20,7 +18,7 @@ noncomputable def ensemblePredict {inputDim hiddenDim : Nat}
 /-- If the tree says Block, the ensemble says Block. -/
 theorem tree_block_implies_ensemble_block {inputDim hiddenDim : Nat}
     (tree : TreeNode) (mlpWeights : MLPWeights inputDim hiddenDim)
-    (threshold : ℝ) (input : RealVec inputDim)
+    (threshold : Float) (input : FloatVec inputDim)
     (h : treePredictAux input tree = Decision.block) :
     ensemblePredict tree mlpWeights threshold input = Decision.block := by
   unfold ensemblePredict
@@ -29,7 +27,7 @@ theorem tree_block_implies_ensemble_block {inputDim hiddenDim : Nat}
 /-- Ensemble output is always Block or Allow (never Defer). -/
 theorem ensemble_output_valid {inputDim hiddenDim : Nat}
     (tree : TreeNode) (mlpWeights : MLPWeights inputDim hiddenDim)
-    (threshold : ℝ) (input : RealVec inputDim) :
+    (threshold : Float) (input : FloatVec inputDim) :
     ensemblePredict tree mlpWeights threshold input = Decision.block ∨
     ensemblePredict tree mlpWeights threshold input = Decision.allow := by
   unfold ensemblePredict

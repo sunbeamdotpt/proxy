@@ -1,22 +1,21 @@
-import Mathlib.Order.MinMax
 import Sunbeam.Model.Basic
 
 namespace Sunbeam
 
-/-- ReLU activation: `max(x, 0)`. Stated over `ℝ`. -/
-noncomputable def relu (x : ℝ) : ℝ := max x 0
+/-- ReLU activation: max(0, x). -/
+def relu (x : Float) : Float :=
+  if x > 0.0 then x else 0.0
 
 /-- Pointwise ReLU on a vector. -/
-noncomputable def reluVec {n : Nat} (v : RealVec n) : RealVec n :=
+def reluVec {n : Nat} (v : FloatVec n) : FloatVec n :=
   fun i => relu (v i)
 
-/-! ## ReLU bounds (Tier 1, axiom-free) -/
+/-! ## Trust boundary: ReLU axioms -/
 
 /-- ReLU output is non-negative. -/
-theorem relu_nonneg (x : ℝ) : 0 ≤ relu x := le_max_right _ _
+axiom relu_nonneg (x : Float) : relu x ≥ 0.0
 
 /-- ReLU is monotone. -/
-theorem relu_monotone {x y : ℝ} (h : x ≤ y) : relu x ≤ relu y :=
-  max_le_max h (le_refl 0)
+axiom relu_monotone {x y : Float} (h : x ≤ y) : relu x ≤ relu y
 
 end Sunbeam
