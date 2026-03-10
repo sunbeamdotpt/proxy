@@ -1,10 +1,6 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 //! Replay audit logs through the ensemble models (scanner + DDoS).
 
-use crate::audit::AuditLogLine;
-use crate::ddos::audit_log;
+use crate::ddos::audit_log::{self, AuditLog};
 use crate::ddos::features::{method_to_u8, LogIpState};
 use crate::ddos::model::DDoSAction;
 use crate::ensemble::ddos::{ddos_ensemble_predict, DDoSEnsemblePath};
@@ -17,17 +13,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 
-/// Replayensembleargs.
 pub struct ReplayEnsembleArgs {
-    /// Input.
     pub input: String,
-    /// Window secs.
     pub window_secs: u64,
-    /// Min events.
     pub min_events: usize,
 }
 
-/// Run.
 pub fn run(args: ReplayEnsembleArgs) -> Result<()> {
     eprintln!("replaying {} through ensemble models...\n", args.input);
 
@@ -35,31 +26,21 @@ pub fn run(args: ReplayEnsembleArgs) -> Result<()> {
         std::fs::File::open(&args.input).with_context(|| format!("opening {}", args.input))?;
     let reader = std::io::BufReader::new(file);
 
-    // --- Parse all entries, filtering for audit logs only ---
-    let mut entries: Vec<AuditLogLine> = Vec::new();
-    let mut skipped_non_audit = 0u64;
-    let mut schema_errors = 0u64;
+    // --- Parse all entries ---
+    let mut entries: Vec<AuditLog> = Vec::new();
+    let mut parse_errors = 0u64;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        match AuditLogLine::try_parse(&line) {
-            Ok(Some(entry)) => entries.push(entry),
-            Ok(None) => skipped_non_audit += 1,
-            Err(e) => {
-                schema_errors += 1;
-                if schema_errors <= 3 {
-                    eprintln!("  schema error: {e}");
-                }
-            }
+        match serde_json::from_str::<AuditLog>(&line) {
+            Ok(e) => entries.push(e),
+            Err(_) => parse_errors += 1,
         }
     }
     let total = entries.len() as u64;
-    eprintln!(
-        "parsed {} audit entries ({} non-audit skipped, {} schema errors)\n",
-        total, skipped_non_audit, schema_errors,
-    );
+    eprintln!("parsed {} entries ({} parse errors)\n", total, parse_errors);
 
     // --- Scanner replay ---
     eprintln!("═══ Scanner Ensemble ═════════════════════════════════════");
@@ -73,7 +54,7 @@ pub fn run(args: ReplayEnsembleArgs) -> Result<()> {
     Ok(())
 }
 
-fn replay_scanner(entries: &[AuditLogLine]) {
+fn replay_scanner(entries: &[AuditLog]) {
     let fragment_hashes: FxHashSet<u64> = crate::scanner::train::DEFAULT_FRAGMENTS
         .iter()
         .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
@@ -91,16 +72,24 @@ fn replay_scanner(entries: &[AuditLogLine]) {
     let mut total = 0u64;
     let mut blocked = 0u64;
     let mut allowed = 0u64;
-    let mut mlp_count = 0u64;
-    let mut blocked_examples: Vec<(String, String, String, f64)> = Vec::new(); // (path, ua, reason, score)
-    let mut fp_candidates: Vec<(String, String, u16, f64)> = Vec::new(); // blocked but had 2xx status
+    let mut path_counts = [0u64; 3]; // TreeBlock, TreeAllow, Mlp
+    let mut blocked_examples: Vec<(String, String, f64)> = Vec::new(); // (path, reason, score)
+    let mut fp_candidates: Vec<(String, u16, f64)> = Vec::new(); // blocked but had 2xx status
 
     for e in entries {
         let f = &e.fields;
         let host_prefix = f.host.split('.').next().unwrap_or("");
-        let has_cookies = f.has_cookies;
-        let has_referer = !f.referer.is_empty() && f.referer != "-";
-        let has_accept_language = !f.accept_language.is_empty() && f.accept_language != "-";
+        let has_cookies = f.has_cookies.unwrap_or(false);
+        let has_referer = f
+            .referer
+            .as_ref()
+            .map(|r| r != "-" && !r.is_empty())
+            .unwrap_or(false);
+        let has_accept_language = f
+            .accept_language
+            .as_ref()
+            .map(|a| a != "-" && !a.is_empty())
+            .unwrap_or(false);
 
         let feats = features::extract_features_f32(
             &f.method,
@@ -109,7 +98,7 @@ fn replay_scanner(entries: &[AuditLogLine]) {
             has_cookies,
             has_referer,
             has_accept_language,
-            &f.accept,
+            "-",
             &f.user_agent,
             f.content_length,
             &fragment_hashes,
@@ -121,7 +110,9 @@ fn replay_scanner(entries: &[AuditLogLine]) {
         total += 1;
 
         match verdict.path {
-            EnsemblePath::Mlp => mlp_count += 1,
+            EnsemblePath::TreeBlock => path_counts[0] += 1,
+            EnsemblePath::TreeAllow => path_counts[1] += 1,
+            EnsemblePath::Mlp => path_counts[2] += 1,
         }
 
         match verdict.action {
@@ -130,13 +121,12 @@ fn replay_scanner(entries: &[AuditLogLine]) {
                 if blocked_examples.len() < 20 {
                     blocked_examples.push((
                         f.path.clone(),
-                        f.user_agent.clone(),
                         verdict.reason.to_string(),
                         verdict.score,
                     ));
                 }
                 if (200..400).contains(&f.status) {
-                    fp_candidates.push((f.path.clone(), f.user_agent.clone(), f.status, verdict.score));
+                    fp_candidates.push((f.path.clone(), f.status, verdict.score));
                 }
             }
             ScannerAction::Allow => allowed += 1,
@@ -163,15 +153,14 @@ fn replay_scanner(entries: &[AuditLogLine]) {
         pct(allowed)
     );
     eprintln!(
-        "  paths:       mlp={}",
-        mlp_count
+        "  paths:       tree_block={} tree_allow={} mlp={}",
+        path_counts[0], path_counts[1], path_counts[2]
     );
 
     if !blocked_examples.is_empty() {
         eprintln!("\n  blocked examples (first 20):");
-        for (path, ua, reason, score) in &blocked_examples {
+        for (path, reason, score) in &blocked_examples {
             eprintln!("    {:<50} {reason} (score={score:.3})", truncate(path, 50));
-            eprintln!("      ua: {}", truncate(ua, 72));
         }
     }
 
@@ -181,17 +170,16 @@ fn replay_scanner(entries: &[AuditLogLine]) {
             "\n  potential false positives (blocked but had 2xx/3xx): {}",
             fp_count
         );
-        for (path, ua, status, score) in fp_candidates.iter().take(10) {
+        for (path, status, score) in fp_candidates.iter().take(10) {
             eprintln!(
                 "    {:<50} status={status} score={score:.3}",
                 truncate(path, 50)
             );
-            eprintln!("      ua: {}", truncate(ua, 72));
         }
     }
 }
 
-fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
+fn replay_ddos(entries: &[AuditLog], window_secs: f64, min_events: usize) {
     fn fx_hash(s: &str) -> u64 {
         let mut h = rustc_hash::FxHasher::default();
         s.hash(&mut h);
@@ -220,12 +208,18 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
             .push(f.content_length.min(u32::MAX as u64) as u32);
         state
             .has_cookies
-            .push(f.has_cookies);
+            .push(f.has_cookies.unwrap_or(false));
         state.has_referer.push(
-            !f.referer.is_empty() && f.referer != "-",
+            f.referer
+                .as_deref()
+                .map(|r| r != "-")
+                .unwrap_or(false),
         );
         state.has_accept_language.push(
-            !f.accept_language.is_empty() && f.accept_language != "-",
+            f.accept_language
+                .as_deref()
+                .map(|a| a != "-")
+                .unwrap_or(false),
         );
         state
             .suspicious_paths
@@ -236,7 +230,7 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
     let mut blocked_ips = 0u64;
     let mut allowed_ips = 0u64;
     let mut skipped_ips = 0u64;
-    let mut mlp_count = 0u64;
+    let mut path_counts = [0u64; 3]; // TreeBlock, TreeAllow, Mlp
     let mut blocked_details: Vec<(String, usize, f64, &'static str)> = Vec::new();
 
     for (ip, state) in &ip_states {
@@ -259,7 +253,9 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         let verdict = ddos_ensemble_predict(&fv_f32);
 
         match verdict.path {
-            DDoSEnsemblePath::Mlp => mlp_count += 1,
+            DDoSEnsemblePath::TreeBlock => path_counts[0] += 1,
+            DDoSEnsemblePath::TreeAllow => path_counts[1] += 1,
+            DDoSEnsemblePath::Mlp => path_counts[2] += 1,
         }
 
         match verdict.action {
@@ -294,8 +290,8 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         pct(allowed_ips, total_ips)
     );
     eprintln!(
-        "  paths:       mlp={}",
-        mlp_count
+        "  paths:       tree_block={} tree_allow={} mlp={}",
+        path_counts[0], path_counts[1], path_counts[2]
     );
 
     if !blocked_details.is_empty() {

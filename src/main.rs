@@ -5,7 +5,7 @@ mod cert;
 mod telemetry;
 mod watcher;
 
-use sunbeam_proxy::{acme, config};
+use sunbeam_proxy::{acme, autotune, config};
 use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
@@ -34,15 +34,29 @@ enum Commands {
         #[arg(long)]
         upgrade: bool,
     },
-    /// Replay audit logs through ensemble models (scanner + DDoS)
+    /// Replay audit logs through detection models
     Replay {
+        #[command(subcommand)]
+        mode: ReplayMode,
+    },
+    /// Train a DDoS detection model from audit logs
+    TrainDdos {
         /// Path to audit log JSONL file
         #[arg(short, long)]
         input: String,
-        /// Sliding window size in seconds
-        #[arg(long, default_value = "60")]
-        window_secs: u64,
-        /// Minimum events per IP before DDoS classification
+        /// Output model file path
+        #[arg(short, long)]
+        output: String,
+        /// File with known-attack IPs (one per line)
+        #[arg(long)]
+        attack_ips: Option<String>,
+        /// File with known-normal IPs (one per line)
+        #[arg(long)]
+        normal_ips: Option<String>,
+        /// TOML file with heuristic auto-labeling thresholds
+        #[arg(long)]
+        heuristics: Option<String>,
+        /// KNN k parameter
         #[arg(long, default_value = "5")]
         min_events: usize,
     },
@@ -172,6 +186,162 @@ enum Commands {
         #[arg(long, default_value = "2")]
         min_samples_leaf: usize,
     },
+    /// Bayesian hyperparameter optimization for DDoS model
+    AutotuneDdos {
+        /// Path to audit log JSONL file
+        #[arg(short, long)]
+        input: String,
+        /// Output best model file path
+        #[arg(short, long, default_value = "ddos_model_best.bin")]
+        output: String,
+        /// Number of optimization trials
+        #[arg(long, default_value = "200")]
+        trials: usize,
+        /// F-beta parameter (1.0 = F1, 2.0 = recall-weighted)
+        #[arg(long, default_value = "1.0")]
+        beta: f64,
+        /// JSONL file to log each trial's parameters and results
+        #[arg(long)]
+        trial_log: Option<String>,
+    },
+    /// Download and cache upstream datasets (CIC-IDS2017)
+    DownloadDatasets,
+    /// Prepare a unified training dataset from multiple sources
+    PrepareDataset {
+        /// Path to audit log JSONL file
+        #[arg(short, long)]
+        input: String,
+        /// Path to OWASP ModSecurity audit log file (optional extra data)
+        #[arg(long)]
+        owasp: Option<String>,
+        /// Directory containing .txt wordlists (optional, enhances synthetic scanner)
+        #[arg(long)]
+        wordlists: Option<String>,
+        /// Output dataset file path
+        #[arg(short, long, default_value = "dataset.bin")]
+        output: String,
+        /// Random seed
+        #[arg(long, default_value = "42")]
+        seed: u64,
+        /// Path to heuristics.toml for auto-labeling production logs
+        #[arg(long)]
+        heuristics: Option<String>,
+    },
+    #[cfg(feature = "training")]
+    /// Train scanner ensemble (decision tree + MLP) from prepared dataset
+    TrainMlpScanner {
+        /// Path to prepared dataset (.bin)
+        #[arg(short = 'd', long)]
+        dataset: String,
+        /// Output directory for generated weight files
+        #[arg(short, long, default_value = "src/ensemble/gen")]
+        output_dir: String,
+        /// Hidden layer dimension
+        #[arg(long, default_value = "32")]
+        hidden_dim: usize,
+        /// Training epochs
+        #[arg(long, default_value = "100")]
+        epochs: usize,
+        /// Learning rate
+        #[arg(long, default_value = "0.001")]
+        learning_rate: f64,
+        /// Batch size
+        #[arg(long, default_value = "64")]
+        batch_size: usize,
+        /// Max tree depth
+        #[arg(long, default_value = "6")]
+        tree_max_depth: usize,
+        /// Min purity for tree leaves (below -> Defer)
+        #[arg(long, default_value = "0.90")]
+        tree_min_purity: f32,
+    },
+    #[cfg(feature = "training")]
+    /// Train DDoS ensemble (decision tree + MLP) from prepared dataset
+    TrainMlpDdos {
+        #[arg(short = 'd', long)]
+        dataset: String,
+        #[arg(short, long, default_value = "src/ensemble/gen")]
+        output_dir: String,
+        #[arg(long, default_value = "32")]
+        hidden_dim: usize,
+        #[arg(long, default_value = "100")]
+        epochs: usize,
+        #[arg(long, default_value = "0.001")]
+        learning_rate: f64,
+        #[arg(long, default_value = "64")]
+        batch_size: usize,
+        #[arg(long, default_value = "6")]
+        tree_max_depth: usize,
+        #[arg(long, default_value = "0.90")]
+        tree_min_purity: f32,
+    },
+    /// Bayesian hyperparameter optimization for scanner model
+    AutotuneScanner {
+        /// Path to audit log JSONL file
+        #[arg(short, long)]
+        input: String,
+        /// Output best model file path
+        #[arg(short, long, default_value = "scanner_model_best.bin")]
+        output: String,
+        /// Directory (or file) containing .txt wordlists of scanner paths
+        #[arg(long)]
+        wordlists: Option<String>,
+        /// Include CSIC 2010 dataset as base training data
+        #[arg(long)]
+        csic: bool,
+        /// Number of optimization trials
+        #[arg(long, default_value = "200")]
+        trials: usize,
+        /// F-beta parameter (1.0 = F1, 2.0 = recall-weighted)
+        #[arg(long, default_value = "1.0")]
+        beta: f64,
+        /// JSONL file to log each trial's parameters and results
+        #[arg(long)]
+        trial_log: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplayMode {
+    /// Replay through ensemble models (scanner + DDoS)
+    Ensemble {
+        /// Path to audit log JSONL file
+        #[arg(short, long)]
+        input: String,
+        /// Sliding window size in seconds
+        #[arg(long, default_value = "60")]
+        window_secs: u64,
+        /// Minimum events per IP before DDoS classification
+        #[arg(long, default_value = "5")]
+        min_events: usize,
+    },
+    /// Replay through legacy KNN DDoS detector
+    Ddos {
+        /// Path to audit log JSONL file
+        #[arg(short, long)]
+        input: String,
+        /// Path to trained model file
+        #[arg(short, long, default_value = "ddos_model.bin")]
+        model: String,
+        /// Optional config file (for rate limit settings)
+        #[arg(short, long)]
+        config: Option<String>,
+        /// KNN k parameter
+        #[arg(long, default_value = "5")]
+        k: usize,
+        /// Attack threshold
+        #[arg(long, default_value = "0.6")]
+        threshold: f64,
+        /// Sliding window size in seconds
+        #[arg(long, default_value = "60")]
+        window_secs: u64,
+        /// Minimum events per IP before classification
+        #[arg(long, default_value = "10")]
+        min_events: usize,
+        /// Also run rate limiter during replay
+        #[arg(long)]
+        rate_limit: bool,
+    },
 }
 
 
@@ -179,37 +349,102 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Serve { upgrade: false }) {
         Commands::Serve { upgrade } => run_serve(upgrade),
-        Commands::Replay { input, window_secs, min_events } => {
-            sunbeam_proxy::ensemble::replay::run(sunbeam_proxy::ensemble::replay::ReplayEnsembleArgs {
-                input, window_secs, min_events,
-            })
+        Commands::Replay { mode } => match mode {
+            ReplayMode::Ensemble { input, window_secs, min_events } => {
+                sunbeam_proxy::ensemble::replay::run(sunbeam_proxy::ensemble::replay::ReplayEnsembleArgs {
+                    input, window_secs, min_events,
+                })
+            }
+            ReplayMode::Ddos { input, model, config, k, threshold, window_secs, min_events, rate_limit } => {
+                ddos::replay::run(ddos::replay::ReplayArgs {
+                    input, model_path: model, config_path: config, k, threshold, window_secs, min_events, rate_limit,
+                })
+            }
         },
+        Commands::TrainDdos {
+            input,
+            output,
+            attack_ips,
+            normal_ips,
+            heuristics,
+            k,
+            threshold,
+            window_secs,
+            min_events,
+        } => ddos::train::run(ddos::train::TrainArgs {
+            input,
+            output,
+            attack_ips,
+            normal_ips,
+            heuristics,
+            k,
+            threshold,
+            window_secs,
+            min_events,
+        }),
+        Commands::TrainScanner {
+            input,
+            output,
+            wordlists,
+            threshold,
+            csic,
+        } => scanner::train::run(scanner::train::TrainScannerArgs {
+            input,
+            output,
+            wordlists,
+            threshold,
+            csic,
+        }),
         Commands::DownloadDatasets => {
             sunbeam_proxy::dataset::download::download_all()
         },
-        Commands::PrepareDataset { input, owasp, wordlists, output, seed, heuristics, inject_csic, inject_modsec } => {
+        Commands::PrepareDataset { input, owasp, wordlists, output, seed, heuristics } => {
             sunbeam_proxy::dataset::prepare::run(sunbeam_proxy::dataset::prepare::PrepareDatasetArgs {
-                input, owasp, wordlists, output, seed, heuristics, inject_csic, inject_modsec,
+                input, owasp, wordlists, output, seed, heuristics,
             })
         },
         #[cfg(feature = "training")]
-        Commands::TrainMlpScanner { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda } => {
+        Commands::TrainMlpScanner { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity } => {
             sunbeam_proxy::training::train_scanner::run(sunbeam_proxy::training::train_scanner::TrainScannerMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda,
+                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity,
             })
         },
         #[cfg(feature = "training")]
-        Commands::TrainMlpDdos { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda } => {
+        Commands::TrainMlpDdos { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity } => {
             sunbeam_proxy::training::train_ddos::run(sunbeam_proxy::training::train_ddos::TrainDdosMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda,
+                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity,
             })
         },
-        #[cfg(feature = "training")]
-        Commands::SweepCookieWeight { dataset, detector, weights, tree_max_depth, tree_min_purity, min_samples_leaf } => {
-            sunbeam_proxy::training::sweep::run_cookie_sweep(
-                &dataset, &detector, weights.as_deref(), tree_max_depth, tree_min_purity, min_samples_leaf,
-            )
-        },
+        Commands::AutotuneDdos {
+            input,
+            output,
+            trials,
+            beta,
+            trial_log,
+        } => autotune::ddos::run_autotune(autotune::ddos::AutotuneDdosArgs {
+            input,
+            output,
+            trials,
+            beta,
+            trial_log,
+        }),
+        Commands::AutotuneScanner {
+            input,
+            output,
+            wordlists,
+            csic,
+            trials,
+            beta,
+            trial_log,
+        } => autotune::scanner::run_autotune(autotune::scanner::AutotuneScannerArgs {
+            input,
+            output,
+            wordlists,
+            csic,
+            trials,
+            beta,
+            trial_log,
+        }),
     }
 }
 
@@ -233,14 +468,42 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 2. Init DDoS detector if configured (ensemble: compiled-in weights).
     let ddos_detector = if let Some(ddos_cfg) = &cfg.ddos {
         if ddos_cfg.enabled {
-            let detector = Arc::new(sunbeam_proxy::ddos::detector::DDoSDetector::new(ddos_cfg));
-            tracing::info!(
-                threshold = ddos_cfg.threshold,
-                observe_only = ddos_cfg.observe_only,
-                "DDoS ensemble detector enabled"
-            );
-            if ddos_cfg.observe_only {
-                tracing::warn!("DDoS detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked");
+            if ddos_cfg.use_ensemble {
+                // Ensemble path: compiled-in weights, no model file needed.
+                // We still need a TrainedModel for the struct, but it won't be used.
+                let dummy_model = ddos::model::TrainedModel::empty(ddos_cfg.k, ddos_cfg.threshold);
+                let detector = Arc::new(ddos::detector::DDoSDetector::new_ensemble(dummy_model, ddos_cfg));
+                tracing::info!(
+                    k = ddos_cfg.k,
+                    threshold = ddos_cfg.threshold,
+                    "DDoS ensemble detector enabled"
+                );
+                Some(detector)
+            } else if let Some(ref model_path) = ddos_cfg.model_path {
+                match ddos::model::TrainedModel::load(
+                    std::path::Path::new(model_path),
+                    Some(ddos_cfg.k),
+                    Some(ddos_cfg.threshold),
+                ) {
+                    Ok(model) => {
+                        let point_count = model.point_count();
+                        let detector = Arc::new(ddos::detector::DDoSDetector::new(model, ddos_cfg));
+                        tracing::info!(
+                            points = point_count,
+                            k = ddos_cfg.k,
+                            threshold = ddos_cfg.threshold,
+                            "DDoS detector loaded"
+                        );
+                        Some(detector)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to load DDoS model; detection disabled");
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!("DDoS enabled but no model_path and use_ensemble=false; detection disabled");
+                None
             }
             Some(detector)
         } else {
@@ -278,30 +541,84 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 2c. Init scanner detector if configured (ensemble: compiled-in weights).
     let (scanner_detector, bot_allowlist) = if let Some(scanner_cfg) = &cfg.scanner {
         if scanner_cfg.enabled {
-            let detector = scanner::detector::ScannerDetector::new(&cfg.routes);
-            let handle = Arc::new(arc_swap::ArcSwap::from_pointee(detector));
+            if scanner_cfg.use_ensemble {
+                // Ensemble path: compiled-in weights, no model file needed.
+                let detector = scanner::detector::ScannerDetector::new_ensemble(&cfg.routes);
+                let handle = Arc::new(arc_swap::ArcSwap::from_pointee(detector));
 
-            let bot_allowlist = if !scanner_cfg.allowlist.is_empty() {
-                let al = scanner::allowlist::BotAllowlist::spawn(
-                    &scanner_cfg.allowlist,
-                    scanner_cfg.bot_cache_ttl_secs,
-                );
+                // Start bot allowlist if rules are configured.
+                let bot_allowlist = if !scanner_cfg.allowlist.is_empty() {
+                    let al = scanner::allowlist::BotAllowlist::spawn(
+                        &scanner_cfg.allowlist,
+                        scanner_cfg.bot_cache_ttl_secs,
+                    );
+                    tracing::info!(
+                        rules = scanner_cfg.allowlist.len(),
+                        "bot allowlist enabled"
+                    );
+                    Some(al)
+                } else {
+                    None
+                };
+
                 tracing::info!(
-                    rules = scanner_cfg.allowlist.len(),
-                    "bot allowlist enabled"
+                    threshold = scanner_cfg.threshold,
+                    "scanner ensemble detector enabled"
                 );
-                Some(al)
-            } else {
-                None
-            };
+                (Some(handle), bot_allowlist)
+            } else if let Some(ref model_path) = scanner_cfg.model_path {
+                match scanner::model::ScannerModel::load(std::path::Path::new(model_path)) {
+                    Ok(mut model) => {
+                        let fragment_count = model.fragments.len();
+                        model.threshold = scanner_cfg.threshold;
+                        let detector = scanner::detector::ScannerDetector::new(&model, &cfg.routes);
+                        let handle = Arc::new(arc_swap::ArcSwap::from_pointee(detector));
 
-            tracing::info!(
-                threshold = scanner_cfg.threshold,
-                observe_only = scanner_cfg.observe_only,
-                "scanner ensemble detector enabled"
-            );
-            if scanner_cfg.observe_only {
-                tracing::warn!("scanner detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked");
+                        // Start bot allowlist if rules are configured.
+                        let bot_allowlist = if !scanner_cfg.allowlist.is_empty() {
+                            let al = scanner::allowlist::BotAllowlist::spawn(
+                                &scanner_cfg.allowlist,
+                                scanner_cfg.bot_cache_ttl_secs,
+                            );
+                            tracing::info!(
+                                rules = scanner_cfg.allowlist.len(),
+                                "bot allowlist enabled"
+                            );
+                            Some(al)
+                        } else {
+                            None
+                        };
+
+                        // Start background file watcher for hot-reload.
+                        if scanner_cfg.poll_interval_secs > 0 {
+                            let watcher_handle = handle.clone();
+                            let watcher_model_path = std::path::PathBuf::from(model_path);
+                            let threshold = scanner_cfg.threshold;
+                            let routes = cfg.routes.clone();
+                            let interval = std::time::Duration::from_secs(scanner_cfg.poll_interval_secs);
+                            std::thread::spawn(move || {
+                                scanner::watcher::watch_scanner_model(
+                                    watcher_handle, watcher_model_path, threshold, routes, interval,
+                                );
+                            });
+                        }
+
+                        tracing::info!(
+                            fragments = fragment_count,
+                            threshold = scanner_cfg.threshold,
+                            poll_interval_secs = scanner_cfg.poll_interval_secs,
+                            "scanner detector loaded"
+                        );
+                        (Some(handle), bot_allowlist)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to load scanner model; scanner detection disabled");
+                        (None, None)
+                    }
+                }
+            } else {
+                tracing::warn!("scanner enabled but no model_path and use_ensemble=false; scanner detection disabled");
+                (None, None)
             }
             (Some(handle), bot_allowlist)
         } else {
