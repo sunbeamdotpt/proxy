@@ -21,6 +21,8 @@ pub struct RequestCtx {
     pub acme_backend: Option<String>,
     /// Path prefix to strip before forwarding to the upstream (e.g. "/kratos").
     pub strip_prefix: Option<String>,
+    /// Original downstream scheme ("http" or "https"), captured in request_filter.
+    pub downstream_scheme: &'static str,
 }
 
 impl SunbeamProxy {
@@ -63,6 +65,7 @@ impl ProxyHttp for SunbeamProxy {
             route: None,
             start_time: Instant::now(),
             acme_backend: None,
+            downstream_scheme: "https",
             strip_prefix: None,
         }
     }
@@ -76,6 +79,8 @@ impl ProxyHttp for SunbeamProxy {
     where
         Self::CTX: Send + Sync,
     {
+        ctx.downstream_scheme = if is_plain_http(session) { "http" } else { "https" };
+
         if is_plain_http(session) {
             let path = session.req_header().uri.path().to_string();
 
@@ -210,6 +215,21 @@ impl ProxyHttp for SunbeamProxy {
     where
         Self::CTX: Send + Sync,
     {
+        // Inform backends of the original downstream scheme so they can construct
+        // correct absolute URLs (e.g. OIDC redirect_uri, CSRF checks).
+        // Must use insert_header (not headers.insert) so that both base.headers
+        // and the CaseMap are updated together — header_to_h1_wire zips them
+        // and silently drops headers only present in base.headers.
+        upstream_req
+            .insert_header("x-forwarded-proto", ctx.downstream_scheme)
+            .map_err(|e| {
+                pingora_core::Error::because(
+                    pingora_core::ErrorType::InternalError,
+                    "failed to insert x-forwarded-proto",
+                    e,
+                )
+            })?;
+
         if ctx.route.as_ref().map(|r| r.websocket).unwrap_or(false) {
             for name in &[CONNECTION, UPGRADE] {
                 if let Some(val) = session.req_header().headers.get(name.clone()) {
@@ -283,5 +303,61 @@ impl ProxyHttp for SunbeamProxy {
             error   = error_str,
             "request"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::HeaderValue;
+
+    /// insert_header keeps CaseMap and base.headers in sync so the header
+    /// survives header_to_h1_wire serialization.
+    #[test]
+    fn test_x_forwarded_proto_https_roundtrips_through_insert_header() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("x-forwarded-proto", "https").unwrap();
+        assert_eq!(
+            req.headers.get("x-forwarded-proto"),
+            Some(&HeaderValue::from_static("https")),
+        );
+        // Verify it survives wire serialization (CaseMap + base.headers in sync).
+        let mut buf = Vec::new();
+        req.header_to_h1_wire(&mut buf);
+        let wire = String::from_utf8(buf).unwrap();
+        assert!(wire.contains("x-forwarded-proto: https"), "wire: {wire:?}");
+    }
+
+    #[test]
+    fn test_x_forwarded_proto_http_roundtrips_through_insert_header() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("x-forwarded-proto", "http").unwrap();
+        assert_eq!(
+            req.headers.get("x-forwarded-proto"),
+            Some(&HeaderValue::from_static("http")),
+        );
+        let mut buf = Vec::new();
+        req.header_to_h1_wire(&mut buf);
+        let wire = String::from_utf8(buf).unwrap();
+        assert!(wire.contains("x-forwarded-proto: http"), "wire: {wire:?}");
+    }
+
+    /// ctx.downstream_scheme defaults to "https" and is readable.
+    #[test]
+    fn test_ctx_default_scheme_is_https() {
+        let ctx = RequestCtx {
+            route: None,
+            start_time: Instant::now(),
+            acme_backend: None,
+            strip_prefix: None,
+            downstream_scheme: "https",
+        };
+        assert_eq!(ctx.downstream_scheme, "https");
+    }
+
+    #[test]
+    fn test_backend_addr_strips_scheme() {
+        assert_eq!(backend_addr("http://svc.ns.svc.cluster.local:80"), "svc.ns.svc.cluster.local:80");
+        assert_eq!(backend_addr("https://svc.ns.svc.cluster.local:443"), "svc.ns.svc.cluster.local:443");
     }
 }

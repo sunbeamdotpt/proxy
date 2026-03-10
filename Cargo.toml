@@ -3,6 +3,10 @@ name    = "sunbeam-proxy"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "sunbeam_proxy"
+path = "src/lib.rs"
+
 [dependencies]
 # Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
 pingora       = { version = "0.7", features = ["rustls"] }

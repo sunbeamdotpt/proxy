@@ -1,9 +1,9 @@
-mod acme;
 mod cert;
-mod config;
-mod proxy;
 mod telemetry;
 mod watcher;
+
+use sunbeam_proxy::{acme, config};
+use sunbeam_proxy::proxy::SunbeamProxy;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -11,7 +11,6 @@ use anyhow::Result;
 use kube::Client;
 use pingora::server::{configuration::Opt, Server};
 use pingora_proxy::http_proxy_service;
-use proxy::SunbeamProxy;
 use std::sync::RwLock;
 
 fn main() -> Result<()> {
