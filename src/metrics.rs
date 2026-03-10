@@ -95,6 +95,105 @@ pub static ACTIVE_CONNECTIONS: LazyLock<Gauge> = LazyLock::new(|| {
     g
 });
 
+pub static CLUSTER_PEERS: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_peers",
+        "Number of active cluster peers",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static CLUSTER_BANDWIDTH_IN: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_bandwidth_in_bytes",
+        "Total cluster-wide inbound bytes",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static CLUSTER_BANDWIDTH_OUT: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_bandwidth_out_bytes",
+        "Total cluster-wide outbound bytes",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static CLUSTER_GOSSIP_MESSAGES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "sunbeam_cluster_gossip_messages_total",
+            "Gossip messages sent and received",
+        ),
+        &["channel"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static CLUSTER_AGGREGATE_IN_RATE: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_aggregate_in_bytes_per_sec",
+        "Cluster-wide aggregate inbound bandwidth (bytes/sec, sliding window)",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static CLUSTER_AGGREGATE_OUT_RATE: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_aggregate_out_bytes_per_sec",
+        "Cluster-wide aggregate outbound bandwidth (bytes/sec, sliding window)",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static CLUSTER_AGGREGATE_TOTAL_RATE: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "sunbeam_cluster_aggregate_total_bytes_per_sec",
+        "Cluster-wide aggregate total bandwidth (bytes/sec, sliding window)",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
+});
+
+pub static BANDWIDTH_LIMIT_DECISIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "sunbeam_bandwidth_limit_decisions_total",
+            "Cluster bandwidth limit enforcement decisions",
+        ),
+        &["decision"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static CLUSTER_MODEL_UPDATES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "sunbeam_cluster_model_updates_total",
+            "Model distribution events",
+        ),
+        &["model_type", "result"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
 /// Spawn a lightweight HTTP server on `port` serving `/metrics` and `/health`.
 /// Returns immediately; the server runs in the background on the tokio runtime.
 /// Port 0 = disabled.
