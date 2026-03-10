@@ -1,32 +1,20 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 use rand::Rng;
 
 #[derive(Debug, Clone)]
-/// Paramtype.
 pub enum ParamType {
-    /// Continuous.
     Continuous { min: f64, max: f64 },
-    /// Integer.
     Integer { min: i64, max: i64 },
-    /// Logscale.
     LogScale { min: f64, max: f64 },
 }
 
 #[derive(Debug, Clone)]
-/// Paramdef.
 pub struct ParamDef {
-    /// Name.
     pub name: String,
-    /// Param type.
     pub param_type: ParamType,
 }
 
 #[derive(Debug, Clone)]
-/// Paramspace.
 pub struct ParamSpace {
-    /// Params.
     pub params: Vec<ParamDef>,
 }
 
