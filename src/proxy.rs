@@ -1,7 +1,7 @@
 use crate::acme::AcmeRoutes;
 use crate::config::RouteConfig;
 use async_trait::async_trait;
-use http::header::{CONNECTION, HOST, UPGRADE};
+use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
 use pingora_core::{upstreams::peer::HttpPeer, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
@@ -147,6 +147,31 @@ impl ProxyHttp for SunbeamProxy {
             return Ok(true);
         }
 
+        // Handle Expect: 100-continue before connecting to upstream.
+        //
+        // Docker's OCI distribution protocol sends Expect: 100-continue for
+        // large layer blob uploads (typically > 5 MB).  Without this, Pingora
+        // forwards the header to the upstream (e.g. Gitea), the upstream
+        // responds with 100 Continue, and Pingora must then proxy that
+        // informational response back to the client.  Pingora's handling of
+        // upstream informational responses is unreliable and can cause the
+        // upload to fail with a spurious 400 for the client.
+        //
+        // By responding with 100 Continue here — before upstream_peer is
+        // even called — we unblock the client immediately.  The Expect header
+        // is stripped in upstream_request_filter so the upstream never sends
+        // its own 100 Continue.
+        if session
+            .req_header()
+            .headers
+            .get(EXPECT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("100-continue"))
+            .unwrap_or(false)
+        {
+            session.write_continue_response().await?;
+        }
+
         Ok(false)
     }
 
@@ -237,6 +262,13 @@ impl ProxyHttp for SunbeamProxy {
                 }
             }
         }
+
+        // Strip Expect: 100-continue — the proxy already sent 100 Continue to
+        // the downstream client in request_filter, so we must not forward the
+        // header to the upstream.  If the upstream also sees Expect it will
+        // send its own 100 Continue, which Pingora cannot reliably proxy back
+        // (it has already been consumed) and which can corrupt the response.
+        upstream_req.remove_header("expect");
 
         // Strip path prefix before forwarding (e.g. /kratos → /).
         if let Some(prefix) = &ctx.strip_prefix {
@@ -359,5 +391,20 @@ mod tests {
     fn test_backend_addr_strips_scheme() {
         assert_eq!(backend_addr("http://svc.ns.svc.cluster.local:80"), "svc.ns.svc.cluster.local:80");
         assert_eq!(backend_addr("https://svc.ns.svc.cluster.local:443"), "svc.ns.svc.cluster.local:443");
+    }
+
+    /// remove_header("expect") strips the header from the upstream request.
+    /// This is tested independently of the async proxy logic because
+    /// upstream_request_filter requires a live session.
+    #[test]
+    fn test_expect_header_stripped_before_upstream() {
+        let mut req = RequestHeader::build("PUT", b"/v2/studio/image/blobs/uploads/uuid", None).unwrap();
+        req.insert_header("expect", "100-continue").unwrap();
+        req.insert_header("content-length", "188000000").unwrap();
+        assert!(req.headers.get("expect").is_some(), "expect header should be present before stripping");
+        req.remove_header("expect");
+        assert!(req.headers.get("expect").is_none(), "expect header should be gone after remove_header");
+        // Content-Length must survive the strip.
+        assert!(req.headers.get("content-length").is_some());
     }
 }
