@@ -1,6 +1,3 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 //! Weight export: converts trained models into standalone Rust `const` arrays
 //! and optionally Lean 4 definitions.
 //!
@@ -57,7 +54,7 @@ pub fn generate_rust_source(model: &ExportedModel) -> String {
     writeln!(s).unwrap();
 
     // Threshold.
-    writeln!(s, "pub const THRESHOLD: f32 = {:.8};", sanitize(model.threshold)).unwrap();
+    writeln!(s, "pub const THRESHOLD: f32 = {:.8};", model.threshold).unwrap();
     writeln!(s).unwrap();
 
     // Normalization params.
@@ -77,7 +74,7 @@ pub fn generate_rust_source(model: &ExportedModel) -> String {
             if i > 0 {
                 write!(s, ", ").unwrap();
             }
-            write!(s, "{:.8}", sanitize(*v)).unwrap();
+            write!(s, "{:.8}", v).unwrap();
         }
         writeln!(s, "],").unwrap();
     }
@@ -91,7 +88,7 @@ pub fn generate_rust_source(model: &ExportedModel) -> String {
     write_f32_array(&mut s, "W2", &model.w2);
 
     // B2.
-    writeln!(s, "pub const B2: f32 = {:.8};", sanitize(model.b2)).unwrap();
+    writeln!(s, "pub const B2: f32 = {:.8};", model.b2).unwrap();
     writeln!(s).unwrap();
 
     // Tree nodes.
@@ -210,11 +207,6 @@ pub fn export_to_file(model: &ExportedModel, path: &Path) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Sanitize a float for Rust source: replace NaN/Inf with 0.0.
-fn sanitize(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
-}
-
 fn write_f32_array(s: &mut String, name: &str, values: &[f32]) {
     writeln!(s, "pub const {}: [f32; {}] = [", name, values.len()).unwrap();
     write!(s, "    ").unwrap();
@@ -226,7 +218,7 @@ fn write_f32_array(s: &mut String, name: &str, values: &[f32]) {
         if i > 0 && i % 8 == 0 {
             write!(s, "\n    ").unwrap();
         }
-        write!(s, "{:.8}", sanitize(*v)).unwrap();
+        write!(s, "{:.8}", v).unwrap();
     }
     writeln!(s, "\n];").unwrap();
     writeln!(s).unwrap();
