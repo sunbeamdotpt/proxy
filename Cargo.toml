@@ -9,10 +9,10 @@ path = "src/lib.rs"
 
 [dependencies]
 # Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
-pingora       = { version = "0.7", features = ["rustls"] }
-pingora-proxy = { version = "0.7", features = ["rustls"] }
-pingora-core  = { version = "0.7", features = ["rustls"] }
-pingora-http  = "0.7"
+pingora       = { version = "0.8", features = ["rustls"] }
+pingora-proxy = { version = "0.8", features = ["rustls"] }
+pingora-core  = { version = "0.8", features = ["rustls"] }
+pingora-http  = "0.8"
 
 # HTTP header constants
 http = "1"
