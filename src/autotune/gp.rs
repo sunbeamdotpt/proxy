@@ -1,6 +1,3 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 /// Gaussian Process surrogate with RBF kernel and Cholesky solver.
 /// Designed for <200 observations in 4-10 dimensions.
 
@@ -10,7 +7,6 @@ fn rbf_kernel(x1: &[f64], x2: &[f64], length_scale: f64) -> f64 {
     (-sq_dist / (2.0 * length_scale * length_scale)).exp()
 }
 
-/// Gaussianprocess.
 pub struct GaussianProcess {
     xs: Vec<Vec<f64>>,
     ys: Vec<f64>,
