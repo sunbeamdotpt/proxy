@@ -3,7 +3,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::{runtime::watcher, Api, Client};
 use tokio::sync::mpsc;
 
-/// Watch `pingora-tls` and `pingora-config` in the ingress namespace.
+/// Watch the TLS Secret and config ConfigMap for changes.
 ///
 /// On cert change: write new cert bytes from the Apply event directly to the
 /// configured paths (avoiding kubelet volume-sync delay), then trigger a
@@ -15,14 +15,21 @@ use tokio::sync::mpsc;
 ///
 /// No-ops when no K8s client is available (e.g. ad-hoc local runs outside a
 /// cluster) so the binary works in both environments.
-pub async fn run_watcher(client: Client, cert_path: String, key_path: String) {
+pub async fn run_watcher(
+    client: Client,
+    namespace: String,
+    tls_secret: String,
+    config_configmap: String,
+    cert_path: String,
+    key_path: String,
+) {
     let (tx, mut rx) = mpsc::channel::<()>(2);
 
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "ingress");
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "ingress");
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
 
-    tokio::spawn(watch_secret(secret_api, cert_path, key_path, tx.clone()));
-    tokio::spawn(watch_configmap(cm_api, tx));
+    tokio::spawn(watch_secret(secret_api, tls_secret, cert_path, key_path, tx.clone()));
+    tokio::spawn(watch_configmap(cm_api, config_configmap, tx));
 
     if rx.recv().await.is_some() {
         tracing::info!("initiating graceful upgrade");
@@ -32,11 +39,13 @@ pub async fn run_watcher(client: Client, cert_path: String, key_path: String) {
 
 async fn watch_secret(
     api: Api<Secret>,
+    secret_name: String,
     cert_path: String,
     key_path: String,
     tx: mpsc::Sender<()>,
 ) {
-    let cfg = watcher::Config::default().fields("metadata.name=pingora-tls");
+    let field_selector = format!("metadata.name={secret_name}");
+    let cfg = watcher::Config::default().fields(&field_selector);
     let mut stream = Box::pin(watcher(api, cfg));
     let mut initialized = false;
 
@@ -44,14 +53,10 @@ async fn watch_secret(
         match result {
             Ok(watcher::Event::InitDone) => {
                 initialized = true;
-                tracing::debug!("pingora-tls watcher ready");
+                tracing::debug!(%secret_name, "TLS secret watcher ready");
             }
-            // Write the new cert directly from the event object before triggering the
-            // upgrade.  The Apply event carries the full updated Secret, so we don't
-            // need a separate API call and the cert files are ready before the new
-            // process's svc.add_tls() runs.
             Ok(watcher::Event::Apply(secret)) if initialized => {
-                tracing::info!("pingora-tls changed — writing new cert");
+                tracing::info!(%secret_name, "TLS secret changed — writing new cert");
                 match crate::cert::write_from_secret(&secret, &cert_path, &key_path) {
                     Ok(()) => {
                         let _ = tx.send(()).await;
@@ -69,8 +74,9 @@ async fn watch_secret(
     }
 }
 
-async fn watch_configmap(api: Api<ConfigMap>, tx: mpsc::Sender<()>) {
-    let cfg = watcher::Config::default().fields("metadata.name=pingora-config");
+async fn watch_configmap(api: Api<ConfigMap>, configmap_name: String, tx: mpsc::Sender<()>) {
+    let field_selector = format!("metadata.name={configmap_name}");
+    let cfg = watcher::Config::default().fields(&field_selector);
     let mut stream = Box::pin(watcher(api, cfg));
     let mut initialized = false;
 
@@ -78,10 +84,10 @@ async fn watch_configmap(api: Api<ConfigMap>, tx: mpsc::Sender<()>) {
         match result {
             Ok(watcher::Event::InitDone) => {
                 initialized = true;
-                tracing::debug!("pingora-config watcher ready");
+                tracing::debug!(%configmap_name, "config watcher ready");
             }
             Ok(watcher::Event::Apply(_)) if initialized => {
-                tracing::info!("pingora-config changed — triggering upgrade");
+                tracing::info!(%configmap_name, "config changed — triggering upgrade");
                 let _ = tx.send(()).await;
                 return;
             }

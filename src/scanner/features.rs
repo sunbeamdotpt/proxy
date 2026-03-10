@@ -14,6 +14,7 @@ const TRAVERSAL_PATTERNS: &[&str] = &["..", "%00", "%0a", "%27", "%3c"];
 
 /// Extract all 12 scanner features from a single request.
 /// No heap allocation — all work done on references and stack buffers.
+#[allow(clippy::too_many_arguments)]
 pub fn extract_features(
     method: &str,
     path: &str,

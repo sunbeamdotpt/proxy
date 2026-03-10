@@ -50,6 +50,7 @@ impl ScannerDetector {
     /// Returns a verdict with the action, raw score, and reason.
     /// The score and reason are captured in pipeline logs so the training
     /// pipeline always has unfiltered data to retrain from.
+    #[allow(clippy::too_many_arguments)]
     pub fn check(
         &self,
         method: &str,
@@ -107,8 +108,8 @@ impl ScannerDetector {
 
         // 3. Compute score = bias + dot(weights, features) + interaction terms
         let mut score = self.weights[NUM_SCANNER_FEATURES + 2]; // bias (index 14)
-        for i in 0..NUM_SCANNER_FEATURES {
-            score += self.weights[i] * f[i];
+        for (i, &fi) in f.iter().enumerate().take(NUM_SCANNER_FEATURES) {
+            score += self.weights[i] * fi;
         }
         // Interaction: suspicious_path AND no_cookies
         score += self.weights[12] * f[0] * (1.0 - f[3]);

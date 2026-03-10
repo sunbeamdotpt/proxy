@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::{Arc, RwLock}};
 /// Maps a challenge path to the backend address that can answer it.
 ///
 /// Key:   `/.well-known/acme-challenge/<token>`
-/// Value: `cm-acme-http-solver-<hash>.ingress.svc.cluster.local:8089`
+/// Value: `cm-acme-http-solver-<hash>.<namespace>.svc.cluster.local:8089`
 ///
 /// cert-manager creates one Ingress per challenge domain with exactly this
 /// path and backend.  Our proxy consults this table to route each challenge
@@ -18,15 +18,15 @@ use std::{collections::HashMap, sync::{Arc, RwLock}};
 /// can be written from the watcher runtime without cross-runtime waker issues.
 pub type AcmeRoutes = Arc<RwLock<HashMap<String, String>>>;
 
-/// Watch Ingress objects in the ingress namespace and maintain `routes`.
+/// Watch Ingress objects and maintain `routes`.
 ///
 /// cert-manager creates an Ingress for each HTTP-01 challenge it manages.
 /// The Ingress contains a path rule for `/.well-known/acme-challenge/<token>`
 /// pointing to a per-challenge solver Service.  We populate the route table
 /// from these rules so the proxy can forward each challenge token to the
 /// correct solver pod without the nondeterminism of a shared stable Service.
-pub async fn watch_ingresses(client: Client, routes: AcmeRoutes) {
-    let api: Api<Ingress> = Api::namespaced(client, "ingress");
+pub async fn watch_ingresses(client: Client, namespace: String, routes: AcmeRoutes) {
+    let api: Api<Ingress> = Api::namespaced(client, &namespace);
 
     // Verify Ingress API access before entering the watch loop. A failure here
     // almost always means cert-manager is not installed or RBAC is wrong.
@@ -43,12 +43,9 @@ pub async fn watch_ingresses(client: Client, routes: AcmeRoutes) {
 
     while let Some(result) = stream.next().await {
         match result {
-            // InitApply fires for each Ingress during the initial list (kube v3+).
-            // Apply fires for subsequent creates/updates.
-            // Both must be handled to catch Ingresses that existed before the proxy started.
             Ok(watcher::Event::InitApply(ing)) | Ok(watcher::Event::Apply(ing)) => {
                 let mut map = routes.write().unwrap_or_else(|e| e.into_inner());
-                upsert_routes(&ing, &mut map);
+                upsert_routes(&ing, &namespace, &mut map);
             }
             Ok(watcher::Event::Delete(ing)) => {
                 let mut map = routes.write().unwrap_or_else(|e| e.into_inner());
@@ -63,7 +60,7 @@ pub async fn watch_ingresses(client: Client, routes: AcmeRoutes) {
     }
 }
 
-fn upsert_routes(ingress: &Ingress, map: &mut HashMap<String, String>) {
+fn upsert_routes(ingress: &Ingress, namespace: &str, map: &mut HashMap<String, String>) {
     let Some(spec) = &ingress.spec else { return };
     for rule in spec.rules.as_deref().unwrap_or(&[]) {
         let Some(http) = &rule.http else { continue };
@@ -75,7 +72,7 @@ fn upsert_routes(ingress: &Ingress, map: &mut HashMap<String, String>) {
             let Some(svc) = p.backend.service.as_ref() else { continue };
             let Some(port) = svc.port.as_ref().and_then(|p| p.number) else { continue };
             let backend = format!(
-                "{}.ingress.svc.cluster.local:{port}",
+                "{}.{namespace}.svc.cluster.local:{port}",
                 svc.name
             );
             tracing::debug!(path, %backend, "added ACME challenge route");

@@ -2,18 +2,23 @@ use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 
-/// Fetch the `pingora-tls` Secret from the ingress namespace and write
-/// `tls.crt` / `tls.key` to the paths declared in config.toml.
+/// Fetch the TLS Secret and write `tls.crt` / `tls.key` to the configured paths.
 ///
 /// Called at startup (non-upgrade) so the proxy never depends on kubelet
 /// volume-sync timing: the cert files are written directly from the K8s API
 /// before `svc.add_tls()` is called.
-pub async fn fetch_and_write(client: &Client, cert_path: &str, key_path: &str) -> Result<()> {
-    let api: Api<Secret> = Api::namespaced(client.clone(), "ingress");
+pub async fn fetch_and_write(
+    client: &Client,
+    namespace: &str,
+    secret_name: &str,
+    cert_path: &str,
+    key_path: &str,
+) -> Result<()> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
     let secret = api
-        .get("pingora-tls")
+        .get(secret_name)
         .await
-        .context("fetching pingora-tls Secret from K8s API")?;
+        .with_context(|| format!("fetching {secret_name} Secret from K8s API"))?;
     write_from_secret(&secret, cert_path, key_path)
 }
 
@@ -27,14 +32,14 @@ pub fn write_from_secret(secret: &Secret, cert_path: &str, key_path: &str) -> Re
     let data = secret
         .data
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("pingora-tls Secret has no data"))?;
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret has no data"))?;
 
     let crt = data
         .get("tls.crt")
-        .ok_or_else(|| anyhow::anyhow!("pingora-tls missing tls.crt"))?;
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret missing tls.crt"))?;
     let key = data
         .get("tls.key")
-        .ok_or_else(|| anyhow::anyhow!("pingora-tls missing tls.key"))?;
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret missing tls.key"))?;
 
     // /etc/tls is an emptyDir; create it if the pod just started.
     if let Some(parent) = std::path::Path::new(cert_path).parent() {

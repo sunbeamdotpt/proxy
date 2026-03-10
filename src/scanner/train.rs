@@ -14,6 +14,7 @@ pub struct TrainScannerArgs {
     pub output: String,
     pub wordlists: Option<String>,
     pub threshold: f64,
+    pub csic: bool,
 }
 
 /// Default suspicious fragments — matches the DDoS feature list plus extras.
@@ -131,6 +132,54 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
             samples.push(LabeledSample {
                 features: feats,
                 label: l,
+            });
+        }
+    }
+
+    // 1b. Optionally fetch CSIC 2010 dataset and add labeled entries
+    if args.csic {
+        let csic_entries = crate::scanner::csic::fetch_csic_dataset()?;
+        for (_, host_prefix) in &csic_entries {
+            log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
+        }
+        for (fields, host_prefix) in &csic_entries {
+            let has_cookies = fields.has_cookies.unwrap_or(false);
+            let has_referer = fields
+                .referer
+                .as_ref()
+                .map(|r| r != "-" && !r.is_empty())
+                .unwrap_or(false);
+            let has_accept_language = fields
+                .accept_language
+                .as_ref()
+                .map(|a| a != "-" && !a.is_empty())
+                .unwrap_or(false);
+
+            let feats = features::extract_features(
+                &fields.method,
+                &fields.path,
+                host_prefix,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                "-",
+                &fields.user_agent,
+                fields.content_length,
+                &fragment_hashes,
+                &extension_hashes,
+                &log_hosts,
+            );
+
+            // CSIC entries always have a ground-truth label.
+            let label = match fields.label.as_deref() {
+                Some("attack" | "anomalous") => 1.0,
+                Some("normal") => 0.0,
+                _ => continue,
+            };
+
+            samples.push(LabeledSample {
+                features: feats,
+                label,
             });
         }
     }
@@ -408,6 +457,7 @@ fn train_logistic_regression(
     weights
 }
 
+#[allow(clippy::too_many_arguments)]
 fn label_request(
     path: &str,
     has_cookies: bool,

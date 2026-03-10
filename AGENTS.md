@@ -41,7 +41,7 @@ sunbeam-proxy is a TLS-terminating reverse proxy built on [Pingora](https://gith
 - **SSH TCP passthrough**: raw TCP proxy for SSH traffic (port 22 to Gitea)
 - **HTTP-to-HTTPS redirect**: with per-route opt-out via `disable_secure_redirection`
 
-See [docs/README.md](docs/README.md) for full feature documentation and configuration reference.
+See [README.md](README.md) for full feature documentation and configuration reference.
 
 ## Source Files
 
@@ -64,7 +64,6 @@ src/rate_limit/      — Leaky bucket rate limiter (limiter, key extraction)
 src/dual_stack.rs    — Dual-stack (IPv4+IPv6) TCP listener
 tests/e2e.rs         — end-to-end test: real SunbeamProxy over plain HTTP with echo backend
 tests/proptest.rs    — property-based tests for static files, rewrites, config, metrics, etc.
-docs/README.md       — comprehensive feature documentation
 ```
 
 ## Architecture Invariants — Do Not Break These

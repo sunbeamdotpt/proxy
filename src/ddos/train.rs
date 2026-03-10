@@ -113,7 +113,7 @@ pub fn run(args: TrainArgs) -> Result<()> {
         let ip = audit_log::strip_port(&entry.fields.client_ip).to_string();
         let ts = parse_timestamp(&entry.timestamp);
 
-        let state = ip_states.entry(ip).or_insert_with(LogIpState::new);
+        let state = ip_states.entry(ip).or_default();
         state.timestamps.push(ts);
         state.methods.push(method_to_u8(&entry.fields.method));
         state.path_hashes.push(fx_hash(&entry.fields.path));

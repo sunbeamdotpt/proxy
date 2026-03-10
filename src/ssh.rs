@@ -11,12 +11,12 @@ pub async fn run_tcp_proxy(listen: &str, backend: &str) {
     let ipv6_addr = if listen.starts_with('[') {
         listen.to_string()
     } else {
-        format!("[::]:{}", listen.split(':').last().unwrap_or("22"))
+        format!("[::]:{}", listen.split(':').next_back().unwrap_or("22"))
     };
     
     let ipv4_addr = if listen.contains(':') {
         // Extract port from the original address
-        let port = listen.split(':').last().unwrap_or("22");
+        let port = listen.split(':').next_back().unwrap_or("22");
         format!("0.0.0.0:{}", port)
     } else {
         "0.0.0.0:22".to_string()

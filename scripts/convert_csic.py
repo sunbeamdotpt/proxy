@@ -7,7 +7,7 @@ Label is determined by which file it came from (normal vs anomalous).
 
 Usage:
     # Download the dataset first:
-    git clone https://github.com/msudol/Web-Application-Attack-Datasets.git /tmp/csic
+    git clone https://src.sunbeam.pt/studio/csic-dataset.git /tmp/csic
 
     # Convert all three files:
     python3 scripts/convert_csic.py \
@@ -20,8 +20,9 @@ Usage:
     # Merge with production logs:
     cat logs.jsonl csic_converted.jsonl > combined.jsonl
 
-    # Train:
+    # Train (or just use --csic flag which does this automatically):
     cargo run -- train-scanner --input combined.jsonl --output scanner_model.bin
+    # Simpler: cargo run -- train-scanner --input logs.jsonl --output scanner_model.bin --csic
 """
 
 import argparse

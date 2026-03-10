@@ -24,7 +24,37 @@ pub struct Config {
     pub rate_limit: Option<RateLimitConfig>,
     /// Optional per-request scanner detection.
     pub scanner: Option<ScannerConfig>,
+    /// Kubernetes resource names and namespaces for watchers.
+    #[serde(default)]
+    pub kubernetes: KubernetesConfig,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct KubernetesConfig {
+    /// Namespace where the proxy's resources live (Secret, ConfigMap, Ingresses).
+    #[serde(default = "default_k8s_namespace")]
+    pub namespace: String,
+    /// Name of the TLS Secret watched for cert hot-reload.
+    #[serde(default = "default_tls_secret")]
+    pub tls_secret: String,
+    /// Name of the ConfigMap watched for config hot-reload.
+    #[serde(default = "default_config_configmap")]
+    pub config_configmap: String,
+}
+
+impl Default for KubernetesConfig {
+    fn default() -> Self {
+        Self {
+            namespace: default_k8s_namespace(),
+            tls_secret: default_tls_secret(),
+            config_configmap: default_config_configmap(),
+        }
+    }
+}
+
+fn default_k8s_namespace() -> String { "ingress".to_string() }
+fn default_tls_secret() -> String { "pingora-tls".to_string() }
+fn default_config_configmap() -> String { "pingora-config".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DDoSConfig {

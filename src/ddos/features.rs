@@ -70,6 +70,10 @@ impl IpState {
         self.events.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
     /// Prune events older than `window` from the logical view.
     /// Returns a slice of active events (not necessarily contiguous in ring buffer,
     /// so we collect into a Vec).
@@ -272,6 +276,12 @@ pub struct LogIpState {
     pub has_referer: Vec<bool>,
     pub has_accept_language: Vec<bool>,
     pub suspicious_paths: Vec<bool>,
+}
+
+impl Default for LogIpState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LogIpState {

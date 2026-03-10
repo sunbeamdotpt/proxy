@@ -33,7 +33,7 @@ enum Commands {
         upgrade: bool,
     },
     /// Replay audit logs through the DDoS detector and rate limiter
-    Replay {
+    ReplayDdos {
         /// Path to audit log JSONL file
         #[arg(short, long)]
         input: String,
@@ -60,7 +60,7 @@ enum Commands {
         rate_limit: bool,
     },
     /// Train a DDoS detection model from audit logs
-    Train {
+    TrainDdos {
         /// Path to audit log JSONL file
         #[arg(short, long)]
         input: String,
@@ -103,6 +103,9 @@ enum Commands {
         /// Classification threshold
         #[arg(long, default_value = "0.5")]
         threshold: f64,
+        /// Include CSIC 2010 dataset as base training data (downloaded from GitHub, cached locally)
+        #[arg(long)]
+        csic: bool,
     },
 }
 
@@ -110,7 +113,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Serve { upgrade: false }) {
         Commands::Serve { upgrade } => run_serve(upgrade),
-        Commands::Replay {
+        Commands::ReplayDdos {
             input,
             model,
             config,
@@ -129,7 +132,7 @@ fn main() -> Result<()> {
             min_events,
             rate_limit,
         }),
-        Commands::Train {
+        Commands::TrainDdos {
             input,
             output,
             attack_ips,
@@ -155,11 +158,13 @@ fn main() -> Result<()> {
             output,
             wordlists,
             threshold,
+            csic,
         } => scanner::train::run(scanner::train::TrainScannerArgs {
             input,
             output,
             wordlists,
             threshold,
+            csic,
         }),
     }
 }
@@ -309,7 +314,13 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 Ok(c) => {
                     if !upgrade {
                         if let Err(e) =
-                            cert::fetch_and_write(&c, &cfg.tls.cert_path, &cfg.tls.key_path).await
+                            cert::fetch_and_write(
+                                &c,
+                                &cfg.kubernetes.namespace,
+                                &cfg.kubernetes.tls_secret,
+                                &cfg.tls.cert_path,
+                                &cfg.tls.key_path,
+                            ).await
                         {
                             tracing::warn!(error = %e, "cert fetch from K8s failed; using existing files");
                         }
@@ -405,6 +416,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     // 6. Background K8s watchers on their own OS thread + tokio runtime.
     if k8s_available {
+        let k8s_cfg = cfg.kubernetes.clone();
         let cert_path = cfg.tls.cert_path.clone();
         let key_path = cfg.tls.key_path.clone();
         std::thread::spawn(move || {
@@ -421,8 +433,19 @@ fn run_serve(upgrade: bool) -> Result<()> {
                     }
                 };
                 tokio::join!(
-                    acme::watch_ingresses(client.clone(), acme_routes),
-                    watcher::run_watcher(client, cert_path, key_path),
+                    acme::watch_ingresses(
+                        client.clone(),
+                        k8s_cfg.namespace.clone(),
+                        acme_routes,
+                    ),
+                    watcher::run_watcher(
+                        client,
+                        k8s_cfg.namespace,
+                        k8s_cfg.tls_secret,
+                        k8s_cfg.config_configmap,
+                        cert_path,
+                        key_path,
+                    ),
                 );
             });
         });

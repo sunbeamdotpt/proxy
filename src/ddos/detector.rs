@@ -39,6 +39,7 @@ impl DDoSDetector {
 
     /// Record an incoming request and classify the IP.
     /// Called from request_filter (before upstream).
+    #[allow(clippy::too_many_arguments)]
     pub fn check(
         &self,
         ip: IpAddr,

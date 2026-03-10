@@ -410,7 +410,7 @@ impl ProxyHttp for SunbeamProxy {
             );
 
             metrics::SCANNER_DECISIONS
-                .with_label_values(&[decision, &reason])
+                .with_label_values(&[decision, reason])
                 .inc();
 
             if decision == "block" {
@@ -447,7 +447,11 @@ impl ProxyHttp for SunbeamProxy {
                     path        = %session.req_header().uri.path(),
                     client_ip   = %ip,
                     user_agent  = session.req_header().headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("-"),
+                    content_length = session.req_header().headers.get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0"),
                     has_cookies = cookie.is_some(),
+                    has_referer = session.req_header().headers.get("referer").is_some(),
+                    has_accept_language = session.req_header().headers.get("accept-language").is_some(),
+                    accept      = session.req_header().headers.get("accept").and_then(|v| v.to_str().ok()).unwrap_or("-"),
                     "pipeline"
                 );
 
