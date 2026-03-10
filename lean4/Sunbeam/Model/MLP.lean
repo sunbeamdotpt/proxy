@@ -4,7 +4,11 @@ import Sunbeam.Model.ReLU
 
 namespace Sunbeam
 
-/-- Weights for a 2-layer MLP (input → hidden → scalar output). -/
+/-- Weights for a 2-layer MLP (input → hidden → scalar output).
+
+Corresponds to `ensemble::mlp::mlp_predict_32` in Rust, which uses const generic
+`INPUT` and a fixed hidden dimension of 32. Here `hiddenDim` is a parameter so
+structural properties can be proved generically. -/
 structure MLPWeights (inputDim hiddenDim : Nat) where
   w1 : Fin hiddenDim → FloatVec inputDim
   b1 : FloatVec hiddenDim
