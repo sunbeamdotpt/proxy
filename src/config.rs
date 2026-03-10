@@ -3,11 +3,21 @@ use serde::Deserialize;
 use std::fs;
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct SshConfig {
+    /// Address to bind the SSH listener on, e.g. "0.0.0.0:22".
+    pub listen: String,
+    /// Upstream backend address, e.g. "gitea-ssh.devtools.svc.cluster.local:2222".
+    pub backend: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub listen: ListenConfig,
     pub tls: TlsFileConfig,
     pub telemetry: TelemetryConfig,
     pub routes: Vec<RouteConfig>,
+    /// Optional SSH TCP passthrough (port 22 → Gitea SSH).
+    pub ssh: Option<SshConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

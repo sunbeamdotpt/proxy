@@ -43,7 +43,10 @@ pub async fn watch_ingresses(client: Client, routes: AcmeRoutes) {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(watcher::Event::Apply(ing)) => {
+            // InitApply fires for each Ingress during the initial list (kube v3+).
+            // Apply fires for subsequent creates/updates.
+            // Both must be handled to catch Ingresses that existed before the proxy started.
+            Ok(watcher::Event::InitApply(ing)) | Ok(watcher::Event::Apply(ing)) => {
                 let mut map = routes.write().unwrap_or_else(|e| e.into_inner());
                 upsert_routes(&ing, &mut map);
             }

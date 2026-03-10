@@ -4,3 +4,4 @@
 pub mod acme;
 pub mod config;
 pub mod proxy;
+pub mod ssh;

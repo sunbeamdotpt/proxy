@@ -86,12 +86,42 @@ fn main() -> Result<()> {
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
-    // Port 80: plain HTTP — 301 → HTTPS, except for ACME HTTP-01 challenges.
-    // Port 443: TLS-terminated HTTPS.  Cert written to /etc/tls/ by cert::* above.
+    // Port 80: always serve plain HTTP (ACME challenges + redirect to HTTPS).
     svc.add_tcp(&cfg.listen.http);
-    svc.add_tls(&cfg.listen.https, &cfg.tls.cert_path, &cfg.tls.key_path)?;
+
+    // Port 443: only add the TLS listener if the cert files exist.
+    // On first deploy cert-manager hasn't issued the cert yet, so we start
+    // HTTP-only.  Once the pingora-tls Secret is created (ACME challenge
+    // completes), the watcher in step 6 writes the cert files and triggers
+    // a graceful upgrade.  The upgrade process finds the cert files and adds
+    // the TLS listener, inheriting the port-80 socket from the old process.
+    let cert_exists = std::path::Path::new(&cfg.tls.cert_path).exists();
+    if cert_exists {
+        svc.add_tls(&cfg.listen.https, &cfg.tls.cert_path, &cfg.tls.key_path)?;
+        tracing::info!("TLS listener added on {}", cfg.listen.https);
+    } else {
+        tracing::warn!(
+            cert_path = %cfg.tls.cert_path,
+            "cert not found — starting HTTP-only; ACME challenge will complete and trigger upgrade"
+        );
+    }
 
     server.add_service(svc);
+
+    // 5b. SSH TCP passthrough (port 22 → Gitea SSH), if configured.
+    // Runs on its own OS thread + Tokio runtime — same pattern as the cert/ingress watcher.
+    if let Some(ssh_cfg) = &cfg.ssh {
+        let listen = ssh_cfg.listen.clone();
+        let backend = ssh_cfg.backend.clone();
+        tracing::info!(%listen, %backend, "SSH TCP proxy enabled");
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("ssh proxy runtime");
+            rt.block_on(sunbeam_proxy::ssh::run_tcp_proxy(&listen, &backend));
+        });
+    }
 
     // 6. Background K8s watchers on their own OS thread + tokio runtime so they
     //    don't interfere with Pingora's internal runtime.  A fresh Client is
