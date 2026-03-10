@@ -20,12 +20,14 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && \
+RUN mkdir -p src benches && \
     echo 'fn main() {}' > src/main.rs && \
+    echo 'fn main() {}' > benches/scanner_bench.rs && \
     cargo build --release --target "$(cat /rust-target)" ; \
-    rm -rf src
+    rm -rf src benches
 
 COPY src/ ./src/
+COPY benches/ ./benches/
 RUN touch src/main.rs && \
     cargo build --release --target "$(cat /rust-target)" && \
     cp "target/$(cat /rust-target)/release/sunbeam-proxy" /sunbeam-proxy
