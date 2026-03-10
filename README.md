@@ -1,16 +1,18 @@
 # Sunbeam Proxy
 
-A cloud-native reverse proxy with adaptive ML threat detection. Built on [Pingora](https://github.com/cloudflare/pingora) by [Sunbeam Studios](https://sunbeam.pt).
+A cloud-native reverse proxy with adaptive ML threat detection. Built in Rust by [Sunbeam Studios](https://sunbeam.pt).
 
 Sunbeam Proxy learns what normal traffic looks like *for your infrastructure* and adapts its defenses automatically. Instead of relying on generic rulesets written for someone else's problems, it trains on your own audit logs to build behavioral models that protect against the threats you actually face.
 
 ## Why it exists
 
-We're a small, women-led queer game studio and we need to handle extraordinary threats on today's internet. Small team, small budget, but the same DDoS attacks, vulnerability scanners, and bot nets that hit everyone else. Off-the-shelf solutions either cost too much or apply someone else's rules to our traffic. So we built a proxy that learns from what it sees and gets better at protecting us over time — and we figured others could use it too.
+We're a small, women-led queer game studio and we need to handle extraordinary threats on today's internet. We are a small team with an even smallerbudget, but the same DDoS attacks, vulnerability scanners, and bot nets that hit everyone else. Off-the-shelf solutions either cost too much, apply someone else's rules to our traffic, or don't work very well. So we built a proxy that learns from what it sees and gets better at protecting us over time — and we figured others could use it too.
+
+This proxy is running in production at Sunbeam Studios. If you are reading this, you are using it!
 
 ## What it does
 
-**Adaptive threat detection** — Two ML models run in the request pipeline. A KNN-based DDoS detector classifies per-IP behavior over sliding windows. A logistic regression scanner detector catches vulnerability probes, directory enumeration, and bot traffic per-request. Both models train on your logs, hot-reload without downtime, and improve continuously as your traffic evolves.
+**Adaptive threat detection** — Two ensemble models (decision tree + MLP) run inline on every request. A per-IP DDoS detector watches behavioral patterns over sliding windows. A per-request scanner detector catches vulnerability probes, directory enumeration, and bot traffic. Both models are compiled directly into the binary as Rust `const` arrays — zero allocation, sub-microsecond inference, no model files to manage.
 
 **Rate limiting** — Leaky bucket throttling with identity-aware keys (session cookies, bearer tokens, or IP fallback). Separate limits for authenticated and unauthenticated traffic.
 
@@ -18,53 +20,71 @@ We're a small, women-led queer game studio and we need to handle extraordinary t
 
 **Static file serving** — Serve frontends directly from the proxy with try_files chains, SPA fallback, content-type detection, and cache headers. Replaces nginx/caddy sidecar containers with a single config block.
 
-**Everything else** — TLS termination with cert hot-reload, host-prefix routing, path sub-routes with prefix stripping, regex URL rewrites, response body rewriting (nginx `sub_filter`), auth subrequests, WebSocket forwarding, SSH TCP passthrough, HTTP-to-HTTPS redirect, ACME HTTP-01 challenge routing, Prometheus metrics, and per-request tracing.
+**Cluster gossip** — Multi-node deployments share state via an iroh-based gossip protocol. Nodes discover each other through k8s headless services and coordinate bandwidth tracking across the cluster. (more clustering features coming soon!)
+
+**Dual-stack networking** — Native IPv4 + IPv6 support with separate listeners, explicit `IPV6_V6ONLY` socket options, and fair connection scheduling that alternates accept priority so neither stack gets starved.
+
+**And the rest** — TLS termination with cert hot-reload, host-prefix routing, path sub-routes with prefix stripping, regex URL rewrites, response body rewriting, auth subrequests, WebSocket forwarding, SSH TCP passthrough, HTTP-to-HTTPS redirect, ACME HTTP-01 challenge routing, Prometheus metrics, and per-request tracing with request IDs.
 
 ## Quick start
 
 ```sh
 cargo build
-SUNBEAM_CONFIG=dev.toml RUST_LOG=info cargo run
-cargo test
+RUST_LOG=info cargo run
 ```
 
-## The self-learning loop
+## How the models work
 
-```
-              your traffic
-                  │
-                  ▼
-    ┌─────────────────────────┐
-    │      Sunbeam Proxy      │
-    │                         │
-    │  DDoS ──► Scanner ──►   │──── audit logs (JSON)
-    │  Rate Limit ──► Cache   │         │
-    └─────────────────────────┘         │
-                                        ▼
-                                ┌───────────────┐
-                                │  Train models  │
-                                │  on your logs  │
-                                └───────┬───────┘
-                                        │
-                                   hot-reload
-                                        │
-                                        ▼
-                               updated models
-                            (no restart needed)
+The detection pipeline uses a two-stage ensemble: a depth-limited CART decision tree makes fast-path decisions (sub-2ns), and a two-layer MLP handles deferred cases (~85ns). Model weights are trained offline using [burn](https://github.com/tracel-ai/burn) with GPU acceleration, then exported as Rust `const` arrays that compile directly into the proxy binary. No model files, no deserialization, no heap allocation at inference time. Both ensembles fit in under 4KiB of L1 cache.
+
+We've also started formalizing safety properties of the ensemble in [Lean 4](https://lean-lang.org/) — proving things like MLP output bounds, tree termination, and ensemble composition correctness. That work lives in `lean4/` and is described in our [research paper](docs/paper/).
+
+```mermaid
+flowchart TD
+    traffic[Your Traffic] --> proxy
+
+    subgraph proxy[Sunbeam Proxy]
+        direction LR
+        ddos[DDoS] --> scanner[Scanner] --> rl[Rate Limit] --> cache[Cache]
+    end
+
+    proxy --> logs[Audit Logs]
+    logs --> prepare[Prepare Dataset]
+    prepare --> train[Train Ensemble]
+    train --> deploy[Recompile & Deploy]
+    deploy -.-> proxy
 ```
 
-Every request produces a structured audit log with 15+ behavioral features. Feed those logs back into the training pipeline and the models get better at telling your real users apart from threats — no manual rule-writing required.
+Every request produces a structured audit log with 15+ behavioral features. Feed those logs into the training pipeline alongside public datasets (CSIC 2010, CIC-IDS2017), and the models get better at telling your real users apart from threats.
 
 ```sh
-# Train DDoS model from your audit logs
-cargo run -- train-ddos --input logs.jsonl --output ddos_model.bin --heuristics heuristics.toml
+# 1. Download public datasets (one-time, cached locally)
+cargo run -- download-datasets
 
-# Train scanner model (--csic mixes in the CSIC 2010 dataset as a base)
-cargo run -- train-scanner --input logs.jsonl --output scanner_model.bin --csic
+# 2. Prepare a unified training dataset from your logs + external data
+cargo run -- prepare-dataset \
+    --input logs.jsonl \
+    --output dataset.bin \
+    --heuristics heuristics.toml \
+    --inject-csic
 
-# Replay logs to evaluate model accuracy
-cargo run -- replay-ddos --input logs.jsonl --model ddos_model.bin
+# 3. Train ensemble models (requires --features training and a GPU)
+cargo run --features training -- train-mlp-scanner \
+    --dataset dataset.bin \
+    --output-dir src/ensemble/gen
+
+cargo run --features training -- train-mlp-ddos \
+    --dataset dataset.bin \
+    --output-dir src/ensemble/gen
+
+# 4. Recompile with new weights and deploy
+cargo build --release
+
+# 5. Replay logs to evaluate accuracy
+cargo run -- replay --input logs.jsonl --window-secs 60 --min-events 5
 ```
+
+Training produces Rust source files in `src/ensemble/gen/` — you commit them, rebuild, and redeploy. The proxy binary always ships with its models baked in.
 
 ## Detection pipeline
 
@@ -72,32 +92,31 @@ Every HTTPS request passes through three layers before reaching your backend:
 
 | Layer | Model | Granularity | Response |
 |-------|-------|-------------|----------|
-| DDoS | KNN (14-feature behavioral vectors) | Per-IP over sliding window | 429 + Retry-After |
-| Scanner | Logistic regression (path, UA, headers) | Per-request | 403 |
+| DDoS | Ensemble: decision tree → MLP (14 features) | Per-IP over sliding window | 429 + Retry-After |
+| Scanner | Ensemble: decision tree → MLP (12 features) | Per-request | 403 |
 | Rate limit | Leaky bucket | Per-identity (session/token/IP) | 429 + Retry-After |
 
 Verified bots (Googlebot, Bingbot, etc.) bypass scanner detection via reverse-DNS verification and configurable allowlists.
 
+```mermaid
+flowchart TD
+    req[Request] --> ddos{DDoS Detection}
+    ddos -->|blocked| r429a[429 + Retry-After]
+    ddos -->|allowed| scan{Scanner Detection}
+    scan -->|blocked| r403[403 Forbidden]
+    scan -->|allowed| rl{Rate Limiting}
+    rl -->|blocked| r429b[429 + Retry-After]
+    rl -->|allowed| cache{Cache Lookup}
+    cache -->|hit| cached[Serve Cached Response]
+    cache -->|miss| upstream[Upstream Request]
+    upstream --> response[Response to Client]
 ```
-Request
-  │
-  ├── DDoS detection (KNN per-IP)
-  │     └── blocked → 429
-  │
-  ├── Scanner detection (logistic regression per-request)
-  │     └── blocked → 403
-  │
-  ├── Rate limiting (leaky bucket per-identity)
-  │     └── blocked → 429
-  │
-  ├── Cache lookup
-  │     └── hit → serve cached response
-  │
-  └── Upstream request
-        ├── Auth subrequest (if configured)
-        ├── Response body rewriting (if configured)
-        └── Response to client
-```
+
+## Fair Use
+
+This software is provided as-is, without warranty or support via the Apache License 2.0. With that, Sunbeam Proxy is free to use for any purpose, including commercial use, for up to 1GiBs of total aggregate cluster bandwidth. Anything beyond that will require a license purchase from Sunbeam Studios. This will support ongoing development and ensure billion-dollar companies don't take advantage of it.
+
+If you're interested in a license, please contact us at [hello@sunbeam.pt](mailto:sunbeam@sunbeam.sh).
 
 ---
 
@@ -150,7 +169,7 @@ websocket   = false                    # forward WebSocket upgrade headers
 disable_secure_redirection = false     # true = allow plain HTTP
 ```
 
-#### Path sub-routes
+### Path sub-routes
 
 Path sub-routes use longest-prefix matching within a host, so you can mix static file serving with API proxying on the same domain.
 
@@ -162,7 +181,7 @@ strip_prefix = true                    # /api/users → /users
 websocket    = false
 ```
 
-#### Static file serving
+### Static file serving
 
 When a route has `static_root` set, the proxy tries to serve files from disk before forwarding to the upstream backend. Candidates are checked in order:
 
@@ -181,30 +200,9 @@ static_root = "/srv/meet"
 fallback    = "index.html"
 ```
 
-Content types are detected by file extension:
-
-| Extensions | Content-Type |
-|-----------|-------------|
-| `html`, `htm` | `text/html; charset=utf-8` |
-| `css` | `text/css; charset=utf-8` |
-| `js`, `mjs` | `application/javascript; charset=utf-8` |
-| `json` | `application/json; charset=utf-8` |
-| `svg` | `image/svg+xml` |
-| `png`, `jpg`, `gif`, `webp`, `avif` | `image/*` |
-| `woff`, `woff2`, `ttf`, `otf` | `font/*` |
-| `wasm` | `application/wasm` |
-
-Cache-control headers are set automatically:
-
-| Extensions | Cache-Control |
-|-----------|-------------|
-| `js`, `css`, `woff2`, `wasm` | `public, max-age=31536000, immutable` |
-| `png`, `jpg`, `svg`, `ico` | `public, max-age=86400` |
-| Everything else | `no-cache` |
-
 Path sub-routes always take priority over static serving. Path traversal (`..`) is rejected.
 
-#### URL rewrites
+### URL rewrites
 
 Regex patterns are compiled at startup and applied before static file lookup. First match wins.
 
@@ -214,11 +212,9 @@ pattern = "^/docs/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 target  = "/docs/[id]/index.html"
 ```
 
-#### Response body rewriting
+### Response body rewriting
 
-Find/replace on response bodies, like nginx `sub_filter`. Only applies to `text/html`, `application/javascript`, and `text/javascript` responses — binary responses pass through untouched.
-
-The full response is buffered before substitution (fine for HTML/JS, typically under 1MB). `Content-Length` is removed since the body size may change.
+Find/replace on response bodies, like nginx `sub_filter`. Only applies to `text/html`, `application/javascript`, and `text/javascript` responses — binary responses pass through untouched. The full response is buffered before substitution (fine for HTML/JS, typically under 1MB).
 
 ```toml
 [[routes.body_rewrites]]
@@ -226,7 +222,7 @@ find    = "old-domain.example.com"
 replace = "new-domain.sunbeam.pt"
 ```
 
-#### Custom response headers
+### Custom response headers
 
 ```toml
 [[routes.response_headers]]
@@ -234,7 +230,7 @@ name  = "X-Frame-Options"
 value = "DENY"
 ```
 
-#### Auth subrequests
+### Auth subrequests
 
 Path routes can require an HTTP auth check before forwarding upstream, similar to nginx `auth_request`.
 
@@ -256,7 +252,7 @@ The proxy sends a GET to `auth_request` with the original `Cookie`, `Authorizati
 | Non-2xx | 403 to client |
 | Network error | 502 to client |
 
-#### HTTP response cache
+### HTTP response cache
 
 Per-route in-memory cache backed by pingora-cache.
 
@@ -268,18 +264,9 @@ stale_while_revalidate_secs = 0       # serve stale while revalidating
 max_file_size               = 0       # max cacheable body size (0 = unlimited)
 ```
 
-The cache sits after the security pipeline (`Request → DDoS → Scanner → Rate Limit → Cache → Upstream`), so blocked requests never populate it.
-
-- Only caches GET and HEAD requests
-- Respects `Cache-Control: no-store` and `Cache-Control: private`
-- TTL priority: `s-maxage` > `max-age` > `default_ttl_secs`
-- Skips routes with body rewrites (content varies per-response)
-- Skips requests with auth subrequest headers (content varies per-user)
-- Cache key: `{host}{path}?{query}`
+The cache sits after the security pipeline, so blocked requests never populate it. Only caches GET and HEAD. Respects `Cache-Control: no-store` and `private`. TTL priority: `s-maxage` > `max-age` > `default_ttl_secs`.
 
 ### SSH passthrough
-
-Raw TCP proxy for SSH traffic.
 
 ```toml
 [ssh]
@@ -289,30 +276,28 @@ backend = "gitea-ssh.devtools.svc.cluster.local:2222"
 
 ### DDoS detection
 
-KNN-based per-IP behavioral classification over sliding windows. 14-feature vectors cover request rate, path diversity, error rate, cookie/referer presence, and more.
+Per-IP behavioral classification over sliding windows using a compiled-in decision tree + MLP ensemble. 14-feature vectors cover request rate, path diversity, error rate, burst patterns, cookie/referer presence, and more.
 
 ```toml
 [ddos]
-enabled         = true
-model_path      = "ddos_model.bin"
-k               = 5
-threshold       = 0.6
-window_secs     = 60
+enabled      = true
+threshold    = 0.6
+window_secs  = 60
 window_capacity = 1000
-min_events      = 10
+min_events   = 10
+observe_only = false    # log decisions without blocking (shadow mode)
 ```
 
 ### Scanner detection
 
-Logistic regression per-request classification with verified bot allowlist and model hot-reload.
+Per-request classification with a compiled-in decision tree + MLP ensemble. 12-feature vectors cover path structure, header presence, user-agent classification, and traversal patterns. Verified bot allowlist with reverse-DNS verification.
 
 ```toml
 [scanner]
 enabled            = true
-model_path         = "scanner_model.bin"
 threshold          = 0.5
-poll_interval_secs = 30        # hot-reload check interval (0 = disabled)
-bot_cache_ttl_secs = 86400     # verified bot IP cache TTL
+bot_cache_ttl_secs = 86400
+observe_only       = false
 
 [[scanner.allowlist]]
 ua_prefix    = "Googlebot"
@@ -341,6 +326,26 @@ burst = 50
 rate  = 10.0
 ```
 
+### Cluster
+
+Gossip-based multi-node coordination - nodes discover each other through k8s headless DNS and share bandwidth telemetry. More features coming soon!
+
+```toml
+[cluster]
+enabled     = true
+tenant      = "your-tenant-uuid"
+gossip_port = 11204
+
+[cluster.discovery]
+method           = "k8s"
+headless_service = "sunbeam-proxy-gossip.ingress.svc.cluster.local"
+
+[cluster.bandwidth]
+broadcast_interval_secs = 1
+stale_peer_timeout_secs = 30
+meter_window_secs       = 30
+```
+
 ---
 
 ## Observability
@@ -362,13 +367,13 @@ Served at `GET /metrics` on `metrics_port` (default 9090). `GET /health` returns
 | `sunbeam_rate_limit_decisions_total` | Counter | `decision` |
 | `sunbeam_cache_status_total` | Counter | `status` |
 | `sunbeam_active_connections` | Gauge | — |
-
-```yaml
-# Prometheus scrape config
-- job_name: sunbeam-proxy
-  static_configs:
-    - targets: ['sunbeam-proxy.ingress.svc.cluster.local:9090']
-```
+| `sunbeam_scanner_ensemble_path_total` | Counter | `path` |
+| `sunbeam_ddos_ensemble_path_total` | Counter | `path` |
+| `sunbeam_cluster_peers` | Gauge | — |
+| `sunbeam_cluster_bandwidth_in_bytes` | Gauge | — |
+| `sunbeam_cluster_bandwidth_out_bytes` | Gauge | — |
+| `sunbeam_cluster_gossip_messages_total` | Counter | `channel` |
+| `sunbeam_bandwidth_limit_decisions_total` | Counter | `decision` |
 
 ### Audit logs
 
@@ -396,15 +401,7 @@ Every request produces a structured JSON log line (`target = "audit"`):
 }
 ```
 
-### Detection pipeline logs
-
-Each security layer logs its decision before acting, so the training pipeline always sees the full traffic picture:
-
-```
-layer=ddos       → all HTTPS traffic
-layer=scanner    → traffic that passed DDoS
-layer=rate_limit → traffic that passed scanner
-```
+These audit logs are the training data. Feed them back into `prepare-dataset` to retrain the models on your actual traffic.
 
 ---
 
@@ -414,21 +411,27 @@ layer=rate_limit → traffic that passed scanner
 # Start the proxy server
 sunbeam-proxy serve [--upgrade]
 
-# Train DDoS model from audit logs
-sunbeam-proxy train-ddos --input logs.jsonl --output ddos_model.bin \
-    [--attack-ips ips.txt] [--normal-ips ips.txt] \
-    [--heuristics heuristics.toml] [--k 5] [--threshold 0.6]
+# Download upstream datasets (CIC-IDS2017, CSIC 2010)
+sunbeam-proxy download-datasets
 
-# Replay logs through the DDoS detection pipeline
-sunbeam-proxy replay-ddos --input logs.jsonl --model ddos_model.bin \
-    [--config config.toml] [--rate-limit]
+# Prepare training dataset from audit logs + external data
+sunbeam-proxy prepare-dataset --input logs.jsonl --output dataset.bin \
+    [--heuristics heuristics.toml] [--inject-csic] \
+    [--inject-modsec modsec.log] [--wordlists ./wordlists]
 
-# Train scanner model
-sunbeam-proxy train-scanner --input logs.jsonl --output scanner_model.bin \
-    [--wordlists path/to/wordlists] [--threshold 0.5]
+# Train scanner ensemble (requires --features training)
+sunbeam-proxy train-mlp-scanner --dataset dataset.bin \
+    --output-dir src/ensemble/gen [--epochs 100] [--hidden-dim 32]
 
-# Train scanner model with CSIC 2010 base dataset (auto-downloaded, cached locally)
-sunbeam-proxy train-scanner --input logs.jsonl --output scanner_model.bin --csic
+# Train DDoS ensemble (requires --features training)
+sunbeam-proxy train-mlp-ddos --dataset dataset.bin \
+    --output-dir src/ensemble/gen [--epochs 100] [--hidden-dim 32]
+
+# Sweep cookie_weight hyperparameter
+sunbeam-proxy sweep-cookie-weight --dataset dataset.bin --detector scanner
+
+# Replay logs through compiled-in ensemble models
+sunbeam-proxy replay --input logs.jsonl [--window-secs 60] [--min-events 5]
 ```
 
 ---
@@ -436,11 +439,14 @@ sunbeam-proxy train-scanner --input logs.jsonl --output scanner_model.bin --csic
 ## Building
 
 ```sh
-cargo build                                              # debug
-cargo build --release --target x86_64-unknown-linux-musl  # release (container)
-cargo test                                                # all tests
+cargo build                                               # debug
+cargo build --features training                           # with burn-rs training pipeline
+cargo test                                                # all tests (244 tests)
+cargo bench                                               # ensemble inference benchmarks
 cargo clippy -- -D warnings                               # lint
 ```
+
+The `training` feature pulls in burn-rs and wgpu for GPU-accelerated training. The default build (without `training`) has no GPU dependencies — it just uses the compiled-in weights.
 
 ## License
 
