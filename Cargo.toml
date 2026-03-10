@@ -1,0 +1,47 @@
+[package]
+name    = "sunbeam-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
+pingora       = { version = "0.7", features = ["rustls"] }
+pingora-proxy = { version = "0.7", features = ["rustls"] }
+pingora-core  = { version = "0.7", features = ["rustls"] }
+pingora-http  = "0.7"
+
+# HTTP header constants
+http = "1"
+
+# Config
+serde      = { version = "1", features = ["derive"] }
+toml       = "0.8"
+
+# Async
+tokio      = { version = "1", features = ["full"] }
+futures    = "0.3"
+async-trait = "0.1"
+
+# Structured logging + OTEL
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["json", "env-filter"] }
+tracing-opentelemetry = "0.28"
+opentelemetry         = { version = "0.27", features = ["trace"] }
+opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp    = { version = "0.27", features = ["http-proto", "reqwest-client"] }
+serde_json = "1"
+anyhow     = "1"
+
+# Rustls crypto provider — must be installed before any TLS init
+rustls      = { version = "0.23", features = ["aws-lc-rs"] }
+
+# K8s watcher for cert/config hot-reload
+kube        = { version = "3", features = ["runtime", "client"] }
+k8s-openapi = { version = "0.27", features = ["v1_35"] }
+libc        = "0.2"
+
+[profile.release]
+opt-level = 3
+lto       = true
+codegen-units = 1
+strip     = true
