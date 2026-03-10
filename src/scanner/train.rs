@@ -18,7 +18,7 @@ pub struct TrainScannerArgs {
 }
 
 /// Default suspicious fragments — matches the DDoS feature list plus extras.
-const DEFAULT_FRAGMENTS: &[&str] = &[
+pub const DEFAULT_FRAGMENTS: &[&str] = &[
     ".env", ".git", ".bak", ".sql", ".tar", ".zip",
     "wp-admin", "wp-login", "wp-includes", "wp-content", "xmlrpc",
     "phpinfo", "phpmyadmin", "php-info",
@@ -32,9 +32,218 @@ const DEFAULT_FRAGMENTS: &[&str] = &[
 const ATTACK_EXTENSIONS: &[&str] = &[".env", ".sql", ".bak", ".git/config"];
 const TRAVERSAL_MARKERS: &[&str] = &["..", "%00", "%0a"];
 
-struct LabeledSample {
-    features: ScannerFeatureVector,
-    label: f64, // 1.0 = attack, 0.0 = normal
+pub struct LabeledSample {
+    pub features: ScannerFeatureVector,
+    pub label: f64, // 1.0 = attack, 0.0 = normal
+}
+
+pub struct ScannerTrainResult {
+    pub model: ScannerModel,
+    pub train_metrics: Metrics,
+    pub test_metrics: Metrics,
+}
+
+/// Core training pipeline: parse logs, label, train, evaluate. Returns the trained model and metrics.
+pub fn train_and_evaluate(
+    args: &TrainScannerArgs,
+    learning_rate: f64,
+    epochs: usize,
+    class_weight_multiplier: f64,
+) -> Result<ScannerTrainResult> {
+    let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
+    let fragment_hashes: FxHashSet<u64> = fragments
+        .iter()
+        .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+        .collect();
+    let extension_hashes: FxHashSet<u64> = features::SUSPICIOUS_EXTENSIONS_LIST
+        .iter()
+        .map(|e| fx_hash_bytes(e.as_bytes()))
+        .collect();
+
+    let mut samples: Vec<LabeledSample> = Vec::new();
+    let file = std::fs::File::open(&args.input)
+        .with_context(|| format!("opening {}", args.input))?;
+    let reader = std::io::BufReader::new(file);
+    let mut log_hosts: FxHashSet<u64> = FxHashSet::default();
+    let mut parsed_entries: Vec<(AuditFields, String)> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: AuditLog = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let host_prefix = entry
+            .fields
+            .host
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
+        parsed_entries.push((entry.fields, host_prefix));
+    }
+
+    for (fields, host_prefix) in &parsed_entries {
+        let has_cookies = fields.has_cookies.unwrap_or(false);
+        let has_referer = fields
+            .referer
+            .as_ref()
+            .map(|r| r != "-" && !r.is_empty())
+            .unwrap_or(false);
+        let has_accept_language = fields
+            .accept_language
+            .as_ref()
+            .map(|a| a != "-" && !a.is_empty())
+            .unwrap_or(false);
+
+        let feats = features::extract_features(
+            &fields.method,
+            &fields.path,
+            host_prefix,
+            has_cookies,
+            has_referer,
+            has_accept_language,
+            "-",
+            &fields.user_agent,
+            fields.content_length,
+            &fragment_hashes,
+            &extension_hashes,
+            &log_hosts,
+        );
+
+        let label = if let Some(ref gt) = fields.label {
+            match gt.as_str() {
+                "attack" | "anomalous" => Some(1.0),
+                "normal" => Some(0.0),
+                _ => None,
+            }
+        } else {
+            label_request(
+                &fields.path,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                &fields.user_agent,
+                host_prefix,
+                fields.status,
+                &log_hosts,
+                &fragment_hashes,
+            )
+        };
+
+        if let Some(l) = label {
+            samples.push(LabeledSample {
+                features: feats,
+                label: l,
+            });
+        }
+    }
+
+    if args.csic {
+        let csic_entries = crate::scanner::csic::fetch_csic_dataset()?;
+        for (_, host_prefix) in &csic_entries {
+            log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
+        }
+        for (fields, host_prefix) in &csic_entries {
+            let has_cookies = fields.has_cookies.unwrap_or(false);
+            let has_referer = fields
+                .referer
+                .as_ref()
+                .map(|r| r != "-" && !r.is_empty())
+                .unwrap_or(false);
+            let has_accept_language = fields
+                .accept_language
+                .as_ref()
+                .map(|a| a != "-" && !a.is_empty())
+                .unwrap_or(false);
+
+            let feats = features::extract_features(
+                &fields.method,
+                &fields.path,
+                host_prefix,
+                has_cookies,
+                has_referer,
+                has_accept_language,
+                "-",
+                &fields.user_agent,
+                fields.content_length,
+                &fragment_hashes,
+                &extension_hashes,
+                &log_hosts,
+            );
+
+            let label = match fields.label.as_deref() {
+                Some("attack" | "anomalous") => 1.0,
+                Some("normal") => 0.0,
+                _ => continue,
+            };
+
+            samples.push(LabeledSample {
+                features: feats,
+                label,
+            });
+        }
+    }
+
+    if let Some(wordlist_dir) = &args.wordlists {
+        ingest_wordlists(
+            wordlist_dir,
+            &mut samples,
+            &mut fragments,
+            &fragment_hashes,
+            &extension_hashes,
+            &log_hosts,
+        )?;
+    }
+
+    if samples.is_empty() {
+        anyhow::bail!("no training samples found");
+    }
+
+    // Stratified 80/20 train/test split
+    let (train_samples, test_samples) = stratified_split(&mut samples, 0.8, 42);
+
+    // Compute normalization params from training set only
+    let train_feature_vecs: Vec<ScannerFeatureVector> =
+        train_samples.iter().map(|s| s.features).collect();
+    let norm_params = ScannerNormParams::from_data(&train_feature_vecs);
+
+    let train_normalized: Vec<ScannerFeatureVector> =
+        train_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+
+    // Train logistic regression with configurable params
+    let weights = train_logistic_regression_weighted(
+        &train_normalized,
+        &train_samples,
+        epochs,
+        learning_rate,
+        class_weight_multiplier,
+    );
+
+    let model = ScannerModel {
+        weights,
+        threshold: args.threshold,
+        norm_params: norm_params.clone(),
+        fragments,
+    };
+
+    let train_metrics = evaluate(&train_normalized, &train_samples, &weights, args.threshold);
+
+    let test_feature_vecs: Vec<ScannerFeatureVector> =
+        test_samples.iter().map(|s| s.features).collect();
+    let test_normalized: Vec<ScannerFeatureVector> =
+        test_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let test_metrics = evaluate(&test_normalized, &test_samples, &weights, args.threshold);
+
+    Ok(ScannerTrainResult {
+        model,
+        train_metrics,
+        test_metrics,
+    })
 }
 
 pub fn run(args: TrainScannerArgs) -> Result<()> {
@@ -295,24 +504,28 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     Ok(())
 }
 
-struct Metrics {
-    tp: u32,
-    fp: u32,
-    tn: u32,
-    fn_: u32,
+pub struct Metrics {
+    pub tp: u32,
+    pub fp: u32,
+    pub tn: u32,
+    pub fn_: u32,
 }
 
 impl Metrics {
-    fn precision(&self) -> f64 {
+    pub fn precision(&self) -> f64 {
         if self.tp + self.fp > 0 { self.tp as f64 / (self.tp + self.fp) as f64 } else { 0.0 }
     }
-    fn recall(&self) -> f64 {
+    pub fn recall(&self) -> f64 {
         if self.tp + self.fn_ > 0 { self.tp as f64 / (self.tp + self.fn_) as f64 } else { 0.0 }
     }
-    fn f1(&self) -> f64 {
+    pub fn f1(&self) -> f64 {
+        self.fbeta(1.0)
+    }
+    pub fn fbeta(&self, beta: f64) -> f64 {
         let p = self.precision();
         let r = self.recall();
-        if p + r > 0.0 { 2.0 * p * r / (p + r) } else { 0.0 }
+        let b2 = beta * beta;
+        if p + r > 0.0 { (1.0 + b2) * p * r / (b2 * p + r) } else { 0.0 }
     }
     fn print(&self, total: usize) {
         let acc = (self.tp + self.tn) as f64 / total as f64 * 100.0;
@@ -449,6 +662,59 @@ fn train_logistic_regression(
         }
 
         // Update weights
+        for j in 0..NUM_SCANNER_WEIGHTS {
+            weights[j] -= learning_rate * gradients[j] / n;
+        }
+    }
+
+    weights
+}
+
+/// Like `train_logistic_regression` but with configurable class_weight_multiplier.
+/// A multiplier > 1.0 increases the weight of the minority (attack) class further.
+fn train_logistic_regression_weighted(
+    normalized: &[ScannerFeatureVector],
+    samples: &[LabeledSample],
+    epochs: usize,
+    learning_rate: f64,
+    class_weight_multiplier: f64,
+) -> [f64; NUM_SCANNER_WEIGHTS] {
+    let mut weights = [0.0f64; NUM_SCANNER_WEIGHTS];
+    let n = samples.len() as f64;
+
+    let n_attack = samples.iter().filter(|s| s.label > 0.5).count() as f64;
+    let n_normal = n - n_attack;
+    let (w_attack, w_normal) = if n_attack > 0.0 && n_normal > 0.0 {
+        (n / (2.0 * n_attack) * class_weight_multiplier, n / (2.0 * n_normal))
+    } else {
+        (1.0, 1.0)
+    };
+
+    for _epoch in 0..epochs {
+        let mut gradients = [0.0f64; NUM_SCANNER_WEIGHTS];
+
+        for (i, sample) in samples.iter().enumerate() {
+            let f = &normalized[i];
+            let mut z = weights[NUM_SCANNER_FEATURES + 2];
+            for j in 0..NUM_SCANNER_FEATURES {
+                z += weights[j] * f[j];
+            }
+            z += weights[12] * f[0] * (1.0 - f[3]);
+            z += weights[13] * (1.0 - f[9]) * (1.0 - f[5]);
+
+            let prediction = sigmoid(z);
+            let error = prediction - sample.label;
+            let cw = if sample.label > 0.5 { w_attack } else { w_normal };
+            let weighted_error = error * cw;
+
+            for j in 0..NUM_SCANNER_FEATURES {
+                gradients[j] += weighted_error * f[j];
+            }
+            gradients[12] += weighted_error * f[0] * (1.0 - f[3]);
+            gradients[13] += weighted_error * (1.0 - f[9]) * (1.0 - f[5]);
+            gradients[14] += weighted_error;
+        }
+
         for j in 0..NUM_SCANNER_WEIGHTS {
             weights[j] -= learning_rate * gradients[j] / n;
         }

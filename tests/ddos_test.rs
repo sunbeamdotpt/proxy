@@ -46,13 +46,14 @@ fn make_model(
 
 fn default_ddos_config() -> DDoSConfig {
     DDoSConfig {
-        model_path: String::new(),
+        model_path: Some(String::new()),
         k: 5,
         threshold: 0.6,
         window_secs: 60,
         window_capacity: 1000,
         min_events: 10,
         enabled: true,
+        use_ensemble: false,
     }
 }
 
