@@ -4,3 +4,8 @@ certs/
 *.pem
 *.key
 *.crt
+
+# Training data and model binaries
+*.bin
+*.jsonl
+heuristics.toml
