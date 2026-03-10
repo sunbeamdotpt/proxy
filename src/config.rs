@@ -82,6 +82,10 @@ fn default_config_configmap() -> String { "pingora-config".to_string() }
 #[derive(Debug, Deserialize, Clone)]
 /// Ddosconfig.
 pub struct DDoSConfig {
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default = "default_k")]
+    pub k: usize,
     #[serde(default = "default_threshold")]
     /// Threshold.
     pub threshold: f64,
@@ -97,10 +101,8 @@ pub struct DDoSConfig {
     #[serde(default = "default_enabled")]
     /// Enabled.
     pub enabled: bool,
-    /// When true, run the model and log decisions but never block traffic.
-    /// Useful for gathering data on model accuracy before enforcing.
-    #[serde(default)]
-    pub observe_only: bool,
+    #[serde(default = "default_use_ensemble")]
+    pub use_ensemble: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -136,6 +138,8 @@ pub struct BucketConfig {
 #[derive(Debug, Deserialize, Clone)]
 /// Scannerconfig.
 pub struct ScannerConfig {
+    #[serde(default)]
+    pub model_path: Option<String>,
     #[serde(default = "default_scanner_threshold")]
     /// Threshold.
     pub threshold: f64,
@@ -148,10 +152,8 @@ pub struct ScannerConfig {
     /// TTL (seconds) for verified bot IP cache entries.
     #[serde(default = "default_bot_cache_ttl")]
     pub bot_cache_ttl_secs: u64,
-    /// When true, run the model and log decisions but never block traffic.
-    /// Useful for gathering data on model accuracy before enforcing.
-    #[serde(default)]
-    pub observe_only: bool,
+    #[serde(default = "default_use_ensemble")]
+    pub use_ensemble: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -172,6 +174,7 @@ pub struct BotAllowlistRule {
 }
 
 fn default_bot_cache_ttl() -> u64 { 86400 } // 24h
+fn default_use_ensemble() -> bool { true }
 
 fn default_scanner_threshold() -> f64 { 0.5 }
 fn default_scanner_enabled() -> bool { true }

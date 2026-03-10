@@ -197,6 +197,24 @@ pub static CLUSTER_MODEL_UPDATES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     c
 });
 
+pub static SCANNER_ENSEMBLE_PATH: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new("sunbeam_scanner_ensemble_path_total", "Scanner ensemble decision path"),
+        &["path"],
+    ).unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static DDOS_ENSEMBLE_PATH: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new("sunbeam_ddos_ensemble_path_total", "DDoS ensemble decision path"),
+        &["path"],
+    ).unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
 /// Spawn a lightweight HTTP server on `port` serving `/metrics` and `/health`.
 /// Returns immediately; the server runs in the background on the tokio runtime.
 /// Port 0 = disabled.
