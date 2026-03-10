@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 /// Two-layer MLP forward pass with a fixed hidden size of 32:
 ///
 ///   hidden = ReLU(W1 @ input + b1)
