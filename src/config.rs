@@ -38,12 +38,6 @@ pub struct Config {
     pub kubernetes: KubernetesConfig,
     /// Optional gossip-based cluster for multi-node state sharing.
     pub cluster: Option<ClusterConfig>,
-    /// Optional TLS passthrough routes. When present, the proxy peeks at the
-    /// TLS ClientHello SNI on the HTTPS port and relays matching connections
-    /// directly to the backend without terminating TLS.  Non-matching
-    /// connections are forwarded to Pingora's internal TLS listener.
-    #[serde(default)]
-    pub tls_passthrough: Option<Vec<TlsPassthroughRoute>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -349,10 +343,8 @@ pub struct RouteConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-/// Clusterconfig.
 pub struct ClusterConfig {
     #[serde(default = "default_cluster_enabled")]
-    /// Enabled.
     pub enabled: bool,
     /// Tenant UUID — isolates unrelated deployments.
     pub tenant: String,
@@ -377,7 +369,6 @@ fn default_cluster_enabled() -> bool { true }
 fn default_gossip_port() -> u16 { 11204 }
 
 #[derive(Debug, Deserialize, Clone)]
-/// Discoveryconfig.
 pub struct DiscoveryConfig {
     /// "k8s" or "bootstrap".
     #[serde(default = "default_discovery_method")]
@@ -403,13 +394,10 @@ impl Default for DiscoveryConfig {
 fn default_discovery_method() -> String { "k8s".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
-/// Bandwidthclusterconfig.
 pub struct BandwidthClusterConfig {
     #[serde(default = "default_broadcast_interval")]
-    /// Broadcast interval secs.
     pub broadcast_interval_secs: u64,
     #[serde(default = "default_stale_peer_timeout")]
-    /// Stale peer timeout secs.
     pub stale_peer_timeout_secs: u64,
     /// Sliding window size for aggregate bandwidth rate calculation.
     #[serde(default = "default_meter_window")]
@@ -422,16 +410,12 @@ fn default_broadcast_interval() -> u64 { 1 }
 fn default_stale_peer_timeout() -> u64 { 30 }
 
 #[derive(Debug, Deserialize, Clone)]
-/// Modelsconfig.
 pub struct ModelsConfig {
     #[serde(default = "default_model_dir")]
-    /// Model dir.
     pub model_dir: String,
     #[serde(default = "default_max_model_size")]
-    /// Max model size bytes.
     pub max_model_size_bytes: u64,
     #[serde(default = "default_chunk_size")]
-    /// Chunk size.
     pub chunk_size: u32,
 }
 
