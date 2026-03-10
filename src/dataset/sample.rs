@@ -1,6 +1,3 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,15 +7,10 @@ use anyhow::{Context, Result};
 /// Provenance of a training sample.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataSource {
-    /// Productionlogs.
     ProductionLogs,
-    /// Csic2010.
     Csic2010,
-    /// Owaspmodsec.
     OwaspModSec,
-    /// Syntheticcictiming.
     SyntheticCicTiming,
-    /// Syntheticwordlist.
     SyntheticWordlist,
 }
 
@@ -38,11 +30,9 @@ impl std::fmt::Display for DataSource {
 /// and weight (used during training to down-weight synthetic/external data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingSample {
-    /// Features.
     pub features: Vec<f32>,
     /// 0.0 = normal, 1.0 = attack
     pub label: f32,
-    /// Source.
     pub source: DataSource,
     /// Sample weight: 1.0 for production, 0.8 for external datasets, 0.5 for synthetic.
     pub weight: f32,
@@ -51,28 +41,19 @@ pub struct TrainingSample {
 /// Aggregate statistics about a prepared dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetStats {
-    /// Total samples.
     pub total_samples: usize,
-    /// Scanner samples.
     pub scanner_samples: usize,
-    /// Ddos samples.
     pub ddos_samples: usize,
-    /// Samples by source.
     pub samples_by_source: HashMap<DataSource, usize>,
-    /// Attack ratio scanner.
     pub attack_ratio_scanner: f64,
-    /// Attack ratio ddos.
     pub attack_ratio_ddos: f64,
 }
 
 /// The full serializable dataset: scanner samples, DDoS samples, and stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetManifest {
-    /// Scanner samples.
     pub scanner_samples: Vec<TrainingSample>,
-    /// Ddos samples.
     pub ddos_samples: Vec<TrainingSample>,
-    /// Stats.
     pub stats: DatasetStats,
 }
 

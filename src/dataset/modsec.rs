@@ -1,6 +1,3 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 //! Parser for OWASP ModSecurity audit log files (Serial / concurrent format).
 //!
 //! ModSecurity audit logs consist of multi-section entries delimited by boundary
@@ -179,7 +176,6 @@ fn transaction_to_audit_fields(
     let content_length: u64 = get_header("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let accept = get_header("accept").filter(|a| a != "-" && !a.is_empty());
 
     // Section F: response status
     let status = sections
@@ -220,13 +216,11 @@ fn transaction_to_audit_fields(
         duration_ms: 0,
         content_length,
         user_agent,
-        has_cookies,
-        referer: referer.unwrap_or_else(|| "-".to_string()),
-        accept_language: accept_language.unwrap_or_else(|| "-".to_string()),
-        accept: accept.unwrap_or_else(|| "-".to_string()),
+        has_cookies: Some(has_cookies),
+        referer,
+        accept_language,
         backend: "-".to_string(),
         label: Some(label.clone()),
-        ..AuditFields::default()
     };
 
     Some((fields, label))
@@ -308,7 +302,7 @@ Content-Type: text/html
         assert_eq!(attack_fields.client_ip, "192.168.1.100");
         assert_eq!(attack_fields.user_agent, "curl/7.68.0");
         assert_eq!(attack_fields.status, 403);
-        assert!(!attack_fields.has_cookies);
+        assert!(!attack_fields.has_cookies.unwrap_or(true));
 
         // Second entry: normal (no rule match).
         let (normal_fields, normal_label) = &results[1];
@@ -317,9 +311,9 @@ Content-Type: text/html
         assert_eq!(normal_fields.path, "/index.html");
         assert_eq!(normal_fields.client_ip, "10.0.0.50");
         assert_eq!(normal_fields.status, 200);
-        assert!(normal_fields.has_cookies);
-        assert!(normal_fields.referer != "-");
-        assert!(normal_fields.accept_language != "-");
+        assert!(normal_fields.has_cookies.unwrap_or(false));
+        assert!(normal_fields.referer.is_some());
+        assert!(normal_fields.accept_language.is_some());
     }
 
     #[test]
