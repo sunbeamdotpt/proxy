@@ -353,6 +353,31 @@ fn run_serve(upgrade: bool) -> Result<()> {
     //    Pingora's async proxy calls without cross-runtime waker concerns.
     let acme_routes: acme::AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
 
+    // 2d. Spawn cluster gossip if configured.
+    let cluster_handle = if let Some(cc) = &cfg.cluster {
+        if cc.enabled {
+            match sunbeam_proxy::cluster::spawn_cluster(cc) {
+                Ok(handle) => {
+                    tracing::info!(
+                        endpoint_id = %handle.endpoint_id,
+                        tenant = %cc.tenant,
+                        port = cc.gossip_port,
+                        "cluster gossip started"
+                    );
+                    Some(Arc::new(handle))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start cluster; running standalone");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let compiled_rewrites = SunbeamProxy::compile_rewrites(&cfg.routes);
     let http_client = reqwest::Client::new();
 
@@ -368,6 +393,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
         pipeline_bypass_cidrs: crate::rate_limit::cidr::parse_cidrs(
             &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
         ),
+        cluster: cluster_handle,
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 

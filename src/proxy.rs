@@ -1,4 +1,5 @@
 use crate::acme::AcmeRoutes;
+use crate::cluster::ClusterHandle;
 use crate::config::RouteConfig;
 use crate::ddos::detector::DDoSDetector;
 use crate::ddos::model::DDoSAction;
@@ -45,6 +46,8 @@ pub struct SunbeamProxy {
     pub http_client: reqwest::Client,
     /// Parsed bypass CIDRs — IPs in these ranges skip the detection pipeline.
     pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
+    /// Optional cluster handle for multi-node bandwidth tracking.
+    pub cluster: Option<Arc<ClusterHandle>>,
 }
 
 pub struct RequestCtx {
@@ -476,6 +479,24 @@ impl ProxyHttp for SunbeamProxy {
                     session.write_response_header(Box::new(resp), true).await?;
                     return Ok(true);
                 }
+            }
+        }
+
+        // Cluster-wide bandwidth cap enforcement.
+        if let Some(c) = &self.cluster {
+            use crate::cluster::bandwidth::BandwidthLimitResult;
+            let bw_result = c.limiter.check();
+            let decision = if bw_result == BandwidthLimitResult::Reject { "block" } else { "allow" };
+            metrics::BANDWIDTH_LIMIT_DECISIONS.with_label_values(&[decision]).inc();
+            if bw_result == BandwidthLimitResult::Reject {
+                let body = b"{\"error\":\"bandwidth_limit_exceeded\",\"message\":\"Request rate-limited: aggregate bandwidth capacity exceeded. Please try again shortly.\"}";
+                let mut resp = ResponseHeader::build(429, None)?;
+                resp.insert_header("Retry-After", "5")?;
+                resp.insert_header("Content-Type", "application/json")?;
+                resp.insert_header("Content-Length", body.len().to_string())?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session.write_response_body(Some(Bytes::from_static(body)), true).await?;
+                return Ok(true);
             }
         }
 
@@ -1073,6 +1094,18 @@ impl ProxyHttp for SunbeamProxy {
             .with_label_values(&[&method_str, &host, &status.to_string(), backend])
             .inc();
         metrics::REQUEST_DURATION.observe(duration_secs);
+
+        // Record bandwidth for cluster aggregation.
+        if let Some(c) = &self.cluster {
+            let req_bytes: u64 = session
+                .req_header()
+                .headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            c.bandwidth.record(req_bytes, session.body_bytes_sent() as u64);
+        }
 
         let content_length: u64 = session
             .req_header()

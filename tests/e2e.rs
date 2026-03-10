@@ -108,7 +108,7 @@ fn start_proxy_once(backend_port: u16) {
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
         let compiled_rewrites = SunbeamProxy::compile_rewrites(&routes);
-        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None, compiled_rewrites, http_client: reqwest::Client::new(), pipeline_bypass_cidrs: vec![] };
+        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None, compiled_rewrites, http_client: reqwest::Client::new(), pipeline_bypass_cidrs: vec![], cluster: None };
 
         let opt = Opt {
             upgrade: false,
