@@ -404,8 +404,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
             &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
         ),
         cluster: cluster_handle,
-        ddos_observe_only: cfg.ddos.as_ref().map(|d| d.observe_only).unwrap_or(false),
-        scanner_observe_only: cfg.scanner.as_ref().map(|s| s.observe_only).unwrap_or(false),
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
