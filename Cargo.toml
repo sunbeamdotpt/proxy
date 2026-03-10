@@ -109,6 +109,17 @@ iroh-gossip = { version = "0.96", features = ["net"] }
 blake3      = "1"
 hex         = "0.4"
 rand        = "0.9"
+rayon       = "1"
+tempfile    = "3"
+
+# Dataset ingestion (CIC-IDS2017 CSV parsing)
+csv         = "1"
+
+# burn-rs ML framework (training only, behind `training` feature)
+burn = { version = "0.20", features = ["ndarray", "autodiff"], optional = true }
+
+[features]
+training = ["burn"]
 
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
@@ -122,14 +133,6 @@ harness = false
 
 [[bench]]
 name = "ddos_bench"
-harness = false
-
-[[bench]]
-name = "crown_bench"
-harness = false
-
-[[bench]]
-name = "ddos_crown_bench"
 harness = false
 
 [profile.release]
