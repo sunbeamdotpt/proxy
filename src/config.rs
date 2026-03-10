@@ -46,6 +46,10 @@ pub struct RouteConfig {
     pub backend: String,
     #[serde(default)]
     pub websocket: bool,
+    /// When true, plain-HTTP requests for this host are forwarded as-is rather
+    /// than being redirected to HTTPS. Defaults to false (redirect enforced).
+    #[serde(default)]
+    pub disable_secure_redirection: bool,
     /// Optional path-based sub-routes (longest prefix wins).
     /// If the request path matches a sub-route, its backend is used instead.
     #[serde(default)]

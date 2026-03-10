@@ -102,9 +102,29 @@ impl ProxyHttp for SunbeamProxy {
                 return Ok(true);
             }
 
-            // All other plain-HTTP traffic: redirect to HTTPS.
+            // All other plain-HTTP traffic.
             let host = extract_host(session);
-            let location = format!("https://{host}{path}");
+            let prefix = host.split('.').next().unwrap_or("");
+
+            // Routes that explicitly opt out of HTTPS enforcement pass through.
+            // All other requests — including unknown hosts — are redirected.
+            // This is as close to an L4 redirect as HTTP allows: the upstream is
+            // never contacted; the 301 is written directly to the downstream socket.
+            if self
+                .find_route(prefix)
+                .map(|r| r.disable_secure_redirection)
+                .unwrap_or(false)
+            {
+                return Ok(false);
+            }
+
+            let query = session
+                .req_header()
+                .uri
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            let location = format!("https://{host}{path}{query}");
             let mut resp = ResponseHeader::build(301, None)?;
             resp.insert_header("Location", location)?;
             resp.insert_header("Content-Length", "0")?;
@@ -162,6 +182,7 @@ impl ProxyHttp for SunbeamProxy {
                 host_prefix: route.host_prefix.clone(),
                 backend: pr.backend.clone(),
                 websocket: pr.websocket || route.websocket,
+                disable_secure_redirection: route.disable_secure_redirection,
                 paths: vec![],
             });
             return Ok(Box::new(HttpPeer::new(
