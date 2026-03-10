@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! Dataset preparation orchestrator.
 //!
 //! Combines production logs, external datasets (CSIC, OWASP ModSec), and
@@ -30,6 +33,10 @@ pub struct PrepareDatasetArgs {
     pub seed: u64,
     /// Path to heuristics.toml for auto-labeling production logs.
     pub heuristics: Option<String>,
+    /// Inject CSIC 2010 entries as labeled audit logs into production stream.
+    pub inject_csic: bool,
+    /// Inject OWASP ModSec entries as labeled audit logs (path to .log file).
+    pub inject_modsec: Option<String>,
 }
 
 impl Default for PrepareDatasetArgs {
@@ -41,6 +48,8 @@ impl Default for PrepareDatasetArgs {
             output: "dataset.bin".to_string(),
             seed: 42,
             heuristics: None,
+            inject_csic: false,
+            inject_modsec: None,
         }
     }
 }
@@ -71,18 +80,21 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
     scanner_samples.extend(prod_scanner);
     ddos_samples.extend(prod_ddos);
 
-    // --- 2. CSIC 2010 (scanner) ---
-    eprintln!("fetching CSIC 2010 dataset...");
-    let csic_entries = crate::scanner::csic::fetch_csic_dataset()?;
-    let csic_samples = entries_to_scanner_samples(&csic_entries, DataSource::Csic2010, 0.8)?;
-    eprintln!("  CSIC: {} scanner samples", csic_samples.len());
-    scanner_samples.extend(csic_samples);
+    // --- 2. Inject external datasets as labeled audit log entries ---
+    // These go through the same feature extraction as production logs,
+    // with ground-truth labels (no heuristic labeling needed).
+    if args.inject_csic {
+        eprintln!("injecting CSIC 2010 as labeled audit entries...");
+        let csic_entries = crate::scanner::csic::fetch_csic_dataset()?;
+        let csic_scanner = entries_to_scanner_samples(&csic_entries, DataSource::Csic2010, 0.8)?;
+        eprintln!("  CSIC injected: {} scanner samples", csic_scanner.len());
+        scanner_samples.extend(csic_scanner);
+    }
 
-    // --- 3. OWASP ModSec (scanner) ---
-    if let Some(owasp_path) = &args.owasp {
-        eprintln!("parsing OWASP ModSec audit log from {owasp_path}...");
+    if let Some(modsec_path) = &args.inject_modsec {
+        eprintln!("injecting ModSec audit log from {modsec_path}...");
         let modsec_entries =
-            crate::dataset::modsec::parse_modsec_audit_log(Path::new(owasp_path))?;
+            crate::dataset::modsec::parse_modsec_audit_log(Path::new(modsec_path))?;
         let entries_with_host: Vec<(AuditFields, String)> = modsec_entries
             .into_iter()
             .map(|(fields, _label)| {
@@ -90,16 +102,49 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
                 (fields, host_prefix)
             })
             .collect();
-        let modsec_samples =
+        let modsec_scanner =
             entries_to_scanner_samples(&entries_with_host, DataSource::OwaspModSec, 0.8)?;
-        eprintln!("  OWASP: {} scanner samples", modsec_samples.len());
-        scanner_samples.extend(modsec_samples);
+        eprintln!("  ModSec injected: {} scanner samples", modsec_scanner.len());
+        scanner_samples.extend(modsec_scanner);
     }
 
-    // --- 4. CIC-IDS2017 timing profiles (from cache if downloaded) ---
+    // --- 3. Legacy OWASP path (kept for backwards compat) ---
+    if let Some(owasp_path) = &args.owasp {
+        if args.inject_modsec.as_deref() != Some(owasp_path.as_str()) {
+            eprintln!("parsing OWASP ModSec audit log from {owasp_path}...");
+            let modsec_entries =
+                crate::dataset::modsec::parse_modsec_audit_log(Path::new(owasp_path))?;
+            let entries_with_host: Vec<(AuditFields, String)> = modsec_entries
+                .into_iter()
+                .map(|(fields, _label)| {
+                    let host_prefix = fields.host.split('.').next().unwrap_or("").to_string();
+                    (fields, host_prefix)
+                })
+                .collect();
+            let modsec_samples =
+                entries_to_scanner_samples(&entries_with_host, DataSource::OwaspModSec, 0.8)?;
+            eprintln!("  OWASP: {} scanner samples", modsec_samples.len());
+            scanner_samples.extend(modsec_samples);
+        }
+    }
+
+    // --- 4. CIC-IDS2017 (direct DDoS samples + timing profiles for synthetic) ---
     let cicids_profiles = if let Some(cached_path) = crate::dataset::download::cicids_cached_path()
     {
-        eprintln!("extracting CIC-IDS2017 timing profiles from cache...");
+        // Direct conversion: CIC-IDS2017 flows → DDoS training samples
+        eprintln!("extracting CIC-IDS2017 DDoS samples from cache...");
+        let cicids_ddos = crate::dataset::cicids::extract_ddos_samples(&cached_path)?;
+        let attack_count = cicids_ddos.iter().filter(|s| s.label > 0.5).count();
+        eprintln!(
+            "  CIC-IDS2017 direct: {} DDoS samples ({} attack, {} normal)",
+            cicids_ddos.len(),
+            attack_count,
+            cicids_ddos.len() - attack_count
+        );
+        ddos_samples.extend(cicids_ddos);
+
+        // Also extract timing profiles for synthetic generation
+        eprintln!("extracting CIC-IDS2017 timing profiles...");
         let profiles = crate::dataset::cicids::extract_timing_profiles(&cached_path)?;
         eprintln!("  extracted {} attack-type profiles", profiles.len());
         profiles
@@ -112,10 +157,10 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
     // --- 5. Synthetic data (both models, always generated) ---
     eprintln!("generating synthetic samples...");
     let config = crate::dataset::synthetic::SyntheticConfig {
-        num_ddos_attack: 10000,
-        num_ddos_normal: 10000,
-        num_scanner_attack: 5000,
-        num_scanner_normal: 5000,
+        num_ddos_attack: 50000,
+        num_ddos_normal: 50000,
+        num_scanner_attack: 25000,
+        num_scanner_normal: 25000,
         seed: args.seed,
     };
 
@@ -240,17 +285,9 @@ fn parse_production_logs(
 
     // --- Scanner samples from production logs ---
     for (fields, host_prefix) in &parsed_entries {
-        let has_cookies = fields.has_cookies.unwrap_or(false);
-        let has_referer = fields
-            .referer
-            .as_ref()
-            .map(|r| r != "-" && !r.is_empty())
-            .unwrap_or(false);
-        let has_accept_language = fields
-            .accept_language
-            .as_ref()
-            .map(|a| a != "-" && !a.is_empty())
-            .unwrap_or(false);
+        let has_cookies = fields.has_cookies;
+        let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -259,7 +296,7 @@ fn parse_production_logs(
             has_cookies,
             has_referer,
             has_accept_language,
-            "-",
+            &fields.accept,
             &fields.user_agent,
             fields.content_length,
             &fragment_hashes,
@@ -352,20 +389,12 @@ fn extract_ddos_samples_from_entries(
             .push(fields.content_length.min(u32::MAX as u64) as u32);
         state
             .has_cookies
-            .push(fields.has_cookies.unwrap_or(false));
+            .push(fields.has_cookies);
         state.has_referer.push(
-            fields
-                .referer
-                .as_deref()
-                .map(|r| r != "-")
-                .unwrap_or(false),
+            !fields.referer.is_empty() && fields.referer != "-",
         );
         state.has_accept_language.push(
-            fields
-                .accept_language
-                .as_deref()
-                .map(|a| a != "-")
-                .unwrap_or(false),
+            !fields.accept_language.is_empty() && fields.accept_language != "-",
         );
         state.suspicious_paths.push(
             crate::ddos::features::is_suspicious_path(&fields.path),
@@ -462,17 +491,9 @@ fn entries_to_scanner_samples(
     let mut samples = Vec::new();
 
     for (fields, host_prefix) in entries {
-        let has_cookies = fields.has_cookies.unwrap_or(false);
-        let has_referer = fields
-            .referer
-            .as_ref()
-            .map(|r| r != "-" && !r.is_empty())
-            .unwrap_or(false);
-        let has_accept_language = fields
-            .accept_language
-            .as_ref()
-            .map(|a| a != "-" && !a.is_empty())
-            .unwrap_or(false);
+        let has_cookies = fields.has_cookies;
+        let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -481,7 +502,7 @@ fn entries_to_scanner_samples(
             has_cookies,
             has_referer,
             has_accept_language,
-            "-",
+            &fields.accept,
             &fields.user_agent,
             fields.content_length,
             &fragment_hashes,
@@ -587,11 +608,12 @@ mod tests {
             duration_ms: 10,
             content_length: 0,
             user_agent: "Mozilla/5.0".to_string(),
-            has_cookies: Some(true),
-            referer: Some("https://test.sunbeam.pt".to_string()),
-            accept_language: Some("en-US".to_string()),
+            has_cookies: true,
+            referer: "https://test.sunbeam.pt".to_string(),
+            accept_language: "en-US".to_string(),
             backend: "test-svc:8080".to_string(),
             label: Some(label.to_string()),
+            ..AuditFields::default()
         };
         (fields, "test".to_string())
     }

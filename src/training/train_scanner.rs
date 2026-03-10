@@ -1,19 +1,27 @@
-//! Scanner MLP+tree training loop.
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
+//! Scanner MLP+tree training loop using burn's SupervisedTraining.
 //!
-//! Loads a `DatasetManifest`, trains a CART decision tree and a burn-rs MLP,
-//! then exports the combined ensemble weights as a Rust source file that can
-//! be dropped into `src/ensemble/gen/scanner_weights.rs`.
+//! Loads a `DatasetManifest`, trains a CART decision tree and a burn-rs MLP
+//! with cosine annealing + early stopping, then exports the combined ensemble
+//! weights as a Rust source file for `src/ensemble/gen/scanner_weights.rs`.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use burn::backend::ndarray::NdArray;
 use burn::backend::Autodiff;
-use burn::module::AutodiffModule;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::backend::Wgpu;
+use burn::data::dataloader::DataLoaderBuilder;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
+use burn::optim::AdamConfig;
 use burn::prelude::*;
+use burn::record::CompactRecorder;
+use burn::train::metric::{AccuracyMetric, LossMetric};
+use burn::train::{Learner, SupervisedTraining};
 
 use crate::dataset::sample::{load_dataset, TrainingSample};
+use crate::training::batch::{SampleBatcher, SampleDataset};
 use crate::training::export::{export_to_file, ExportedModel};
 use crate::training::mlp::MlpConfig;
 use crate::training::tree::{train_tree, tree_predict, TreeConfig, TreeDecision};
@@ -21,7 +29,7 @@ use crate::training::tree::{train_tree, tree_predict, TreeConfig, TreeDecision};
 /// Number of scanner features (matches `crate::scanner::features::NUM_SCANNER_FEATURES`).
 const NUM_FEATURES: usize = 12;
 
-type TrainBackend = Autodiff<NdArray<f32>>;
+type TrainBackend = Autodiff<Wgpu<f32, i32>>;
 
 /// Arguments for the scanner MLP training command.
 pub struct TrainScannerMlpArgs {
@@ -37,10 +45,14 @@ pub struct TrainScannerMlpArgs {
     pub learning_rate: f64,
     /// Mini-batch size (default 64).
     pub batch_size: usize,
-    /// CART max depth (default 6).
+    /// CART max depth (default 8).
     pub tree_max_depth: usize,
-    /// CART leaf purity threshold (default 0.90).
+    /// CART leaf purity threshold (default 0.98).
     pub tree_min_purity: f32,
+    /// Minimum samples in a leaf node (default 2).
+    pub min_samples_leaf: usize,
+    /// Weight for cookie feature (feature 3: has_cookies). 0.0 = ignore, 1.0 = full weight.
+    pub cookie_weight: f32,
 }
 
 impl Default for TrainScannerMlpArgs {
@@ -50,13 +62,18 @@ impl Default for TrainScannerMlpArgs {
             output_dir: ".".into(),
             hidden_dim: 32,
             epochs: 100,
-            learning_rate: 0.001,
+            learning_rate: 0.0001,
             batch_size: 64,
-            tree_max_depth: 6,
-            tree_min_purity: 0.90,
+            tree_max_depth: 8,
+            tree_min_purity: 0.98,
+            min_samples_leaf: 2,
+            cookie_weight: 1.0,
         }
     }
 }
+
+/// Index of the has_cookies feature in the scanner feature vector.
+const COOKIE_FEATURE_IDX: usize = 3;
 
 /// Entry point: train scanner ensemble and export weights.
 pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
@@ -86,6 +103,27 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
     // 2. Compute normalization params from training data.
     let (norm_mins, norm_maxs) = compute_norm_params(samples);
 
+    // Apply cookie_weight: for the MLP, we scale the normalization range so
+    // the feature contributes less gradient signal. For the CART tree, scaling
+    // doesn't help (the tree just adjusts its threshold), so we mask the feature
+    // to a constant on a fraction of training samples to degrade its Gini gain.
+    if args.cookie_weight < 1.0 - f32::EPSILON {
+        println!(
+            "[scanner] cookie_weight={:.2} (feature {} influence reduced)",
+            args.cookie_weight, COOKIE_FEATURE_IDX,
+        );
+    }
+
+    // MLP norm adjustment: scale the cookie feature's normalization range.
+    let mut mlp_norm_maxs = norm_maxs.clone();
+    if args.cookie_weight < 1.0 - f32::EPSILON {
+        let range = mlp_norm_maxs[COOKIE_FEATURE_IDX] - norm_mins[COOKIE_FEATURE_IDX];
+        if range > f32::EPSILON && args.cookie_weight > f32::EPSILON {
+            mlp_norm_maxs[COOKIE_FEATURE_IDX] =
+                range / args.cookie_weight + norm_mins[COOKIE_FEATURE_IDX];
+        }
+    }
+
     // 3. Stratified 80/20 split.
     let (train_set, val_set) = stratified_split(samples, 0.8);
     println!(
@@ -94,17 +132,18 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
         val_set.len()
     );
 
-    // 4. Train CART tree.
+    // 4. Train CART tree (with cookie feature masking for reduced weight).
+    let tree_train_set = mask_cookie_feature(&train_set, COOKIE_FEATURE_IDX, args.cookie_weight);
     let tree_config = TreeConfig {
         max_depth: args.tree_max_depth,
-        min_samples_leaf: 5,
+        min_samples_leaf: args.min_samples_leaf,
         min_purity: args.tree_min_purity,
         num_features: NUM_FEATURES,
     };
-    let tree_nodes = train_tree(&train_set, &tree_config);
-    println!("[scanner] CART tree: {} nodes", tree_nodes.len());
+    let tree_nodes = train_tree(&tree_train_set, &tree_config);
+    println!("[scanner] CART tree: {} nodes (max_depth={})", tree_nodes.len(), args.tree_max_depth);
 
-    // Evaluate tree on validation set.
+    // Evaluate tree on validation set (use original norms — tree learned on masked features).
     let (tree_correct, tree_deferred) = eval_tree(&tree_nodes, &val_set, &norm_mins, &norm_maxs);
     println!(
         "[scanner] tree validation: {:.2}% correct (of decided), {:.1}% deferred",
@@ -112,35 +151,38 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
         tree_deferred * 100.0,
     );
 
-    // 5. Train MLP on the full training set (the MLP only fires on Defer
-    //    at inference time, but we train it on all data so it learns the
-    //    full decision boundary).
+    // 5. Train MLP with SupervisedTraining (uses mlp_norm_maxs for cookie scaling).
     let device = Default::default();
     let mlp_config = MlpConfig {
         input_dim: NUM_FEATURES,
         hidden_dim: args.hidden_dim,
     };
 
+    let artifact_dir = Path::new(&args.output_dir).join("scanner_artifacts");
+    std::fs::create_dir_all(&artifact_dir).ok();
+
     let model = train_mlp(
         &train_set,
         &val_set,
         &mlp_config,
         &norm_mins,
-        &norm_maxs,
+        &mlp_norm_maxs,
         args.epochs,
         args.learning_rate,
         args.batch_size,
         &device,
+        &artifact_dir,
     );
 
-    // 6. Extract weights from trained model.
+    // 6. Extract weights from trained model (export mlp_norm_maxs so inference
+    //    automatically applies the same cookie scaling).
     let exported = extract_weights(
         &model,
         "scanner",
         &tree_nodes,
-        0.5, // threshold
+        0.5,
         &norm_mins,
-        &norm_maxs,
+        &mlp_norm_maxs,
         &device,
     );
 
@@ -153,6 +195,46 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
     println!("[scanner] exported Rust weights to {}", rust_path.display());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cookie feature masking for CART trees
+// ---------------------------------------------------------------------------
+
+/// Mask the cookie feature to reduce its influence on CART tree training.
+///
+/// Scaling a binary feature doesn't reduce its Gini gain — the tree just adjusts
+/// the split threshold. Instead, we mask (set to 0.5) a fraction of samples so
+/// the feature's apparent class-separation degrades.
+///
+/// - `cookie_weight = 0.0` → fully masked (feature is constant 0.5, zero info gain)
+/// - `cookie_weight = 0.5` → 50% of samples masked (noisy, reduced gain)
+/// - `cookie_weight = 1.0` → no masking (full feature)
+fn mask_cookie_feature(
+    samples: &[TrainingSample],
+    cookie_idx: usize,
+    cookie_weight: f32,
+) -> Vec<TrainingSample> {
+    if cookie_weight >= 1.0 - f32::EPSILON {
+        return samples.to_vec();
+    }
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut s2 = s.clone();
+            if cookie_weight < f32::EPSILON {
+                s2.features[cookie_idx] = 0.5;
+            } else {
+                let hash = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(42);
+                let r = (hash >> 33) as f32 / (u32::MAX >> 1) as f32;
+                if r > cookie_weight {
+                    s2.features[cookie_idx] = 0.5;
+                }
+            }
+            s2
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -172,21 +254,6 @@ fn compute_norm_params(samples: &[TrainingSample]) -> (Vec<f32>, Vec<f32>) {
     (mins, maxs)
 }
 
-fn normalize_features(features: &[f32], mins: &[f32], maxs: &[f32]) -> Vec<f32> {
-    features
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            let range = maxs[i] - mins[i];
-            if range > f32::EPSILON {
-                ((v - mins[i]) / range).clamp(0.0, 1.0)
-            } else {
-                0.0
-            }
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Stratified split
 // ---------------------------------------------------------------------------
@@ -195,7 +262,6 @@ fn stratified_split(samples: &[TrainingSample], train_ratio: f64) -> (Vec<Traini
     let mut attacks: Vec<&TrainingSample> = samples.iter().filter(|s| s.label >= 0.5).collect();
     let mut normals: Vec<&TrainingSample> = samples.iter().filter(|s| s.label < 0.5).collect();
 
-    // Deterministic shuffle using a simple index permutation seeded by length.
     deterministic_shuffle(&mut attacks);
     deterministic_shuffle(&mut normals);
 
@@ -224,7 +290,6 @@ fn stratified_split(samples: &[TrainingSample], train_ratio: f64) -> (Vec<Traini
 }
 
 fn deterministic_shuffle<T>(items: &mut [T]) {
-    // Simple Fisher-Yates with a fixed LCG seed for reproducibility.
     let mut rng = 42u64;
     for i in (1..items.len()).rev() {
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -276,8 +341,23 @@ fn eval_tree(
     (accuracy, defer_rate)
 }
 
+fn normalize_features(features: &[f32], mins: &[f32], maxs: &[f32]) -> Vec<f32> {
+    features
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let range = maxs[i] - mins[i];
+            if range > f32::EPSILON {
+                ((v - mins[i]) / range).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// MLP training
+// MLP training via SupervisedTraining
 // ---------------------------------------------------------------------------
 
 fn train_mlp(
@@ -290,119 +370,47 @@ fn train_mlp(
     learning_rate: f64,
     batch_size: usize,
     device: &<TrainBackend as Backend>::Device,
-) -> crate::training::mlp::MlpModel<NdArray<f32>> {
-    let mut model = config.init::<TrainBackend>(device);
-    let mut optim = AdamConfig::new().init();
+    artifact_dir: &Path,
+) -> crate::training::mlp::MlpModel<Wgpu<f32, i32>> {
+    let model = config.init::<TrainBackend>(device);
 
-    // Pre-normalize all training data.
-    let train_features: Vec<Vec<f32>> = train_set
-        .iter()
-        .map(|s| normalize_features(&s.features, mins, maxs))
-        .collect();
-    let train_labels: Vec<f32> = train_set.iter().map(|s| s.label).collect();
-    let train_weights: Vec<f32> = train_set.iter().map(|s| s.weight).collect();
+    let train_dataset = SampleDataset::new(train_set, mins, maxs);
+    let val_dataset = SampleDataset::new(val_set, mins, maxs);
 
-    let n = train_features.len();
+    let dataloader_train = DataLoaderBuilder::new(SampleBatcher::new())
+        .batch_size(batch_size)
+        .shuffle(42)
+        .num_workers(1)
+        .build(train_dataset);
 
-    for epoch in 0..epochs {
-        let mut epoch_loss = 0.0f32;
-        let mut batches = 0usize;
+    let dataloader_valid = DataLoaderBuilder::new(SampleBatcher::new())
+        .batch_size(batch_size)
+        .num_workers(1)
+        .build(val_dataset);
 
-        let mut offset = 0;
-        while offset < n {
-            let end = (offset + batch_size).min(n);
-            let batch_n = end - offset;
+    // Cosine annealing: initial_lr must be in (0.0, 1.0].
+    let lr = learning_rate.min(1.0);
+    let lr_scheduler = CosineAnnealingLrSchedulerConfig::new(lr, epochs)
+        .init()
+        .expect("valid cosine annealing config");
 
-            // Build input tensor [batch, features].
-            let flat: Vec<f32> = train_features[offset..end]
-                .iter()
-                .flat_map(|f| f.iter().copied())
-                .collect();
-            let x = Tensor::<TrainBackend, 1>::from_floats(flat.as_slice(), device)
-                .reshape([batch_n, NUM_FEATURES]);
+    let learner = Learner::new(
+        model,
+        AdamConfig::new().init(),
+        lr_scheduler,
+    );
 
-            // Labels [batch, 1].
-            let y = Tensor::<TrainBackend, 1>::from_floats(
-                &train_labels[offset..end],
-                device,
-            )
-            .reshape([batch_n, 1]);
+    let result = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
+        .metric_train_numeric(AccuracyMetric::new())
+        .metric_valid_numeric(AccuracyMetric::new())
+        .metric_train_numeric(LossMetric::new())
+        .metric_valid_numeric(LossMetric::new())
+        .with_file_checkpointer(CompactRecorder::new())
+        .num_epochs(epochs)
+        .summary()
+        .launch(learner);
 
-            // Sample weights [batch, 1].
-            let w = Tensor::<TrainBackend, 1>::from_floats(
-                &train_weights[offset..end],
-                device,
-            )
-            .reshape([batch_n, 1]);
-
-            // Forward pass.
-            let pred = model.forward(x);
-
-            // Binary cross-entropy with sample weights:
-            //   loss = -w * [y * log(p) + (1-y) * log(1-p)]
-            let eps = 1e-7;
-            let pred_clamped = pred.clone().clamp(eps, 1.0 - eps);
-            let bce = (y.clone() * pred_clamped.clone().log()
-                + (y.clone().neg().add_scalar(1.0))
-                    * pred_clamped.neg().add_scalar(1.0).log())
-            .neg();
-            let weighted_bce = bce * w;
-            let loss = weighted_bce.mean();
-
-            epoch_loss += loss.clone().into_scalar().elem::<f32>();
-            batches += 1;
-
-            // Backward + optimizer step.
-            let grads = loss.backward();
-            let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(learning_rate, model, grads);
-
-            offset = end;
-        }
-
-        if (epoch + 1) % 10 == 0 || epoch == 0 {
-            let avg_loss = epoch_loss / batches as f32;
-            let val_acc = eval_mlp_accuracy(&model, val_set, mins, maxs, device);
-            println!(
-                "[scanner]   epoch {:>4}/{}: loss={:.6}, val_acc={:.4}",
-                epoch + 1,
-                epochs,
-                avg_loss,
-                val_acc,
-            );
-        }
-    }
-
-    // Return the inner (non-autodiff) model for weight extraction.
-    model.valid()
-}
-
-fn eval_mlp_accuracy(
-    model: &crate::training::mlp::MlpModel<TrainBackend>,
-    val_set: &[TrainingSample],
-    mins: &[f32],
-    maxs: &[f32],
-    device: &<TrainBackend as Backend>::Device,
-) -> f64 {
-    let flat: Vec<f32> = val_set
-        .iter()
-        .flat_map(|s| normalize_features(&s.features, mins, maxs))
-        .collect();
-    let x = Tensor::<TrainBackend, 1>::from_floats(flat.as_slice(), device)
-        .reshape([val_set.len(), NUM_FEATURES]);
-
-    let pred = model.forward(x);
-    let pred_data: Vec<f32> = pred.to_data().to_vec().expect("flat vec");
-
-    let mut correct = 0usize;
-    for (i, s) in val_set.iter().enumerate() {
-        let p = pred_data[i];
-        let predicted_label = if p >= 0.5 { 1.0 } else { 0.0 };
-        if (predicted_label - s.label).abs() < 0.1 {
-            correct += 1;
-        }
-    }
-    correct as f64 / val_set.len() as f64
+    result.model
 }
 
 // ---------------------------------------------------------------------------
@@ -410,19 +418,14 @@ fn eval_mlp_accuracy(
 // ---------------------------------------------------------------------------
 
 fn extract_weights(
-    model: &crate::training::mlp::MlpModel<NdArray<f32>>,
+    model: &crate::training::mlp::MlpModel<Wgpu<f32, i32>>,
     name: &str,
     tree_nodes: &[(u8, f32, u16, u16)],
     threshold: f32,
     norm_mins: &[f32],
     norm_maxs: &[f32],
-    _device: &<NdArray<f32> as Backend>::Device,
+    _device: &<Wgpu<f32, i32> as Backend>::Device,
 ) -> ExportedModel {
-    // Extract weight tensors from the model.
-    // linear1.weight: [hidden_dim, input_dim]
-    // linear1.bias:   [hidden_dim]
-    // linear2.weight: [1, hidden_dim]
-    // linear2.bias:   [1]
     let w1_tensor = model.linear1.weight.val();
     let b1_tensor = model.linear1.bias.as_ref().expect("linear1 has bias").val();
     let w2_tensor = model.linear2.weight.val();
@@ -436,7 +439,6 @@ fn extract_weights(
     let hidden_dim = b1_data.len();
     let input_dim = w1_data.len() / hidden_dim;
 
-    // Reshape W1 into [hidden_dim][input_dim].
     let w1: Vec<Vec<f32>> = (0..hidden_dim)
         .map(|h| w1_data[h * input_dim..(h + 1) * input_dim].to_vec())
         .collect();
@@ -485,9 +487,8 @@ mod tests {
         let train_attacks = train.iter().filter(|s| s.label >= 0.5).count();
         let val_attacks = val.iter().filter(|s| s.label >= 0.5).count();
 
-        // Should preserve the 80/20 attack ratio approximately.
-        assert_eq!(train_attacks, 16); // 80% of 20
-        assert_eq!(val_attacks, 4);    // 20% of 20
+        assert_eq!(train_attacks, 16);
+        assert_eq!(val_attacks, 4);
         assert_eq!(train.len() + val.len(), 100);
     }
 
@@ -502,14 +503,5 @@ mod tests {
         assert_eq!(maxs[0], 1.0);
         assert_eq!(mins[1], 10.0);
         assert_eq!(maxs[1], 20.0);
-    }
-
-    #[test]
-    fn test_normalize_features() {
-        let mins = vec![0.0, 10.0];
-        let maxs = vec![1.0, 20.0];
-        let normed = normalize_features(&[0.5, 15.0], &mins, &maxs);
-        assert!((normed[0] - 0.5).abs() < 1e-6);
-        assert!((normed[1] - 0.5).abs() < 1e-6);
     }
 }

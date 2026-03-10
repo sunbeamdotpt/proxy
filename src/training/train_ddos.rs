@@ -1,19 +1,27 @@
-//! DDoS MLP+tree training loop.
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
+//! DDoS MLP+tree training loop using burn's SupervisedTraining.
 //!
-//! Loads a `DatasetManifest`, trains a CART decision tree and a burn-rs MLP,
-//! then exports the combined ensemble weights as a Rust source file that can
-//! be dropped into `src/ensemble/gen/ddos_weights.rs`.
+//! Loads a `DatasetManifest`, trains a CART decision tree and a burn-rs MLP
+//! with cosine annealing + early stopping, then exports the combined ensemble
+//! weights as a Rust source file for `src/ensemble/gen/ddos_weights.rs`.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use burn::backend::ndarray::NdArray;
 use burn::backend::Autodiff;
-use burn::module::AutodiffModule;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::backend::Wgpu;
+use burn::data::dataloader::DataLoaderBuilder;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
+use burn::optim::AdamConfig;
 use burn::prelude::*;
+use burn::record::CompactRecorder;
+use burn::train::metric::{AccuracyMetric, LossMetric};
+use burn::train::{Learner, SupervisedTraining};
 
 use crate::dataset::sample::{load_dataset, TrainingSample};
+use crate::training::batch::{SampleBatcher, SampleDataset};
 use crate::training::export::{export_to_file, ExportedModel};
 use crate::training::mlp::MlpConfig;
 use crate::training::tree::{train_tree, tree_predict, TreeConfig, TreeDecision};
@@ -21,7 +29,7 @@ use crate::training::tree::{train_tree, tree_predict, TreeConfig, TreeDecision};
 /// Number of DDoS features (matches `crate::ddos::features::NUM_FEATURES`).
 const NUM_FEATURES: usize = 14;
 
-type TrainBackend = Autodiff<NdArray<f32>>;
+type TrainBackend = Autodiff<Wgpu<f32, i32>>;
 
 /// Arguments for the DDoS MLP training command.
 pub struct TrainDdosMlpArgs {
@@ -37,10 +45,14 @@ pub struct TrainDdosMlpArgs {
     pub learning_rate: f64,
     /// Mini-batch size (default 64).
     pub batch_size: usize,
-    /// CART max depth (default 6).
+    /// CART max depth (default 8).
     pub tree_max_depth: usize,
-    /// CART leaf purity threshold (default 0.90).
+    /// CART leaf purity threshold (default 0.98).
     pub tree_min_purity: f32,
+    /// Minimum samples in a leaf node (default 2).
+    pub min_samples_leaf: usize,
+    /// Weight for cookie feature (feature 10: cookie_ratio). 0.0 = ignore, 1.0 = full weight.
+    pub cookie_weight: f32,
 }
 
 impl Default for TrainDdosMlpArgs {
@@ -50,13 +62,18 @@ impl Default for TrainDdosMlpArgs {
             output_dir: ".".into(),
             hidden_dim: 32,
             epochs: 100,
-            learning_rate: 0.001,
+            learning_rate: 0.0001,
             batch_size: 64,
-            tree_max_depth: 6,
-            tree_min_purity: 0.90,
+            tree_max_depth: 8,
+            tree_min_purity: 0.98,
+            min_samples_leaf: 2,
+            cookie_weight: 1.0,
         }
     }
 }
+
+/// Index of the cookie_ratio feature in the DDoS feature vector.
+const COOKIE_FEATURE_IDX: usize = 10;
 
 /// Entry point: train DDoS ensemble and export weights.
 pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
@@ -86,6 +103,23 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
     // 2. Compute normalization params from training data.
     let (norm_mins, norm_maxs) = compute_norm_params(samples);
 
+    if args.cookie_weight < 1.0 - f32::EPSILON {
+        println!(
+            "[ddos] cookie_weight={:.2} (feature {} influence reduced)",
+            args.cookie_weight, COOKIE_FEATURE_IDX,
+        );
+    }
+
+    // MLP norm adjustment: scale cookie feature's normalization range.
+    let mut mlp_norm_maxs = norm_maxs.clone();
+    if args.cookie_weight < 1.0 - f32::EPSILON {
+        let range = mlp_norm_maxs[COOKIE_FEATURE_IDX] - norm_mins[COOKIE_FEATURE_IDX];
+        if range > f32::EPSILON && args.cookie_weight > f32::EPSILON {
+            mlp_norm_maxs[COOKIE_FEATURE_IDX] =
+                range / args.cookie_weight + norm_mins[COOKIE_FEATURE_IDX];
+        }
+    }
+
     // 3. Stratified 80/20 split.
     let (train_set, val_set) = stratified_split(samples, 0.8);
     println!(
@@ -94,15 +128,16 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
         val_set.len()
     );
 
-    // 4. Train CART tree.
+    // 4. Train CART tree (with cookie feature masking for reduced weight).
+    let tree_train_set = mask_cookie_feature(&train_set, COOKIE_FEATURE_IDX, args.cookie_weight);
     let tree_config = TreeConfig {
         max_depth: args.tree_max_depth,
-        min_samples_leaf: 5,
+        min_samples_leaf: args.min_samples_leaf,
         min_purity: args.tree_min_purity,
         num_features: NUM_FEATURES,
     };
-    let tree_nodes = train_tree(&train_set, &tree_config);
-    println!("[ddos] CART tree: {} nodes", tree_nodes.len());
+    let tree_nodes = train_tree(&tree_train_set, &tree_config);
+    println!("[ddos] CART tree: {} nodes (max_depth={})", tree_nodes.len(), args.tree_max_depth);
 
     // Evaluate tree on validation set.
     let (tree_correct, tree_deferred) = eval_tree(&tree_nodes, &val_set, &norm_mins, &norm_maxs);
@@ -112,23 +147,27 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
         tree_deferred * 100.0,
     );
 
-    // 5. Train MLP on the full training set.
+    // 5. Train MLP with SupervisedTraining (uses mlp_norm_maxs for cookie scaling).
     let device = Default::default();
     let mlp_config = MlpConfig {
         input_dim: NUM_FEATURES,
         hidden_dim: args.hidden_dim,
     };
 
+    let artifact_dir = Path::new(&args.output_dir).join("ddos_artifacts");
+    std::fs::create_dir_all(&artifact_dir).ok();
+
     let model = train_mlp(
         &train_set,
         &val_set,
         &mlp_config,
         &norm_mins,
-        &norm_maxs,
+        &mlp_norm_maxs,
         args.epochs,
         args.learning_rate,
         args.batch_size,
         &device,
+        &artifact_dir,
     );
 
     // 6. Extract weights from trained model.
@@ -136,9 +175,9 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
         &model,
         "ddos",
         &tree_nodes,
-        0.5, // threshold
+        0.5,
         &norm_mins,
-        &norm_maxs,
+        &mlp_norm_maxs,
         &device,
     );
 
@@ -151,6 +190,37 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
     println!("[ddos] exported Rust weights to {}", rust_path.display());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cookie feature masking for CART trees
+// ---------------------------------------------------------------------------
+
+fn mask_cookie_feature(
+    samples: &[TrainingSample],
+    cookie_idx: usize,
+    cookie_weight: f32,
+) -> Vec<TrainingSample> {
+    if cookie_weight >= 1.0 - f32::EPSILON {
+        return samples.to_vec();
+    }
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut s2 = s.clone();
+            if cookie_weight < f32::EPSILON {
+                s2.features[cookie_idx] = 0.5;
+            } else {
+                let hash = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(42);
+                let r = (hash >> 33) as f32 / (u32::MAX >> 1) as f32;
+                if r > cookie_weight {
+                    s2.features[cookie_idx] = 0.5;
+                }
+            }
+            s2
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -168,21 +238,6 @@ fn compute_norm_params(samples: &[TrainingSample]) -> (Vec<f32>, Vec<f32>) {
         }
     }
     (mins, maxs)
-}
-
-fn normalize_features(features: &[f32], mins: &[f32], maxs: &[f32]) -> Vec<f32> {
-    features
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            let range = maxs[i] - mins[i];
-            if range > f32::EPSILON {
-                ((v - mins[i]) / range).clamp(0.0, 1.0)
-            } else {
-                0.0
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -272,8 +327,23 @@ fn eval_tree(
     (accuracy, defer_rate)
 }
 
+fn normalize_features(features: &[f32], mins: &[f32], maxs: &[f32]) -> Vec<f32> {
+    features
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let range = maxs[i] - mins[i];
+            if range > f32::EPSILON {
+                ((v - mins[i]) / range).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// MLP training
+// MLP training via SupervisedTraining
 // ---------------------------------------------------------------------------
 
 fn train_mlp(
@@ -286,117 +356,47 @@ fn train_mlp(
     learning_rate: f64,
     batch_size: usize,
     device: &<TrainBackend as Backend>::Device,
-) -> crate::training::mlp::MlpModel<NdArray<f32>> {
-    let mut model = config.init::<TrainBackend>(device);
-    let mut optim = AdamConfig::new().init();
+    artifact_dir: &Path,
+) -> crate::training::mlp::MlpModel<Wgpu<f32, i32>> {
+    let model = config.init::<TrainBackend>(device);
 
-    // Pre-normalize all training data.
-    let train_features: Vec<Vec<f32>> = train_set
-        .iter()
-        .map(|s| normalize_features(&s.features, mins, maxs))
-        .collect();
-    let train_labels: Vec<f32> = train_set.iter().map(|s| s.label).collect();
-    let train_weights: Vec<f32> = train_set.iter().map(|s| s.weight).collect();
+    let train_dataset = SampleDataset::new(train_set, mins, maxs);
+    let val_dataset = SampleDataset::new(val_set, mins, maxs);
 
-    let n = train_features.len();
+    let dataloader_train = DataLoaderBuilder::new(SampleBatcher::new())
+        .batch_size(batch_size)
+        .shuffle(42)
+        .num_workers(1)
+        .build(train_dataset);
 
-    for epoch in 0..epochs {
-        let mut epoch_loss = 0.0f32;
-        let mut batches = 0usize;
+    let dataloader_valid = DataLoaderBuilder::new(SampleBatcher::new())
+        .batch_size(batch_size)
+        .num_workers(1)
+        .build(val_dataset);
 
-        let mut offset = 0;
-        while offset < n {
-            let end = (offset + batch_size).min(n);
-            let batch_n = end - offset;
+    // Cosine annealing: initial_lr must be in (0.0, 1.0].
+    let lr = learning_rate.min(1.0);
+    let lr_scheduler = CosineAnnealingLrSchedulerConfig::new(lr, epochs)
+        .init()
+        .expect("valid cosine annealing config");
 
-            // Build input tensor [batch, features].
-            let flat: Vec<f32> = train_features[offset..end]
-                .iter()
-                .flat_map(|f| f.iter().copied())
-                .collect();
-            let x = Tensor::<TrainBackend, 1>::from_floats(flat.as_slice(), device)
-                .reshape([batch_n, NUM_FEATURES]);
+    let learner = Learner::new(
+        model,
+        AdamConfig::new().init(),
+        lr_scheduler,
+    );
 
-            // Labels [batch, 1].
-            let y = Tensor::<TrainBackend, 1>::from_floats(
-                &train_labels[offset..end],
-                device,
-            )
-            .reshape([batch_n, 1]);
+    let result = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
+        .metric_train_numeric(AccuracyMetric::new())
+        .metric_valid_numeric(AccuracyMetric::new())
+        .metric_train_numeric(LossMetric::new())
+        .metric_valid_numeric(LossMetric::new())
+        .with_file_checkpointer(CompactRecorder::new())
+        .num_epochs(epochs)
+        .summary()
+        .launch(learner);
 
-            // Sample weights [batch, 1].
-            let w = Tensor::<TrainBackend, 1>::from_floats(
-                &train_weights[offset..end],
-                device,
-            )
-            .reshape([batch_n, 1]);
-
-            // Forward pass.
-            let pred = model.forward(x);
-
-            // Binary cross-entropy with sample weights.
-            let eps = 1e-7;
-            let pred_clamped = pred.clone().clamp(eps, 1.0 - eps);
-            let bce = (y.clone() * pred_clamped.clone().log()
-                + (y.clone().neg().add_scalar(1.0))
-                    * pred_clamped.neg().add_scalar(1.0).log())
-            .neg();
-            let weighted_bce = bce * w;
-            let loss = weighted_bce.mean();
-
-            epoch_loss += loss.clone().into_scalar().elem::<f32>();
-            batches += 1;
-
-            // Backward + optimizer step.
-            let grads = loss.backward();
-            let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(learning_rate, model, grads);
-
-            offset = end;
-        }
-
-        if (epoch + 1) % 10 == 0 || epoch == 0 {
-            let avg_loss = epoch_loss / batches as f32;
-            let val_acc = eval_mlp_accuracy(&model, val_set, mins, maxs, device);
-            println!(
-                "[ddos]   epoch {:>4}/{}: loss={:.6}, val_acc={:.4}",
-                epoch + 1,
-                epochs,
-                avg_loss,
-                val_acc,
-            );
-        }
-    }
-
-    model.valid()
-}
-
-fn eval_mlp_accuracy(
-    model: &crate::training::mlp::MlpModel<TrainBackend>,
-    val_set: &[TrainingSample],
-    mins: &[f32],
-    maxs: &[f32],
-    device: &<TrainBackend as Backend>::Device,
-) -> f64 {
-    let flat: Vec<f32> = val_set
-        .iter()
-        .flat_map(|s| normalize_features(&s.features, mins, maxs))
-        .collect();
-    let x = Tensor::<TrainBackend, 1>::from_floats(flat.as_slice(), device)
-        .reshape([val_set.len(), NUM_FEATURES]);
-
-    let pred = model.forward(x);
-    let pred_data: Vec<f32> = pred.to_data().to_vec().expect("flat vec");
-
-    let mut correct = 0usize;
-    for (i, s) in val_set.iter().enumerate() {
-        let p = pred_data[i];
-        let predicted_label = if p >= 0.5 { 1.0 } else { 0.0 };
-        if (predicted_label - s.label).abs() < 0.1 {
-            correct += 1;
-        }
-    }
-    correct as f64 / val_set.len() as f64
+    result.model
 }
 
 // ---------------------------------------------------------------------------
@@ -404,13 +404,13 @@ fn eval_mlp_accuracy(
 // ---------------------------------------------------------------------------
 
 fn extract_weights(
-    model: &crate::training::mlp::MlpModel<NdArray<f32>>,
+    model: &crate::training::mlp::MlpModel<Wgpu<f32, i32>>,
     name: &str,
     tree_nodes: &[(u8, f32, u16, u16)],
     threshold: f32,
     norm_mins: &[f32],
     norm_maxs: &[f32],
-    _device: &<NdArray<f32> as Backend>::Device,
+    _device: &<Wgpu<f32, i32> as Backend>::Device,
 ) -> ExportedModel {
     let w1_tensor = model.linear1.weight.val();
     let b1_tensor = model.linear1.bias.as_ref().expect("linear1 has bias").val();
