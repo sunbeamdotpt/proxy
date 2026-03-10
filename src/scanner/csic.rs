@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fetch and convert the CSIC 2010 HTTP dataset into labeled training samples.
 //!
 //! The CSIC 2010 dataset contains raw HTTP/1.1 requests (normal + anomalous)
@@ -65,6 +68,7 @@ struct ParsedRequest {
     content_length: u64,
     referer: String,
     accept_language: String,
+    accept: String,
 }
 
 fn parse_csic_content(content: &str) -> Vec<ParsedRequest> {
@@ -158,6 +162,7 @@ fn parse_single_request(lines: &[&str]) -> Option<ParsedRequest> {
         content_length,
         referer: get_header("Referer").unwrap_or("-").to_string(),
         accept_language: get_header("Accept-Language").unwrap_or("-").to_string(),
+        accept: get_header("Accept").unwrap_or("-").to_string(),
     })
 }
 
@@ -219,11 +224,12 @@ fn to_audit_fields(
     // For anomalous samples, simulate real scanner behavior:
     // strip cookies/referer/accept-language that CSIC attacks have from their session.
     let (has_cookies, referer, accept_language, user_agent) = if label != "normal" {
-        let referer = None;
+        let referer = "-".to_string();
         let accept_language = if rng.next_f64() < 0.8 {
-            None
+            "-".to_string()
         } else {
-            Some(req.accept_language.clone()).filter(|a| a != "-")
+            let al = req.accept_language.clone();
+            if al == "-" { "-".to_string() } else { al }
         };
         let r = rng.next_f64();
         let user_agent = if r < 0.15 {
@@ -241,10 +247,24 @@ fn to_audit_fields(
     } else {
         (
             req.has_cookies,
-            Some(req.referer.clone()).filter(|r| r != "-"),
-            Some(req.accept_language.clone()).filter(|a| a != "-"),
+            if req.referer == "-" { "-".to_string() } else { req.referer.clone() },
+            if req.accept_language == "-" { "-".to_string() } else { req.accept_language.clone() },
             req.user_agent.clone(),
         )
+    };
+
+    // For normal traffic, preserve Accept header from CSIC request.
+    // For attacks, degrade it to simulate scanner behavior.
+    let accept = if label == "normal" {
+        if req.accept == "-" || req.accept.is_empty() {
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string()
+        } else {
+            req.accept.clone()
+        }
+    } else if rng.next_f64() < 0.6 {
+        "*/*".to_string()
+    } else {
+        req.accept.clone()
     };
 
     AuditFields {
@@ -263,9 +283,10 @@ fn to_audit_fields(
         duration_ms: rng.next_usize(50) as u64 + 1,
         content_length: req.content_length,
         user_agent,
-        has_cookies: Some(has_cookies),
+        has_cookies,
         referer,
         accept_language,
+        accept,
         backend: if label == "normal" {
             format!("{host_prefix}-svc:8080")
         } else {
@@ -274,6 +295,7 @@ fn to_audit_fields(
         label: Some(
             if label == "normal" { "normal" } else { "attack" }.to_string(),
         ),
+        ..AuditFields::default()
     }
 }
 
@@ -343,6 +365,7 @@ mod tests {
         assert_eq!(req.path, "/index.html");
         assert!(req.has_cookies);
         assert_eq!(req.user_agent, "Mozilla/5.0");
+        assert_eq!(req.accept, "text/html");
     }
 
     #[test]
@@ -374,11 +397,12 @@ mod tests {
             content_length: 100,
             referer: "https://example.com".to_string(),
             accept_language: "en-US".to_string(),
+            accept: "text/html".to_string(),
         };
         let mut rng = Rng::new(42);
         let fields = to_audit_fields(&req, "normal", DEFAULT_HOSTS, &mut rng);
         assert_eq!(fields.label.as_deref(), Some("normal"));
-        assert!(fields.has_cookies.unwrap_or(false));
+        assert!(fields.has_cookies);
         assert!(fields.host.ends_with(".sunbeam.pt"));
     }
 
@@ -393,11 +417,12 @@ mod tests {
             content_length: 0,
             referer: "https://example.com".to_string(),
             accept_language: "en-US".to_string(),
+            accept: "text/html".to_string(),
         };
         let mut rng = Rng::new(42);
         let fields = to_audit_fields(&req, "anomalous", DEFAULT_HOSTS, &mut rng);
         assert_eq!(fields.label.as_deref(), Some("attack"));
-        assert!(!fields.has_cookies.unwrap_or(true));
+        assert!(!fields.has_cookies);
     }
 
     #[test]

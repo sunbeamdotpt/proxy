@@ -1,6 +1,9 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::config::DDoSConfig;
 use crate::ddos::features::{method_to_u8, IpState, RequestEvent};
-use crate::ddos::model::{DDoSAction, TrainedModel};
+use crate::ddos::model::DDoSAction;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
@@ -10,12 +13,10 @@ use std::time::Instant;
 const NUM_SHARDS: usize = 256;
 
 pub struct DDoSDetector {
-    model: TrainedModel,
     shards: Vec<RwLock<FxHashMap<IpAddr, IpState>>>,
     window_secs: u64,
     window_capacity: usize,
     min_events: usize,
-    use_ensemble: bool,
 }
 
 fn shard_index(ip: &IpAddr) -> usize {
@@ -25,34 +26,15 @@ fn shard_index(ip: &IpAddr) -> usize {
 }
 
 impl DDoSDetector {
-    pub fn new(model: TrainedModel, config: &DDoSConfig) -> Self {
+    pub fn new(config: &DDoSConfig) -> Self {
         let shards = (0..NUM_SHARDS)
             .map(|_| RwLock::new(FxHashMap::default()))
             .collect();
         Self {
-            model,
             shards,
             window_secs: config.window_secs,
             window_capacity: config.window_capacity,
             min_events: config.min_events,
-            use_ensemble: false,
-        }
-    }
-
-    /// Create a detector that uses the ensemble (decision tree + MLP) path.
-    /// A dummy model is still needed for fallback, but ensemble inference
-    /// takes priority when `use_ensemble` is true.
-    pub fn new_ensemble(model: TrainedModel, config: &DDoSConfig) -> Self {
-        let shards = (0..NUM_SHARDS)
-            .map(|_| RwLock::new(FxHashMap::default()))
-            .collect();
-        Self {
-            model,
-            shards,
-            window_secs: config.window_secs,
-            window_capacity: config.window_capacity,
-            min_events: config.min_events,
-            use_ensemble: true,
         }
     }
 
@@ -99,24 +81,20 @@ impl DDoSDetector {
 
         let features = state.extract_features(self.window_secs);
 
-        if self.use_ensemble {
-            // Cast f64 features to f32 array for ensemble inference.
-            let mut f32_features = [0.0f32; 14];
-            for (i, &v) in features.iter().enumerate().take(14) {
-                f32_features[i] = v as f32;
-            }
-            let ev = crate::ensemble::ddos::ddos_ensemble_predict(&f32_features);
-            crate::metrics::DDOS_ENSEMBLE_PATH
-                .with_label_values(&[match ev.path {
-                    crate::ensemble::ddos::DDoSEnsemblePath::TreeBlock => "tree_block",
-                    crate::ensemble::ddos::DDoSEnsemblePath::TreeAllow => "tree_allow",
-                    crate::ensemble::ddos::DDoSEnsemblePath::Mlp => "mlp",
-                }])
-                .inc();
-            return ev.action;
+        // Cast f64 features to f32 array for ensemble inference.
+        let mut f32_features = [0.0f32; 14];
+        for (i, &v) in features.iter().enumerate().take(14) {
+            f32_features[i] = v as f32;
         }
-
-        self.model.classify(&features)
+        let ev = crate::ensemble::ddos::ddos_ensemble_predict(&f32_features);
+        crate::metrics::DDOS_ENSEMBLE_PATH
+            .with_label_values(&[match ev.path {
+                crate::ensemble::ddos::DDoSEnsemblePath::TreeBlock => "tree_block",
+                crate::ensemble::ddos::DDoSEnsemblePath::TreeAllow => "tree_allow",
+                crate::ensemble::ddos::DDoSEnsemblePath::Mlp => "mlp",
+            }])
+            .inc();
+        ev.action
     }
 
     /// Feed response data back into the IP's event history.
@@ -124,10 +102,6 @@ impl DDoSDetector {
     pub fn record_response(&self, _ip: IpAddr, _status: u16, _duration_ms: u32) {
         // Status/duration from check() are 0-initialized; the next request
         // will have fresh data. This is intentionally a no-op for now.
-    }
-
-    pub fn point_count(&self) -> usize {
-        self.model.point_count()
     }
 }
 

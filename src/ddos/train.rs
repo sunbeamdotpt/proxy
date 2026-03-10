@@ -1,12 +1,31 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::ddos::audit_log::AuditLog;
 use crate::ddos::audit_log;
 use crate::ddos::features::{method_to_u8, FeatureVector, LogIpState, NormParams, NUM_FEATURES};
-use crate::ddos::model::{SerializedModel, TrafficLabel};
 use anyhow::{bail, Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::io::BufRead;
+
+/// Legacy KNN training types — kept for the `train-ddos` CLI command
+/// which produces bincode model files for offline evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrafficLabel {
+    Normal,
+    Attack,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SerializedModel {
+    pub points: Vec<FeatureVector>,
+    pub labels: Vec<TrafficLabel>,
+    pub norm_params: NormParams,
+    pub k: usize,
+    pub threshold: f64,
+}
 
 #[derive(Deserialize)]
 pub struct HeuristicThresholds {
@@ -255,12 +274,12 @@ pub fn parse_logs(input: &str) -> Result<FxHashMap<String, LogIpState>> {
         state.statuses.push(entry.fields.status);
         state.durations.push(entry.fields.duration_ms.min(u32::MAX as u64) as u32);
         state.content_lengths.push(entry.fields.content_length.min(u32::MAX as u64) as u32);
-        state.has_cookies.push(entry.fields.has_cookies.unwrap_or(false));
+        state.has_cookies.push(entry.fields.has_cookies);
         state.has_referer.push(
-            entry.fields.referer.as_deref().map(|r| r != "-").unwrap_or(false),
+            !entry.fields.referer.is_empty() && entry.fields.referer != "-",
         );
         state.has_accept_language.push(
-            entry.fields.accept_language.as_deref().map(|a| a != "-").unwrap_or(false),
+            !entry.fields.accept_language.is_empty() && entry.fields.accept_language != "-",
         );
         state.suspicious_paths.push(
             crate::ddos::features::is_suspicious_path(&entry.fields.path),

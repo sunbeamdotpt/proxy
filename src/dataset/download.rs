@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! Download and cache upstream datasets for training.
 //!
 //! Cached under `~/.cache/sunbeam/<dataset>/`.  Files are only downloaded
@@ -19,8 +22,17 @@ fn cache_base() -> PathBuf {
 
 // --- CIC-IDS2017 ---
 
-/// Only the Friday DDoS file — contains DDoS Hulk, Slowloris, slowhttptest, GoldenEye.
-const CICIDS_FILE: &str = "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv";
+/// All CIC-IDS2017 CSV files — covers every attack day and normal baselines.
+const CICIDS_FILES: &[&str] = &[
+    "Monday-WorkingHours.pcap_ISCX.csv",
+    "Tuesday-WorkingHours.pcap_ISCX.csv",
+    "Wednesday-workingHours.pcap_ISCX.csv",
+    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+    "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv",
+    "Friday-WorkingHours-Morning.pcap_ISCX.csv",
+    "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+    "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+];
 
 /// Hugging Face mirror (public, no auth required).
 const CICIDS_BASE_URL: &str =
@@ -30,49 +42,56 @@ fn cicids_cache_dir() -> PathBuf {
     cache_base().join("cicids")
 }
 
-/// Return the path to the cached CIC-IDS2017 DDoS CSV, or `None` if not downloaded.
+/// Return the cache directory if ALL CIC-IDS2017 CSVs are downloaded, else `None`.
 pub fn cicids_cached_path() -> Option<PathBuf> {
-    let path = cicids_cache_dir().join(CICIDS_FILE);
-    if path.exists() {
-        Some(path)
+    let dir = cicids_cache_dir();
+    if CICIDS_FILES.iter().all(|f| dir.join(f).exists()) {
+        Some(dir)
     } else {
         None
     }
 }
 
-/// Download the CIC-IDS2017 Friday DDoS CSV to cache.  Returns the cached path.
+/// Download all CIC-IDS2017 CSV files to cache. Returns the cache directory.
 pub fn download_cicids() -> Result<PathBuf> {
     let dir = cicids_cache_dir();
-    let path = dir.join(CICIDS_FILE);
-
-    if path.exists() {
-        eprintln!("  cached: {}", path.display());
-        return Ok(path);
-    }
-
-    let url = format!("{CICIDS_BASE_URL}/{CICIDS_FILE}");
-    eprintln!("  downloading: {url}");
-    eprintln!("  (this is ~170 MB, may take a minute)");
-
     std::fs::create_dir_all(&dir)?;
 
-    // Stream to file to avoid holding 170MB in memory.
-    let resp = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
-        .build()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("fetching {url}"))?
-        .error_for_status()
-        .with_context(|| format!("HTTP error for {url}"))?;
+        .build()?;
 
-    let mut file = std::fs::File::create(&path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    let bytes = resp.bytes().with_context(|| "reading response body")?;
-    std::io::Write::write_all(&mut file, &bytes)?;
+    for (i, filename) in CICIDS_FILES.iter().enumerate() {
+        let path = dir.join(filename);
+        if path.exists() {
+            eprintln!("  [{}/{}] cached: {}", i + 1, CICIDS_FILES.len(), filename);
+            continue;
+        }
 
-    eprintln!("  saved: {}", path.display());
-    Ok(path)
+        let url = format!("{CICIDS_BASE_URL}/{filename}");
+        eprintln!(
+            "  [{}/{}] downloading: {}",
+            i + 1,
+            CICIDS_FILES.len(),
+            filename
+        );
+
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("fetching {url}"))?
+            .error_for_status()
+            .with_context(|| format!("HTTP error for {url}"))?;
+
+        let mut file = std::fs::File::create(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        let bytes = resp.bytes().with_context(|| "reading response body")?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+
+        eprintln!("    saved: {}", path.display());
+    }
+
+    Ok(dir)
 }
 
 // --- CSIC 2010 ---
@@ -80,7 +99,10 @@ pub fn download_cicids() -> Result<PathBuf> {
 /// Download CSIC 2010 dataset files to cache (delegates to scanner::csic).
 pub fn download_csic() -> Result<()> {
     if crate::scanner::csic::csic_is_cached() {
-        eprintln!("  cached: {}", crate::scanner::csic::csic_cache_path().display());
+        eprintln!(
+            "  cached: {}",
+            crate::scanner::csic::csic_cache_path().display()
+        );
         return Ok(());
     }
     // fetch_csic_dataset downloads, caches, and parses — we only need the download side-effect.
@@ -96,9 +118,9 @@ pub fn download_all() -> Result<()> {
     download_csic()?;
     eprintln!();
 
-    eprintln!("[2/2] CIC-IDS2017 DDoS timing profiles");
+    eprintln!("[2/2] CIC-IDS2017 (all attack days + normal baselines)");
     let path = download_cicids()?;
-    eprintln!("  ok: {}\n", path.display());
+    eprintln!("  ok: {} ({} files)\n", path.display(), CICIDS_FILES.len());
 
     eprintln!("all datasets cached.");
     Ok(())
@@ -115,5 +137,11 @@ mod tests {
 
         let cicids = cicids_cache_dir();
         assert!(cicids.to_str().unwrap().contains("cicids"));
+    }
+
+    #[test]
+    fn test_all_files_listed() {
+        assert_eq!(CICIDS_FILES.len(), 8);
+        assert!(CICIDS_FILES.iter().all(|f| f.ends_with(".csv")));
     }
 }

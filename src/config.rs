@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -18,7 +21,7 @@ pub struct Config {
     pub routes: Vec<RouteConfig>,
     /// Optional SSH TCP passthrough (port 22 → Gitea SSH).
     pub ssh: Option<SshConfig>,
-    /// Optional KNN-based DDoS detection.
+    /// Optional DDoS detection (ensemble: decision tree + MLP).
     pub ddos: Option<DDoSConfig>,
     /// Optional per-identity rate limiting.
     pub rate_limit: Option<RateLimitConfig>,
@@ -60,10 +63,6 @@ fn default_config_configmap() -> String { "pingora-config".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DDoSConfig {
-    #[serde(default)]
-    pub model_path: Option<String>,
-    #[serde(default = "default_k")]
-    pub k: usize,
     #[serde(default = "default_threshold")]
     pub threshold: f64,
     #[serde(default = "default_window_secs")]
@@ -74,8 +73,10 @@ pub struct DDoSConfig {
     pub min_events: usize,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_use_ensemble")]
-    pub use_ensemble: bool,
+    /// When true, run the model and log decisions but never block traffic.
+    /// Useful for gathering data on model accuracy before enforcing.
+    #[serde(default)]
+    pub observe_only: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -100,23 +101,20 @@ pub struct BucketConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScannerConfig {
-    #[serde(default)]
-    pub model_path: Option<String>,
     #[serde(default = "default_scanner_threshold")]
     pub threshold: f64,
     #[serde(default = "default_scanner_enabled")]
     pub enabled: bool,
-    /// How often (seconds) to check the model file for changes. 0 = no hot-reload.
-    #[serde(default = "default_scanner_poll_interval")]
-    pub poll_interval_secs: u64,
     /// Bot allowlist rules. Verified bots bypass the scanner model.
     #[serde(default)]
     pub allowlist: Vec<BotAllowlistRule>,
     /// TTL (seconds) for verified bot IP cache entries.
     #[serde(default = "default_bot_cache_ttl")]
     pub bot_cache_ttl_secs: u64,
-    #[serde(default = "default_use_ensemble")]
-    pub use_ensemble: bool,
+    /// When true, run the model and log decisions but never block traffic.
+    /// Useful for gathering data on model accuracy before enforcing.
+    #[serde(default)]
+    pub observe_only: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -136,17 +134,14 @@ pub struct BotAllowlistRule {
 }
 
 fn default_bot_cache_ttl() -> u64 { 86400 } // 24h
-fn default_use_ensemble() -> bool { true }
 
 fn default_scanner_threshold() -> f64 { 0.5 }
 fn default_scanner_enabled() -> bool { true }
-fn default_scanner_poll_interval() -> u64 { 30 }
 
 fn default_rl_enabled() -> bool { true }
 fn default_eviction_interval() -> u64 { 300 }
 fn default_stale_after() -> u64 { 600 }
 
-fn default_k() -> usize { 5 }
 fn default_threshold() -> f64 { 0.6 }
 fn default_window_secs() -> u64 { 60 }
 fn default_window_capacity() -> usize { 1000 }

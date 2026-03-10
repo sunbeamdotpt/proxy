@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::acme::AcmeRoutes;
 use crate::cluster::ClusterHandle;
 use crate::config::RouteConfig;
@@ -32,9 +35,9 @@ pub struct SunbeamProxy {
     pub routes: Vec<RouteConfig>,
     /// Per-challenge route table populated by the Ingress watcher.
     pub acme_routes: AcmeRoutes,
-    /// Optional KNN-based DDoS detector.
+    /// Optional DDoS detector (ensemble: decision tree + MLP).
     pub ddos_detector: Option<Arc<DDoSDetector>>,
-    /// Optional per-request scanner detector (hot-reloadable via ArcSwap).
+    /// Optional per-request scanner detector (ensemble: decision tree + MLP).
     pub scanner_detector: Option<Arc<ArcSwap<ScannerDetector>>>,
     /// Optional verified-bot allowlist (bypasses scanner for known crawlers/agents).
     pub bot_allowlist: Option<Arc<BotAllowlist>>,
@@ -48,6 +51,10 @@ pub struct SunbeamProxy {
     pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
     /// Optional cluster handle for multi-node bandwidth tracking.
     pub cluster: Option<Arc<ClusterHandle>>,
+    /// When true, DDoS detector logs decisions but never blocks traffic.
+    pub ddos_observe_only: bool,
+    /// When true, scanner detector logs decisions but never blocks traffic.
+    pub scanner_observe_only: bool,
 }
 
 pub struct RequestCtx {
@@ -341,7 +348,7 @@ impl ProxyHttp for SunbeamProxy {
 
                 metrics::DDOS_DECISIONS.with_label_values(&[decision]).inc();
 
-                if matches!(ddos_action, DDoSAction::Block) {
+                if matches!(ddos_action, DDoSAction::Block) && !self.ddos_observe_only {
                     let mut resp = ResponseHeader::build(429, None)?;
                     resp.insert_header("Retry-After", "60")?;
                     resp.insert_header("Content-Length", "0")?;
@@ -426,7 +433,7 @@ impl ProxyHttp for SunbeamProxy {
                 .with_label_values(&[decision, reason])
                 .inc();
 
-            if decision == "block" {
+            if decision == "block" && !self.scanner_observe_only {
                 let mut resp = ResponseHeader::build(403, None)?;
                 resp.insert_header("Content-Length", "0")?;
                 session.write_response_header(Box::new(resp), true).await?;
@@ -1150,6 +1157,21 @@ impl ProxyHttp for SunbeamProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
         let query = session.req_header().uri.query().unwrap_or("");
+        let response_bytes = session.body_bytes_sent();
+        let http_version = format!("{:?}", session.req_header().version);
+        let header_count = session.req_header().headers.len() as u16;
+        let accept_encoding = session
+            .req_header()
+            .headers
+            .get("accept-encoding")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let connection = session
+            .req_header()
+            .headers
+            .get("connection")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
 
         tracing::info!(
             target = "audit",
@@ -1162,14 +1184,19 @@ impl ProxyHttp for SunbeamProxy {
             status,
             duration_ms,
             content_length,
+            response_bytes,
             user_agent,
             referer,
             accept_language,
             accept,
+            accept_encoding,
             has_cookies,
             cf_country,
             backend,
             error   = error_str,
+            http_version,
+            header_count,
+            connection,
             "request"
         );
 

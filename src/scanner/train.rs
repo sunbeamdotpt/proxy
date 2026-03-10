@@ -1,9 +1,30 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::ddos::audit_log::{AuditLog, AuditFields};
 use crate::scanner::features::{
     self, fx_hash_bytes, ScannerFeatureVector, ScannerNormParams, NUM_SCANNER_FEATURES,
     NUM_SCANNER_WEIGHTS,
 };
-use crate::scanner::model::ScannerModel;
+use serde::{Deserialize, Serialize};
+
+/// Legacy linear scanner model — kept for the `train-scanner` CLI command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannerModel {
+    pub weights: [f64; NUM_SCANNER_WEIGHTS],
+    pub threshold: f64,
+    pub norm_params: ScannerNormParams,
+    pub fragments: Vec<String>,
+}
+
+impl ScannerModel {
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let data = bincode::serialize(self).context("serializing scanner model")?;
+        std::fs::write(path, data)
+            .with_context(|| format!("writing scanner model to {}", path.display()))?;
+        Ok(())
+    }
+}
 use anyhow::{Context, Result};
 use rustc_hash::FxHashSet;
 use std::io::BufRead;
@@ -88,17 +109,9 @@ pub fn train_and_evaluate(
     }
 
     for (fields, host_prefix) in &parsed_entries {
-        let has_cookies = fields.has_cookies.unwrap_or(false);
-        let has_referer = fields
-            .referer
-            .as_ref()
-            .map(|r| r != "-" && !r.is_empty())
-            .unwrap_or(false);
-        let has_accept_language = fields
-            .accept_language
-            .as_ref()
-            .map(|a| a != "-" && !a.is_empty())
-            .unwrap_or(false);
+        let has_cookies = fields.has_cookies;
+        let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -149,17 +162,9 @@ pub fn train_and_evaluate(
             log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
         }
         for (fields, host_prefix) in &csic_entries {
-            let has_cookies = fields.has_cookies.unwrap_or(false);
-            let has_referer = fields
-                .referer
-                .as_ref()
-                .map(|r| r != "-" && !r.is_empty())
-                .unwrap_or(false);
-            let has_accept_language = fields
-                .accept_language
-                .as_ref()
-                .map(|a| a != "-" && !a.is_empty())
-                .unwrap_or(false);
+            let has_cookies = fields.has_cookies;
+            let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+            let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
             let feats = features::extract_features(
                 &fields.method,
@@ -288,17 +293,9 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     }
 
     for (fields, host_prefix) in &parsed_entries {
-        let has_cookies = fields.has_cookies.unwrap_or(false);
-        let has_referer = fields
-            .referer
-            .as_ref()
-            .map(|r| r != "-" && !r.is_empty())
-            .unwrap_or(false);
-        let has_accept_language = fields
-            .accept_language
-            .as_ref()
-            .map(|a| a != "-" && !a.is_empty())
-            .unwrap_or(false);
+        let has_cookies = fields.has_cookies;
+        let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -352,17 +349,9 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
             log_hosts.insert(fx_hash_bytes(host_prefix.as_bytes()));
         }
         for (fields, host_prefix) in &csic_entries {
-            let has_cookies = fields.has_cookies.unwrap_or(false);
-            let has_referer = fields
-                .referer
-                .as_ref()
-                .map(|r| r != "-" && !r.is_empty())
-                .unwrap_or(false);
-            let has_accept_language = fields
-                .accept_language
-                .as_ref()
-                .map(|a| a != "-" && !a.is_empty())
-                .unwrap_or(false);
+            let has_cookies = fields.has_cookies;
+            let has_referer = !fields.referer.is_empty() && fields.referer != "-";
+            let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
 
             let feats = features::extract_features(
                 &fields.method,
