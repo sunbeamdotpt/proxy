@@ -173,9 +173,7 @@ fn path_has_traversal(path: &str) -> f64 {
     0.0
 }
 
-/// Num scanner features f32.
 pub const NUM_SCANNER_FEATURES_F32: usize = NUM_SCANNER_FEATURES;
-/// Scannerfeaturevectorf32.
 pub type ScannerFeatureVectorF32 = [f32; NUM_SCANNER_FEATURES];
 
 /// Same as `extract_features` but returns f32 for ensemble inference.
@@ -199,7 +197,6 @@ pub fn extract_features_f32(
     out
 }
 
-/// Fx hash bytes.
 pub fn fx_hash_bytes(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();

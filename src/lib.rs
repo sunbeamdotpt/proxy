@@ -10,11 +10,14 @@
 #![recursion_limit = "256"]
 /// Acme.
 pub mod acme;
+pub mod autotune;
 pub mod cache;
 pub mod cluster;
 pub mod config;
+pub mod dataset;
 pub mod ddos;
 pub mod dual_stack;
+pub mod ensemble;
 pub mod metrics;
 pub mod proxy;
 pub mod rate_limit;
@@ -22,8 +25,5 @@ pub mod scanner;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
-/// Tls passthrough.
-pub mod tls_passthrough;
 #[cfg(feature = "training")]
-/// Training.
 pub mod training;
