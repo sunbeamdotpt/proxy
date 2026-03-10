@@ -25,25 +25,46 @@ sunbeam-proxy is a TLS-terminating reverse proxy built on [Pingora](https://gith
 
 - **Host-prefix routing**: routes `foo.example.com` by matching prefix `foo` against the config
 - **Path sub-routes**: longest-prefix match within a host, with optional prefix stripping
+- **Static file serving**: try_files chain with SPA fallback, replacing nginx/caddy for frontends
+- **URL rewrites**: regex-based path rewrites compiled at startup
+- **Response body rewriting**: find/replace in HTML/JS responses (like nginx `sub_filter`)
+- **Auth subrequests**: gate path routes with HTTP auth checks (like nginx `auth_request`)
+- **HTTP response cache**: per-route in-memory cache via pingora-cache with Cache-Control support
+- **Prometheus metrics**: request totals, latency histograms, detection decisions, cache hit/miss
+- **Request IDs**: UUID v4 per request, forwarded to upstreams and clients via `X-Request-Id`
+- **DDoS detection**: KNN-based per-IP behavioral classification
+- **Scanner detection**: logistic regression per-request classification with bot allowlist
+- **Rate limiting**: leaky bucket per-identity throttling
 - **ACME HTTP-01 challenges**: routes `/.well-known/acme-challenge/*` to cert-manager solver pods
 - **TLS cert hot-reload**: watches K8s Secrets, writes cert files, triggers zero-downtime upgrade
 - **Config hot-reload**: watches K8s ConfigMaps, triggers graceful upgrade on change
 - **SSH TCP passthrough**: raw TCP proxy for SSH traffic (port 22 to Gitea)
 - **HTTP-to-HTTPS redirect**: with per-route opt-out via `disable_secure_redirection`
 
+See [docs/README.md](docs/README.md) for full feature documentation and configuration reference.
+
 ## Source Files
 
 ```
-src/main.rs      — binary entry point: server bootstrap, watcher spawn, SSH spawn
-src/lib.rs       — library crate root: re-exports acme, config, proxy, ssh
-src/config.rs    — TOML config deserialization (Config, RouteConfig, PathRoute)
-src/proxy.rs     — ProxyHttp impl: request_filter, upstream_peer, upstream_request_filter, logging
-src/acme.rs      — Ingress watcher: maintains AcmeRoutes (path → solver backend)
-src/watcher.rs   — Secret/ConfigMap watcher: cert write + graceful upgrade trigger
-src/cert.rs      — fetch_and_write / write_from_secret: K8s Secret → cert files on disk
-src/telemetry.rs — JSON logging + optional OTEL tracing init
-src/ssh.rs       — TCP proxy: tokio TcpListener + copy_bidirectional
-tests/e2e.rs     — end-to-end test: real SunbeamProxy over plain HTTP with echo backend
+src/main.rs          — binary entry point: server bootstrap, watcher spawn, SSH spawn
+src/lib.rs           — library crate root: re-exports all modules
+src/config.rs        — TOML config deserialization (Config, RouteConfig, PathRoute, CacheConfig, etc.)
+src/proxy.rs         — ProxyHttp impl: request_filter, cache hooks, upstream_peer, body rewriting, logging
+src/acme.rs          — Ingress watcher: maintains AcmeRoutes (path → solver backend)
+src/watcher.rs       — Secret/ConfigMap watcher: cert write + graceful upgrade trigger
+src/cert.rs          — fetch_and_write / write_from_secret: K8s Secret → cert files on disk
+src/telemetry.rs     — JSON logging + optional OTEL tracing init
+src/ssh.rs           — TCP proxy: tokio TcpListener + copy_bidirectional
+src/metrics.rs       — Prometheus counters/histograms/gauge, metrics HTTP server, /health endpoint
+src/static_files.rs  — Static file serving with try_files chain and SPA fallback
+src/cache.rs         — pingora-cache MemCache backend and Cache-Control TTL parser
+src/ddos/            — KNN-based DDoS detection (model, detector, training, replay)
+src/scanner/         — Logistic regression scanner detection (model, detector, features, training, allowlist, watcher)
+src/rate_limit/      — Leaky bucket rate limiter (limiter, key extraction)
+src/dual_stack.rs    — Dual-stack (IPv4+IPv6) TCP listener
+tests/e2e.rs         — end-to-end test: real SunbeamProxy over plain HTTP with echo backend
+tests/proptest.rs    — property-based tests for static files, rewrites, config, metrics, etc.
+docs/README.md       — comprehensive feature documentation
 ```
 
 ## Architecture Invariants — Do Not Break These
