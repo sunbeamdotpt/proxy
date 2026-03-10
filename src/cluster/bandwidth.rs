@@ -1,6 +1,3 @@
-// Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
-
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,17 +53,11 @@ impl BandwidthTracker {
 }
 
 #[derive(Debug, Clone)]
-/// Bandwidthsnapshot.
 pub struct BandwidthSnapshot {
-    /// Bytes in.
     pub bytes_in: u64,
-    /// Bytes out.
     pub bytes_out: u64,
-    /// Request count.
     pub request_count: u64,
-    /// Cumulative in.
     pub cumulative_in: u64,
-    /// Cumulative out.
     pub cumulative_out: u64,
 }
 
@@ -252,9 +243,7 @@ pub struct BandwidthLimiter {
 /// Result of a bandwidth limit check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BandwidthLimitResult {
-    /// Allow.
     Allow,
-    /// Reject.
     Reject,
 }
 
