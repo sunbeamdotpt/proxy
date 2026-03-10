@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};

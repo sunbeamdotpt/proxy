@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 //! CART decision tree trainer (pure Rust, no burn dependency).
 //!
 //! Trains a binary classification tree using Gini impurity and outputs

@@ -1,3 +1,6 @@
+// Copyright Sunbeam Studios 2026
+// SPDX-License-Identifier: Apache-2.0
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sunbeam_proxy::ensemble::ddos::ddos_ensemble_predict;
 use sunbeam_proxy::ensemble::gen::ddos_weights;
