@@ -1,13 +1,30 @@
 use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
+
+use crate::dual_stack::DualStackTcpListener;
 
 /// Listens on `listen` and proxies every TCP connection to `backend`.
 /// Runs forever; intended to be spawned on a dedicated OS thread + Tokio runtime,
 /// matching the pattern used for the cert/ingress watcher.
 pub async fn run_tcp_proxy(listen: &str, backend: &str) {
-    let listener = match TcpListener::bind(listen).await {
+    // Parse the listen address to determine if it's IPv6 or IPv4
+    let ipv6_addr = if listen.starts_with('[') {
+        listen.to_string()
+    } else {
+        format!("[::]:{}", listen.split(':').last().unwrap_or("22"))
+    };
+    
+    let ipv4_addr = if listen.contains(':') {
+        // Extract port from the original address
+        let port = listen.split(':').last().unwrap_or("22");
+        format!("0.0.0.0:{}", port)
+    } else {
+        "0.0.0.0:22".to_string()
+    };
+
+    let listener = match DualStackTcpListener::bind(&ipv6_addr, &ipv4_addr).await {
         Ok(l) => {
-            tracing::info!(%listen, %backend, "SSH TCP proxy listening");
+            tracing::info!(%listen, %backend, "SSH TCP proxy listening (dual-stack)");
             l
         }
         Err(e) => {

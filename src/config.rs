@@ -4,7 +4,7 @@ use std::fs;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SshConfig {
-    /// Address to bind the SSH listener on, e.g. "0.0.0.0:22".
+    /// Address to bind the SSH listener on, e.g. "0.0.0.0:22" or "[::]:22".
     pub listen: String,
     /// Upstream backend address, e.g. "gitea-ssh.devtools.svc.cluster.local:2222".
     pub backend: String,
@@ -22,7 +22,9 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ListenConfig {
+    /// HTTP listener address, e.g., "0.0.0.0:80" or "[::]:80".
     pub http: String,
+    /// HTTPS listener address, e.g., "0.0.0.0:443" or "[::]:443".
     pub https: String,
 }
 
