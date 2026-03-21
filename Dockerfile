@@ -33,7 +33,7 @@ RUN mkdir -p src benches && \
 
 COPY src/ ./src/
 COPY benches/ ./benches/
-RUN touch src/main.rs && \
+RUN touch src/main.rs src/lib.rs && \
     cargo build --release --target "$(cat /rust-target)" && \
     cp "target/$(cat /rust-target)/release/sunbeam-proxy" /sunbeam-proxy
 
