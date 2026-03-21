@@ -26,6 +26,7 @@ COPY . .
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src benches && \
     echo 'fn main() {}' > src/main.rs && \
+    echo '' > src/lib.rs && \
     echo 'fn main() {}' > benches/scanner_bench.rs && \
     echo 'fn main() {}' > benches/ddos_bench.rs && \
     cargo build --release --target "$(cat /rust-target)" ; \
