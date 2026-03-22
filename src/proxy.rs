@@ -1227,32 +1227,34 @@ impl ProxyHttp for SunbeamProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
 
-        tracing::info!(
-            target = "audit",
-            request_id = %ctx.request_id,
-            method  = %session.req_header().method,
-            host    = %host,
-            path    = %session.req_header().uri.path(),
-            query,
-            client_ip,
-            status,
-            duration_ms,
-            content_length,
-            response_bytes,
-            user_agent,
-            referer,
-            accept_language,
-            accept,
-            accept_encoding,
-            has_cookies,
-            cf_country,
-            backend,
-            error   = error_str,
-            http_version,
-            header_count,
-            connection,
-            "request"
-        );
+        ctx.span.in_scope(|| {
+            tracing::info!(
+                target = "audit",
+                request_id = %ctx.request_id,
+                method  = %session.req_header().method,
+                host    = %host,
+                path    = %session.req_header().uri.path(),
+                query,
+                client_ip,
+                status,
+                duration_ms,
+                content_length,
+                response_bytes,
+                user_agent,
+                referer,
+                accept_language,
+                accept,
+                accept_encoding,
+                has_cookies,
+                cf_country,
+                backend,
+                error   = error_str,
+                http_version,
+                header_count,
+                connection,
+                "request"
+            );
+        });
 
         if let Some(detector) = &self.ddos_detector {
             if let Some(ip) = extract_client_ip(session) {
