@@ -194,6 +194,9 @@ pub struct PathRoute {
     /// Prefix to prepend to the upstream path after stripping.
     #[serde(default)]
     pub upstream_path_prefix: Option<String>,
+    /// Upstream read/write timeout in seconds (default: inherits from parent route, then 60).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// A URL rewrite rule: requests matching `pattern` are served the file at `target`.
@@ -276,6 +279,9 @@ pub struct RouteConfig {
     /// HTTP response cache configuration for this route.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    /// Upstream read/write timeout in seconds (default: 60).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

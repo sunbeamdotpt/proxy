@@ -20,9 +20,28 @@ pub fn init(otlp_endpoint: &str) {
             .with(fmt_layer)
             .init();
     } else {
-        // Build the OTLP exporter gracefully — if it fails (bad URL, missing
-        // deps, etc.) log a warning and fall back to JSON-only logging so the
-        // proxy keeps serving traffic instead of panicking.
+        // The OpenTelemetry SDK requires a Tokio runtime even for
+        // "simple" exporters (internal hyper HTTP client).  Pingora's
+        // main() has no runtime yet at this point, so we spin up a
+        // temporary one just for the exporter build + provider init,
+        // then leak it so the background export task keeps running.
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(err) => {
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .init();
+                eprintln!("WARNING: failed to create Tokio runtime for OTLP, tracing disabled: {err}");
+                return;
+            }
+        };
+
+        let _guard = rt.enter();
+
         match opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_endpoint(otlp_endpoint)
@@ -30,7 +49,7 @@ pub fn init(otlp_endpoint: &str) {
         {
             Ok(exporter) => {
                 let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-                    .with_simple_exporter(exporter)
+                    .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                     .build();
 
                 opentelemetry::global::set_tracer_provider(provider.clone());
@@ -42,9 +61,12 @@ pub fn init(otlp_endpoint: &str) {
                     .with(fmt_layer)
                     .with(otel_layer)
                     .init();
+
+                // Leak the runtime so the batch exporter's background
+                // task continues running for the lifetime of the process.
+                std::mem::forget(rt);
             }
             Err(err) => {
-                // Fall back to fmt-only so the proxy still starts.
                 tracing_subscriber::registry()
                     .with(env_filter)
                     .with(fmt_layer)

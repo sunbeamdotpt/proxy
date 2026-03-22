@@ -23,7 +23,17 @@ use pingora_proxy::{ProxyHttp, Session};
 use regex::Regex;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Build an HttpPeer with configurable timeouts.
+fn make_peer(addr: &str, timeout_secs: Option<u64>) -> Box<HttpPeer> {
+    let mut peer = HttpPeer::new(backend_addr(addr), false, String::new());
+    let t = timeout_secs.unwrap_or(60);
+    peer.options.connection_timeout = Some(Duration::from_secs(10));
+    peer.options.read_timeout = Some(Duration::from_secs(t));
+    peer.options.write_timeout = Some(Duration::from_secs(t));
+    Box::new(peer)
+}
 
 /// A compiled rewrite rule (regex compiled once at startup).
 pub struct CompiledRewrite {
@@ -812,11 +822,8 @@ impl ProxyHttp for SunbeamProxy {
     ) -> Result<Box<HttpPeer>> {
         // ACME challenge: backend was resolved in request_filter.
         if let Some(backend) = &ctx.acme_backend {
-            return Ok(Box::new(HttpPeer::new(
-                backend_addr(backend),
-                false,
-                String::new(),
-            )));
+            tracing::debug!(backend, "upstream_peer: ACME challenge route");
+            return Ok(make_peer(backend, None));
         }
 
         let host = extract_host(session);
@@ -841,6 +848,7 @@ impl ProxyHttp for SunbeamProxy {
             if ctx.upstream_path_prefix.is_none() {
                 ctx.upstream_path_prefix = pr.upstream_path_prefix.clone();
             }
+            let timeout = pr.timeout_secs.or(route.timeout_secs);
             ctx.route = Some(crate::config::RouteConfig {
                 host_prefix: route.host_prefix.clone(),
                 backend: pr.backend.clone(),
@@ -853,20 +861,15 @@ impl ProxyHttp for SunbeamProxy {
                 body_rewrites: vec![],
                 response_headers: vec![],
                 cache: None,
+                timeout_secs: timeout,
             });
-            return Ok(Box::new(HttpPeer::new(
-                backend_addr(&pr.backend),
-                false,
-                String::new(),
-            )));
+            tracing::debug!(backend = %pr.backend, ?timeout, "upstream_peer: path sub-route");
+            return Ok(make_peer(&pr.backend, timeout));
         }
 
+        tracing::debug!(backend = %route.backend, timeout = ?route.timeout_secs, "upstream_peer: host route");
         ctx.route = Some(route.clone());
-        Ok(Box::new(HttpPeer::new(
-            backend_addr(&route.backend),
-            false,
-            String::new(),
-        )))
+        Ok(make_peer(&route.backend, route.timeout_secs))
     }
 
     /// Copy WebSocket upgrade headers, apply path prefix stripping, and forward
@@ -1335,6 +1338,7 @@ mod tests {
             body_rewrites: vec![],
             response_headers: vec![],
             cache: None,
+                timeout_secs: None,
         }];
         let compiled = SunbeamProxy::compile_rewrites(&routes);
         assert_eq!(compiled.len(), 1);
