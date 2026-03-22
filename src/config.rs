@@ -244,10 +244,6 @@ pub struct PathRoute {
     /// Upstream read/write timeout in seconds (default: inherits from parent route, then 60).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// When true, return 403 Forbidden for any request matching this path prefix.
-    /// Takes precedence over auth_request and backend forwarding.
-    #[serde(default)]
-    pub deny: bool,
 }
 
 /// A URL rewrite rule: requests matching `pattern` are served the file at `target`.
