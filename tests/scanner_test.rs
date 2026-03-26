@@ -24,6 +24,7 @@ fn test_routes() -> Vec<RouteConfig> {
             body_rewrites: vec![],
             response_headers: vec![],
             cache: None,
+            timeout_secs: None,
         },
         RouteConfig {
             host_prefix: "api".into(),
@@ -37,6 +38,7 @@ fn test_routes() -> Vec<RouteConfig> {
             body_rewrites: vec![],
             response_headers: vec![],
             cache: None,
+            timeout_secs: None,
         },
     ]
 }

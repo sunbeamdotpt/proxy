@@ -399,10 +399,16 @@ fn run_serve(upgrade: bool) -> Result<()> {
     svc.add_tcp(&cfg.listen.http);
 
     // Port 443: only add the TLS listener if the cert files exist.
+    // When tls_passthrough routes are configured, Pingora binds to an internal
+    // loopback address and a dedicated SNI router takes the real HTTPS port.
     let cert_exists = std::path::Path::new(&cfg.tls.cert_path).exists();
+    let has_passthrough = cfg.tls_passthrough.as_ref().is_some_and(|r| !r.is_empty());
+    let pingora_internal_addr = "127.0.0.1:10443";
+
     if cert_exists {
-        svc.add_tls(&cfg.listen.https, &cfg.tls.cert_path, &cfg.tls.key_path)?;
-        tracing::info!("TLS listener added on {}", cfg.listen.https);
+        let tls_bind = if has_passthrough { pingora_internal_addr } else { &cfg.listen.https };
+        svc.add_tls(tls_bind, &cfg.tls.cert_path, &cfg.tls.key_path)?;
+        tracing::info!(addr = %tls_bind, passthrough = has_passthrough, "TLS listener added");
     } else {
         tracing::warn!(
             cert_path = %cfg.tls.cert_path,
@@ -439,6 +445,28 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 .expect("ssh proxy runtime");
             rt.block_on(sunbeam_proxy::ssh::run_tcp_proxy(&listen, &backend));
         });
+    }
+
+    // 5d. TLS passthrough SNI router (port 443 → peek SNI → route or forward to Pingora).
+    if let Some(passthrough_routes) = &cfg.tls_passthrough {
+        if !passthrough_routes.is_empty() && cert_exists {
+            let listen = cfg.listen.https.clone();
+            let routes = passthrough_routes.clone();
+            let internal = pingora_internal_addr.to_string();
+            tracing::info!(
+                %listen,
+                routes = routes.len(),
+                internal = %internal,
+                "TLS passthrough SNI router enabled"
+            );
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tls passthrough runtime");
+                rt.block_on(sunbeam_proxy::tls_passthrough::run(&listen, &routes, &internal));
+            });
+        }
     }
 
     // 6. Background K8s watchers on their own OS thread + tokio runtime.

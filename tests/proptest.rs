@@ -31,6 +31,7 @@ fn make_route(
         body_rewrites,
         response_headers,
         cache: None,
+        timeout_secs: None,
     }
 }
 
