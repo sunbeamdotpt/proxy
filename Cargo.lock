@@ -8396,6 +8396,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "toml 0.8.23",
  "tracing",
  "tracing-opentelemetry",

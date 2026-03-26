@@ -19,8 +19,10 @@ pub mod metrics;
 pub mod proxy;
 pub mod rate_limit;
 pub mod scanner;
+pub mod sni;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
+pub mod tls_passthrough;
 #[cfg(feature = "training")]
 pub mod training;

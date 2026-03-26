@@ -38,6 +38,22 @@ pub struct Config {
     pub kubernetes: KubernetesConfig,
     /// Optional gossip-based cluster for multi-node state sharing.
     pub cluster: Option<ClusterConfig>,
+    /// Optional TLS passthrough routes. When present, the proxy peeks at the
+    /// TLS ClientHello SNI on the HTTPS port and relays matching connections
+    /// directly to the backend without terminating TLS.  Non-matching
+    /// connections are forwarded to Pingora's internal TLS listener.
+    #[serde(default)]
+    pub tls_passthrough: Option<Vec<TlsPassthroughRoute>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TlsPassthroughRoute {
+    /// Subdomain prefix to match against the SNI hostname (same convention
+    /// as `RouteConfig::host_prefix`).
+    pub host_prefix: String,
+    /// Upstream address to relay the raw TLS stream to,
+    /// e.g. "buildkitd.build.svc.cluster.local:1234".
+    pub backend: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
