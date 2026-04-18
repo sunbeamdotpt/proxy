@@ -46,9 +46,9 @@ serde_json = { workspace = true }
 anyhow     = { workspace = true }
 
 # CLI + serialization
-clap        = { version = "4", features = ["derive"] }
-bincode     = "1"
-rustc-hash  = "2"
+clap        = { workspace = true }
+bincode     = { workspace = true }
+rustc-hash  = { workspace = true }
 
 # Lock-free Arc swapping for hot-reload (scanner model)
 arc-swap    = { workspace = true }
@@ -95,33 +95,16 @@ tempfile    = { workspace = true }
 csv         = { workspace = true }
 
 # burn-rs ML framework (training only, behind `training` feature)
-burn = { workspace = true, optional = true, features = ["wgpu", "autodiff", "train", "std"] }
-
-[features]
-training = ["burn"]
-
-# Cluster gossip (iroh QUIC + HyParView/PlumTree)
-iroh        = "0.96"
-iroh-gossip = { version = "0.96", features = ["net"] }
-blake3      = "1"
-hex         = "0.4"
-rand        = "0.9"
-tempfile    = "3"
-
-# Dataset ingestion (CIC-IDS2017 CSV parsing)
-csv         = "1"
-
-# burn-rs ML framework (training only, behind `training` feature)
-burn = { version = "0.20", features = ["wgpu", "autodiff", "train"], optional = true }
+burn = { workspace = true, optional = true }
 
 [features]
 training = ["burn"]
 
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
-proptest      = "1"
-tempfile      = "3"
-tokio-rustls  = "0.26"
+proptest      = { workspace = true }
+tempfile      = { workspace = true }
+tokio-rustls  = { workspace = true }
 
 [[bench]]
 name = "scanner_bench"
