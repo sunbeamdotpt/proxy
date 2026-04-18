@@ -1,0 +1,22 @@
+schema: 1
+project:
+  name: proxy
+  kind: rust-bin
+  description: "Sunbeam TLS-terminating reverse proxy built on Pingora with DDoS/scanner detection."
+targets:
+  build:
+    exec: "cargo build --release"
+  test:
+    exec: [cargo, nextest, run]
+  lint:
+    exec: "cargo clippy -- -D warnings"
+  fmt:
+    exec: "cargo fmt"
+  clean:
+    exec: "cargo clean"
+  doc:
+    exec: "cargo doc --no-deps"
+tenant:
+  namespace: sunbeam-proxy
+outputs:
+  - target/release/sunbeam-proxy

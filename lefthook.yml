@@ -1,0 +1,29 @@
+# Lefthook configuration for Sunbeam Proxy
+# Install: lefthook install
+
+commit-msg:
+  commands:
+    dco-signoff:
+      run: |
+        if ! grep -q "^Signed-off-by: " "{1}"; then
+          echo ""
+          echo "ERROR: Missing Signed-off-by line."
+          echo ""
+          echo "All commits to Sunbeam Proxy must include a Signed-off-by line"
+          echo "indicating agreement with the Contributor License Agreement (CLA.md)."
+          echo ""
+          echo "Use: git commit -s"
+          echo "  or: git commit --signoff"
+          echo ""
+          exit 1
+        fi
+
+pre-commit:
+  parallel: true
+  commands:
+    cargo-check:
+      glob: "*.rs"
+      run: cargo check --quiet
+    cargo-fmt:
+      glob: "*.rs"
+      run: cargo fmt -- --check

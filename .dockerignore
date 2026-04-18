@@ -1,0 +1,32 @@
+target/
+.git/
+.gitignore
+*.md
+
+# Lean 4 proofs
+lean4/
+
+# Paper / docs
+docs/
+
+# Training data, datasets, artifacts
+*.bin
+*.jsonl
+models/
+.fastembed_cache/
+
+# burn training artifacts (checkpoints, experiment logs)
+src/ensemble/gen/scanner_artifacts/
+src/ensemble/gen/ddos_artifacts/
+
+# Dev / CI files
+certs/
+.github/
+.vscode/
+.idea/
+.claude/
+scripts/
+infrastructure/
+*.swp
+*.swo
+*~
