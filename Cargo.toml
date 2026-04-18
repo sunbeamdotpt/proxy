@@ -37,7 +37,7 @@ pin-project-lite = { workspace = true }
 
 # Structured logging + OTEL
 tracing              = { workspace = true }
-tracing-subscriber   = { workspace = true, features = ["env-filter", "json"] }
+tracing-subscriber   = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry         = { workspace = true }
 opentelemetry_sdk     = { workspace = true }
@@ -46,9 +46,9 @@ serde_json = { workspace = true }
 anyhow     = { workspace = true }
 
 # CLI + serialization
-clap        = { version = "4", features = ["derive"] }
-bincode     = "1"
-rustc-hash  = "2"
+clap        = { workspace = true }
+bincode     = { workspace = true }
+rustc-hash  = { workspace = true }
 
 # Lock-free Arc swapping for hot-reload (scanner model)
 arc-swap    = { workspace = true }
@@ -67,7 +67,7 @@ bytes = { workspace = true }
 regex = { workspace = true }
 
 # Auth subrequests
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true }
 
 # Rustls crypto provider — must be installed before any TLS init.
 # Uses aws-lc-rs (required by pingora-rustls); workspace pins "ring" variant
@@ -76,12 +76,9 @@ reqwest = { workspace = true, features = ["blocking"] }
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 
 # K8s watcher for cert/config hot-reload
-kube        = { workspace = true, features = ["derive", "runtime"] }
-k8s-openapi = { workspace = true, features = ["schemars", "v1_32"] }
+kube        = { workspace = true }
+k8s-openapi = { workspace = true }
 libc        = { workspace = true }
-schemars    = "1"
-serde_yaml  = { workspace = true }
-tower       = { version = "0.5", default-features = false }
 
 # Cluster gossip (iroh QUIC + HyParView/PlumTree)
 # Aligned from 0.96 → 0.95 to match workspace pin.
@@ -98,33 +95,16 @@ tempfile    = { workspace = true }
 csv         = { workspace = true }
 
 # burn-rs ML framework (training only, behind `training` feature)
-burn = { workspace = true, optional = true, features = ["wgpu", "autodiff", "train", "std"] }
-
-[features]
-training = ["burn"]
-
-# Cluster gossip (iroh QUIC + HyParView/PlumTree)
-iroh        = "0.96"
-iroh-gossip = { version = "0.96", features = ["net"] }
-blake3      = "1"
-hex         = "0.4"
-rand        = "0.9"
-tempfile    = "3"
-
-# Dataset ingestion (CIC-IDS2017 CSV parsing)
-csv         = "1"
-
-# burn-rs ML framework (training only, behind `training` feature)
-burn = { version = "0.20", features = ["wgpu", "autodiff", "train"], optional = true }
+burn = { workspace = true, optional = true }
 
 [features]
 training = ["burn"]
 
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
-proptest      = "1"
-tempfile      = "3"
-tokio-rustls  = "0.26"
+proptest      = { workspace = true }
+tempfile      = { workspace = true }
+tokio-rustls  = { workspace = true }
 
 [[bench]]
 name = "scanner_bench"
