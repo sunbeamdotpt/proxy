@@ -9,6 +9,8 @@ path = "src/lib.rs"
 
 [dependencies]
 # Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
+# Version pins are NOT workspace = true because pingora is path-patched via
+# [patch.crates-io] in the root Cargo.toml (3p/pingora submodule @ 0.8.0).
 pingora       = { version = "0.8", features = ["rustls"] }
 pingora-proxy = { version = "0.8", features = ["rustls"] }
 pingora-core  = { version = "0.8", features = ["rustls"] }
@@ -16,82 +18,90 @@ pingora-http   = "0.8"
 pingora-cache  = { version = "0.8", features = ["rustls"] }
 
 # HTTP header constants
-http = "1"
+http = { workspace = true }
 
 # Config
-serde      = { version = "1", features = ["derive"] }
+serde      = { workspace = true }
+# toml: workspace pins 0.9; proxy needs 0.8 (pingora config API surface).
+# Keep inline until workspace bumps to 0.9 and proxy is validated against it.
 toml       = "0.8"
 
 # Async
-tokio      = { version = "1", features = ["full"] }
-futures    = "0.3"
-async-trait = "0.1"
-pin-project-lite = "0.2"
+tokio      = { workspace = true }
+futures    = { workspace = true }
+async-trait = { workspace = true }
+pin-project-lite = { workspace = true }
 
 # Structured logging + OTEL
-tracing              = "0.1"
-tracing-subscriber   = { version = "0.3", features = ["json", "env-filter"] }
-tracing-opentelemetry = "0.28"
-opentelemetry         = { version = "0.27", features = ["trace"] }
-opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp    = { version = "0.27", features = ["http-proto", "reqwest-client"] }
-serde_json = "1"
-anyhow     = "1"
+tracing              = { workspace = true }
+tracing-subscriber   = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
 
 # CLI + serialization
-clap        = { version = "4", features = ["derive"] }
-bincode     = "1"
-rustc-hash  = "2"
+clap        = { workspace = true }
+bincode     = { workspace = true }
+rustc-hash  = { workspace = true }
 
 # Lock-free Arc swapping for hot-reload (scanner model)
-arc-swap    = "1"
+arc-swap    = { workspace = true }
 
 # Reverse DNS for bot IP verification
-dns-lookup  = "2"
+dns-lookup  = { workspace = true }
 
 # Prometheus metrics
-prometheus  = "0.13"
+prometheus  = { workspace = true }
 
 # Request IDs
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 
 # Static file serving and body rewriting
-bytes = "1"
-regex = "1"
+bytes = { workspace = true }
+regex = { workspace = true }
 
 # Auth subrequests
-reqwest = { version = "0.12", features = ["rustls-tls", "blocking"], default-features = false }
+reqwest = { workspace = true }
 
-# Rustls crypto provider — must be installed before any TLS init
+# Rustls crypto provider — must be installed before any TLS init.
+# Uses aws-lc-rs (required by pingora-rustls); workspace pins "ring" variant
+# for non-proxy crates. Keep inline to avoid feature unification forcing
+# aws-lc-rs onto all workspace members.
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 
 # K8s watcher for cert/config hot-reload
-kube        = { version = "3", features = ["runtime", "client"] }
-k8s-openapi = { version = "0.27", features = ["v1_35"] }
-libc        = "0.2"
+kube        = { workspace = true }
+k8s-openapi = { workspace = true }
+libc        = { workspace = true }
 
 # Cluster gossip (iroh QUIC + HyParView/PlumTree)
-iroh        = "0.96"
-iroh-gossip = { version = "0.96", features = ["net"] }
+# Aligned from 0.96 → 0.95 to match workspace pin.
+iroh        = { workspace = true }
+iroh-gossip = { workspace = true }
 blake3      = "1"
-hex         = "0.4"
+hex         = { workspace = true }
+# rand 0.9 (proxy) vs 0.8 (workspace/estafeta-server) — different majors;
+# cargo can multi-version these but workspace = true would force 0.8. Keep inline.
 rand        = "0.9"
-tempfile    = "3"
+tempfile    = { workspace = true }
 
 # Dataset ingestion (CIC-IDS2017 CSV parsing)
-csv         = "1"
+csv         = { workspace = true }
 
 # burn-rs ML framework (training only, behind `training` feature)
-burn = { version = "0.20", features = ["wgpu", "autodiff", "train"], optional = true }
+burn = { workspace = true, optional = true }
 
 [features]
 training = ["burn"]
 
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
-proptest      = "1"
-tempfile      = "3"
-tokio-rustls  = "0.26"
+proptest      = { workspace = true }
+tempfile      = { workspace = true }
+tokio-rustls  = { workspace = true }
 
 [[bench]]
 name = "scanner_bench"

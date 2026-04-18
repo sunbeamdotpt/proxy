@@ -1,7 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -135,13 +135,12 @@ pub async fn run_cluster(
         .unwrap_or("/var/lib/sunbeam/node.key");
     let secret_key = try_init!(load_or_generate_key(Path::new(key_path)));
 
-    // 2. Create iroh endpoint.
-    let builder = try_init!(Endpoint::builder()
+    // 2. Create iroh endpoint. iroh 0.95 split bind_addr into bind_addr_v4/v6.
+    let builder = Endpoint::builder()
         .secret_key(secret_key)
         .relay_mode(RelayMode::Disabled)
         .alpns(vec![ALPN.to_vec()])
-        .bind_addr(SocketAddr::from(([0, 0, 0, 0], cfg.gossip_port)))
-        .map_err(|e| anyhow::anyhow!("invalid bind address: {e}")));
+        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.gossip_port));
     let endpoint = try_init!(builder.bind().await.context("binding iroh endpoint"));
 
     let my_id = endpoint.id();
