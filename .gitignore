@@ -1,0 +1,14 @@
+.fastembed_cache/
+/target/
+certs/
+*.pem
+*.key
+*.crt
+*.tmp
+.DS_Store
+
+# Training data and model binaries
+*.bin
+*.jsonl
+heuristics.toml
+**/*artifacts
