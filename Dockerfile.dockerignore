@@ -1,0 +1,43 @@
+# Sent to buildkit when building platform/proxy/Dockerfile from the workspace
+# root. Keep this narrow: everything cargo doesn't need for `--package
+# sunbeam-proxy` gets stripped so we don't ship the 21 GB target/ cache and
+# 1.5+ GB of JS/forks/libs that the proxy build never touches.
+#
+# If you add a new path-patched Rust dep in the root Cargo.toml, make sure
+# the directory is NOT listed here — otherwise cargo will fail to resolve it.
+
+# Build artifacts
+target/
+**/target/
+**/node_modules/
+
+# VCS / editor / OS
+.git/
+.gitignore
+.worktrees/
+.idea/
+.vscode/
+**/.DS_Store
+.omc/
+
+# Docs / proofs — not needed for cargo build
+*.md
+**/*.md
+lean4/
+docs/
+
+# Non-Rust top-level trees that the workspace never references.
+forks/
+owned-forks/
+research/
+engines/
+infra/
+
+# 3p/ trees stay fully included — the root Cargo.toml `[patch.crates-io]`
+# rewrites tokio, mio, and every pingora-* crate to local paths in 3p/.
+# Excluding any of them breaks cargo workspace resolution.
+#
+# apps/ and libs/ likewise stay included — the root Cargo.toml lists
+# workspace members under apps/sunbeam-meet/ etc., so cargo fails to parse
+# the workspace if any member directory is missing. We shed size via the
+# **/node_modules/ and **/target/ globs above, which covers the JS bulk.

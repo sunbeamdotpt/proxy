@@ -828,9 +828,22 @@ impl ProxyHttp for SunbeamProxy {
 
         let host = extract_host(session);
         let prefix = host.split('.').next().unwrap_or("");
-        let route = self
-            .find_route(prefix)
-            .expect("route already validated in request_filter");
+        // request_filter normally rejects unknown prefixes; if a race with a
+        // config reload lets one slip through, return a 502 rather than
+        // panicking the whole worker thread.
+        let route = match self.find_route(prefix) {
+            Some(r) => r,
+            None => {
+                tracing::warn!(
+                    host = %host,
+                    prefix = %prefix,
+                    "upstream_peer: no route matches — request_filter/find_route drift"
+                );
+                return Err(pingora_core::Error::new_str(
+                    "no route registered for host prefix",
+                ));
+            }
+        };
 
         let path = session.req_header().uri.path().to_string();
 
