@@ -866,7 +866,7 @@ impl ProxyHttp for SunbeamProxy {
         let host = extract_host(session);
         let prefix = host.split('.').next().unwrap_or("");
         // request_filter normally rejects unknown prefixes; if a race with a
-        // config reload lets one slip through, return 404 directly rather than
+        // config reload lets one slip through, return a 502 rather than
         // panicking the whole worker thread.
         let route = match self.find_route(prefix) {
             Some(r) => r,
@@ -876,10 +876,9 @@ impl ProxyHttp for SunbeamProxy {
                     prefix = %prefix,
                     "upstream_peer: no route matches — request_filter/find_route drift"
                 );
-                let mut resp = ResponseHeader::build(404, None)?;
-                resp.insert_header("Content-Length", "0")?;
-                session.write_response_header(Box::new(resp), true).await?;
-                return Ok(Box::new(HttpPeer::new("127.0.0.1:1", false, String::new())));
+                return Err(pingora_core::Error::new_str(
+                    "no route registered for host prefix",
+                ));
             }
         };
 
