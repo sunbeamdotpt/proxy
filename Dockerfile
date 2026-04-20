@@ -1,5 +1,17 @@
 # Copyright Sunbeam Studios 2026
 # SPDX-License-Identifier: Apache-2.0
+#
+# Build from the WORKSPACE ROOT, not from platform/proxy. The proxy crate
+# inherits deps from the root [workspace.dependencies] table and pulls
+# pingora via `[patch.crates-io] pingora-proxy = { path = "3p/pingora/…" }`
+# in the root Cargo.toml, so a standalone build context can't resolve its
+# manifest.
+#
+#   docker buildx build -f platform/proxy/Dockerfile -t sunbeam-proxy:latest .
+#
+# Context pruning lives in `platform/proxy/Dockerfile.dockerignore` (BuildKit
+# sidecar dockerignore). Keep that file narrow — anything a workspace path
+# dep needs must NOT be excluded.
 
 # ── Stage 1: build ──────────────────────────────────────────────
 FROM rust:slim AS builder
@@ -23,19 +35,11 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 WORKDIR /build
 COPY . .
 
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src benches && \
-    echo 'fn main() {}' > src/main.rs && \
-    echo '' > src/lib.rs && \
-    echo 'fn main() {}' > benches/scanner_bench.rs && \
-    echo 'fn main() {}' > benches/ddos_bench.rs && \
-    cargo build --release --target "$(cat /rust-target)" ; \
-    rm -rf src benches
-
-COPY src/ ./src/
-COPY benches/ ./benches/
-RUN touch src/main.rs src/lib.rs && \
-    cargo build --release --target "$(cat /rust-target)" && \
+RUN cargo build \
+      --release \
+      --target "$(cat /rust-target)" \
+      --package sunbeam-proxy \
+      --bin sunbeam-proxy && \
     cp "target/$(cat /rust-target)/release/sunbeam-proxy" /sunbeam-proxy
 
 RUN case "${TARGETARCH}" in \
