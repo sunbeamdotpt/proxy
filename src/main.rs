@@ -408,7 +408,12 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     if cert_exists {
         let tls_bind = if has_passthrough { pingora_internal_addr } else { &cfg.listen.https };
-        svc.add_tls(tls_bind, &cfg.tls.cert_path, &cfg.tls.key_path)?;
+        let mut tls_settings = pingora_core::listeners::tls::TlsSettings::intermediate(
+            &cfg.tls.cert_path,
+            &cfg.tls.key_path,
+        )?;
+        tls_settings.enable_h2();
+        svc.add_tls_with_settings(tls_bind, None, tls_settings);
         tracing::info!(addr = %tls_bind, passthrough = has_passthrough, "TLS listener added");
     } else {
         tracing::warn!(
