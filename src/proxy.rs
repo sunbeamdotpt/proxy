@@ -27,11 +27,22 @@ use std::time::{Duration, Instant};
 
 /// Build an HttpPeer with configurable timeouts.
 fn make_peer(addr: &str, timeout_secs: Option<u64>) -> Box<HttpPeer> {
+    make_peer_inner(addr, timeout_secs, false)
+}
+
+/// Build an HttpPeer, optionally forcing HTTP/2 (h2c) on the upstream connection.
+/// Required for gRPC backends served over plaintext HTTP/2.
+fn make_peer_inner(addr: &str, timeout_secs: Option<u64>, h2_upstream: bool) -> Box<HttpPeer> {
     let mut peer = HttpPeer::new(backend_addr(addr), false, String::new());
     let t = timeout_secs.unwrap_or(60);
     peer.options.connection_timeout = Some(Duration::from_secs(10));
     peer.options.read_timeout = Some(Duration::from_secs(t));
     peer.options.write_timeout = Some(Duration::from_secs(t));
+    if h2_upstream {
+        // ALPN is TLS-only, but pingora-core uses min/max version to pick
+        // h2c on plaintext upstreams (see pingora-core::connectors::http::v2).
+        peer.options.set_http_version(2, 2);
+    }
     Box::new(peer)
 }
 
@@ -881,8 +892,8 @@ impl ProxyHttp for SunbeamProxy {
                 cache: None,
                 timeout_secs: timeout,
             });
-            tracing::debug!(backend = %pr.backend, ?timeout, "upstream_peer: path sub-route");
-            return Ok(make_peer(&pr.backend, timeout));
+            tracing::debug!(backend = %pr.backend, ?timeout, h2 = pr.h2_upstream, "upstream_peer: path sub-route");
+            return Ok(make_peer_inner(&pr.backend, timeout, pr.h2_upstream));
         }
 
         tracing::debug!(backend = %route.backend, timeout = ?route.timeout_secs, "upstream_peer: host route");

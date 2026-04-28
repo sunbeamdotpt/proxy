@@ -213,6 +213,10 @@ pub struct PathRoute {
     /// Upstream read/write timeout in seconds (default: inherits from parent route, then 60).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// When true, force HTTP/2 (h2c) on the upstream connection. Required for
+    /// gRPC backends served over plaintext HTTP/2.
+    #[serde(default)]
+    pub h2_upstream: bool,
 }
 
 /// A URL rewrite rule: requests matching `pattern` are served the file at `target`.
