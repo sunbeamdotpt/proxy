@@ -27,11 +27,22 @@ use std::time::{Duration, Instant};
 
 /// Build an HttpPeer with configurable timeouts.
 fn make_peer(addr: &str, timeout_secs: Option<u64>) -> Box<HttpPeer> {
+    make_peer_inner(addr, timeout_secs, false)
+}
+
+/// Build an HttpPeer, optionally forcing HTTP/2 (h2c) on the upstream connection.
+/// Required for gRPC backends served over plaintext HTTP/2.
+fn make_peer_inner(addr: &str, timeout_secs: Option<u64>, h2_upstream: bool) -> Box<HttpPeer> {
     let mut peer = HttpPeer::new(backend_addr(addr), false, String::new());
     let t = timeout_secs.unwrap_or(60);
     peer.options.connection_timeout = Some(Duration::from_secs(10));
     peer.options.read_timeout = Some(Duration::from_secs(t));
     peer.options.write_timeout = Some(Duration::from_secs(t));
+    if h2_upstream {
+        // ALPN is TLS-only, but pingora-core uses min/max version to pick
+        // h2c on plaintext upstreams (see pingora-core::connectors::http::v2).
+        peer.options.set_http_version(2, 2);
+    }
     Box::new(peer)
 }
 
@@ -138,13 +149,20 @@ impl SunbeamProxy {
 }
 
 fn extract_host(session: &Session) -> String {
-    session
-        .req_header()
-        .headers
-        .get(HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string()
+    let req = session.req_header();
+    // HTTP/1.1 keeps host in the Host header; HTTP/2 carries it in :authority
+    // (which pingora maps to uri.authority()). Try the header first to keep the
+    // common path zero-alloc; fall back to the uri authority for h2 requests
+    // that omit the legacy Host header.
+    if let Some(host) = req.headers.get(HOST).and_then(|v| v.to_str().ok()) {
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    }
+    req.uri
+        .authority()
+        .map(|a| a.host().to_string())
+        .unwrap_or_default()
 }
 
 /// Extract the real client IP, preferring trusted proxy headers.
@@ -828,9 +846,15 @@ impl ProxyHttp for SunbeamProxy {
 
         let host = extract_host(session);
         let prefix = host.split('.').next().unwrap_or("");
-        let route = self
-            .find_route(prefix)
-            .expect("route already validated in request_filter");
+        // Defense in depth: request_filter already 404s unknown hosts, but if a
+        // request slips through (e.g. empty Host on a stray h2 request) we'd
+        // rather return a 502 than panic the worker.
+        let Some(route) = self.find_route(prefix) else {
+            return Err(pingora_core::Error::explain(
+                pingora_core::ErrorType::HTTPStatus(502),
+                format!("no route for host '{host}'"),
+            ));
+        };
 
         let path = session.req_header().uri.path().to_string();
 
@@ -863,8 +887,8 @@ impl ProxyHttp for SunbeamProxy {
                 cache: None,
                 timeout_secs: timeout,
             });
-            tracing::debug!(backend = %pr.backend, ?timeout, "upstream_peer: path sub-route");
-            return Ok(make_peer(&pr.backend, timeout));
+            tracing::debug!(backend = %pr.backend, ?timeout, h2 = pr.h2_upstream, "upstream_peer: path sub-route");
+            return Ok(make_peer_inner(&pr.backend, timeout, pr.h2_upstream));
         }
 
         tracing::debug!(backend = %route.backend, timeout = ?route.timeout_secs, "upstream_peer: host route");
