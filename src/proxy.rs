@@ -138,13 +138,22 @@ impl SunbeamProxy {
 }
 
 fn extract_host(session: &Session) -> String {
-    session
-        .req_header()
+    // HTTP/1.1 carries the host in the `Host` header. HTTP/2 carries it in the
+    // `:authority` pseudo-header, which pingora exposes via `uri.host()` and
+    // does *not* mirror back into a synthetic `Host` header. Read the header
+    // first, then fall back to the URI authority so both protocols work after
+    // ALPN started advertising h2.
+    let req = session.req_header();
+    let from_header = req
         .headers
         .get(HOST)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string()
+        .map(crate::audit::strip_port)
+        .filter(|s| !s.is_empty());
+    if let Some(host) = from_header {
+        return host.to_string();
+    }
+    req.uri.host().unwrap_or("").to_string()
 }
 
 /// Extract the real client IP, preferring trusted proxy headers.
@@ -725,12 +734,8 @@ impl ProxyHttp for SunbeamProxy {
         session: &Session,
         _ctx: &mut RequestCtx,
     ) -> Result<CacheKey> {
+        let host = extract_host(session);
         let req = session.req_header();
-        let host = req
-            .headers
-            .get(HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
         let path = req.uri.path();
         let key = match req.uri.query() {
             Some(q) => format!("{host}{path}?{q}"),
