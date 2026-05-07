@@ -598,6 +598,17 @@ impl ProxyHttp for SunbeamProxy {
                 .max_by_key(|p| p.prefix.len());
 
             if let Some(pr) = path_route {
+                if pr.deny {
+                    tracing::info!(
+                        path = %req_path,
+                        prefix = %pr.prefix,
+                        "path route denied"
+                    );
+                    let mut r = ResponseHeader::build(403, None)?;
+                    r.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(r), true).await?;
+                    return Ok(true);
+                }
                 if let Some(auth_url) = &pr.auth_request {
                     // Forward the original request's cookies and auth headers.
                     let mut auth_req = self.http_client.get(auth_url);
@@ -610,8 +621,18 @@ impl ProxyHttp for SunbeamProxy {
                     // Forward the original path for context.
                     auth_req = auth_req.header("x-original-uri", &req_path);
 
+                    let has_cookie = session.req_header().headers.get("cookie").is_some();
+                    let has_auth = session.req_header().headers.get("authorization").is_some();
+
                     match auth_req.send().await {
                         Ok(resp) if resp.status().is_success() => {
+                            tracing::info!(
+                                auth_url,
+                                has_cookie,
+                                has_auth,
+                                status = resp.status().as_u16(),
+                                "auth subrequest succeeded"
+                            );
                             // Capture specified headers from the auth response.
                             for hdr_name in &pr.auth_capture_headers {
                                 if let Some(val) = resp.headers().get(hdr_name.as_str()) {
@@ -623,8 +644,10 @@ impl ProxyHttp for SunbeamProxy {
                         }
                         Ok(resp) => {
                             let status = resp.status().as_u16();
-                            tracing::info!(
+                            tracing::warn!(
                                 auth_url,
+                                has_cookie,
+                                has_auth,
                                 status,
                                 "auth subrequest denied"
                             );
@@ -636,6 +659,8 @@ impl ProxyHttp for SunbeamProxy {
                         Err(e) => {
                             tracing::error!(
                                 auth_url,
+                                has_cookie,
+                                has_auth,
                                 error = %e,
                                 "auth subrequest failed"
                             );
@@ -834,7 +859,7 @@ impl ProxyHttp for SunbeamProxy {
         let host = extract_host(session);
         let prefix = host.split('.').next().unwrap_or("");
         // request_filter normally rejects unknown prefixes; if a race with a
-        // config reload lets one slip through, return a 502 rather than
+        // config reload lets one slip through, return 404 directly rather than
         // panicking the whole worker thread.
         let route = match self.find_route(prefix) {
             Some(r) => r,
@@ -844,9 +869,10 @@ impl ProxyHttp for SunbeamProxy {
                     prefix = %prefix,
                     "upstream_peer: no route matches — request_filter/find_route drift"
                 );
-                return Err(pingora_core::Error::new_str(
-                    "no route registered for host prefix",
-                ));
+                let mut resp = ResponseHeader::build(404, None)?;
+                resp.insert_header("Content-Length", "0")?;
+                session.write_response_header(Box::new(resp), true).await?;
+                return Ok(Box::new(HttpPeer::new("127.0.0.1:1", false, String::new())));
             }
         };
 
