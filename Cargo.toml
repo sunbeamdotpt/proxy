@@ -1,10 +1,7 @@
 [package]
-name        = "sunbeam-proxy"
-version     = "0.1.1"
-edition     = "2021"
-description = "Pingora-based reverse proxy with ML-powered security"
-license     = "MIT"
-repository    = "https://src.sunbeam.pt/studio/sunbeam"
+name    = "sunbeam-proxy"
+version = "0.1.1"
+edition = "2021"
 
 [lib]
 name = "sunbeam_proxy"
