@@ -5,23 +5,37 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+/// Num features.
 pub const NUM_FEATURES: usize = 14;
+/// Featurevector.
 pub type FeatureVector = [f64; NUM_FEATURES];
 
 #[derive(Clone)]
+/// Requestevent.
 pub struct RequestEvent {
+    /// Timestamp.
     pub timestamp: Instant,
     /// GET=0, POST=1, PUT=2, DELETE=3, HEAD=4, PATCH=5, OPTIONS=6, other=7
     pub method: u8,
+    /// Path hash.
     pub path_hash: u64,
+    /// Host hash.
     pub host_hash: u64,
+    /// User agent hash.
     pub user_agent_hash: u64,
+    /// Status.
     pub status: u16,
+    /// Duration ms.
     pub duration_ms: u32,
+    /// Content length.
     pub content_length: u32,
+    /// Has cookies.
     pub has_cookies: bool,
+    /// Has referer.
     pub has_referer: bool,
+    /// Has accept language.
     pub has_accept_language: bool,
+    /// Suspicious path.
     pub suspicious_path: bool,
 }
 
@@ -37,11 +51,13 @@ const SUSPICIOUS_FRAGMENTS: &[&str] = &[
     "yarn.lock", "yarn-debug", "package.json", "composer.json",
 ];
 
+/// Is suspicious path.
 pub fn is_suspicious_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     SUSPICIOUS_FRAGMENTS.iter().any(|f| lower.contains(f))
 }
 
+/// Ipstate.
 pub struct IpState {
     events: Vec<RequestEvent>,
     cursor: usize,
@@ -89,6 +105,7 @@ impl IpState {
             .collect()
     }
 
+/// Extract features.
     pub fn extract_features(&self, window_secs: u64) -> FeatureVector {
         let events = self.active_events(window_secs);
         let n = events.len() as f64;
@@ -218,6 +235,7 @@ impl IpState {
     }
 }
 
+/// Method to u8.
 pub fn method_to_u8(method: &str) -> u8 {
     match method {
         "GET" => 0,
@@ -232,8 +250,11 @@ pub fn method_to_u8(method: &str) -> u8 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Normparams.
 pub struct NormParams {
+    /// Mins.
     pub mins: [f64; NUM_FEATURES],
+    /// Maxs.
     pub maxs: [f64; NUM_FEATURES],
 }
 
@@ -267,17 +288,29 @@ impl NormParams {
 /// Feature extraction from parsed log entries (used by training pipeline).
 /// Unlike IpState which uses Instant, this uses f64 timestamps from log parsing.
 pub struct LogIpState {
+    /// Timestamps.
     pub timestamps: Vec<f64>,
+    /// Methods.
     pub methods: Vec<u8>,
+    /// Path hashes.
     pub path_hashes: Vec<u64>,
+    /// Host hashes.
     pub host_hashes: Vec<u64>,
+    /// User agent hashes.
     pub user_agent_hashes: Vec<u64>,
+    /// Statuses.
     pub statuses: Vec<u16>,
+    /// Durations.
     pub durations: Vec<u32>,
+    /// Content lengths.
     pub content_lengths: Vec<u32>,
+    /// Has cookies.
     pub has_cookies: Vec<bool>,
+    /// Has referer.
     pub has_referer: Vec<bool>,
+    /// Has accept language.
     pub has_accept_language: Vec<bool>,
+    /// Suspicious paths.
     pub suspicious_paths: Vec<bool>,
 }
 

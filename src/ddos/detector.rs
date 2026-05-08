@@ -12,6 +12,7 @@ use std::time::Instant;
 
 const NUM_SHARDS: usize = 256;
 
+/// Ddosdetector.
 pub struct DDoSDetector {
     shards: Vec<RwLock<FxHashMap<IpAddr, IpState>>>,
     window_secs: u64,

@@ -14,20 +14,29 @@ use std::io::BufRead;
 /// which produces bincode model files for offline evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrafficLabel {
+    /// Normal.
     Normal,
+    /// Attack.
     Attack,
 }
 
 #[derive(Serialize, Deserialize)]
+/// Serializedmodel.
 pub struct SerializedModel {
+    /// Points.
     pub points: Vec<FeatureVector>,
+    /// Labels.
     pub labels: Vec<TrafficLabel>,
+    /// Norm params.
     pub norm_params: NormParams,
+    /// K.
     pub k: usize,
+    /// Threshold.
     pub threshold: f64,
 }
 
 #[derive(Deserialize)]
+/// Heuristicthresholds.
 pub struct HeuristicThresholds {
     /// Requests/second above which an IP is labeled attack
     #[serde(default = "default_rate_threshold")]
@@ -82,21 +91,35 @@ impl HeuristicThresholds {
     }
 }
 
+/// Ddostrainresult.
 pub struct DdosTrainResult {
+    /// Model.
     pub model: SerializedModel,
+    /// Attack count.
     pub attack_count: usize,
+    /// Normal count.
     pub normal_count: usize,
 }
 
+/// Trainargs.
 pub struct TrainArgs {
+    /// Input.
     pub input: String,
+    /// Output.
     pub output: String,
+    /// Attack ips.
     pub attack_ips: Option<String>,
+    /// Normal ips.
     pub normal_ips: Option<String>,
+    /// Heuristics.
     pub heuristics: Option<String>,
+    /// K.
     pub k: usize,
+    /// Threshold.
     pub threshold: f64,
+    /// Window secs.
     pub window_secs: u64,
+    /// Min events.
     pub min_events: usize,
 }
 
@@ -373,6 +396,7 @@ fn label_ips(
     Ok(ip_labels)
 }
 
+/// Run.
 pub fn run(args: TrainArgs) -> Result<()> {
     eprintln!("Parsing logs from {}...", args.input);
 

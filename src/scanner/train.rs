@@ -11,9 +11,13 @@ use serde::{Deserialize, Serialize};
 /// Legacy linear scanner model — kept for the `train-scanner` CLI command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerModel {
+    /// Weights.
     pub weights: [f64; NUM_SCANNER_WEIGHTS],
+    /// Threshold.
     pub threshold: f64,
+    /// Norm params.
     pub norm_params: ScannerNormParams,
+    /// Fragments.
     pub fragments: Vec<String>,
 }
 
@@ -30,11 +34,17 @@ use rustc_hash::FxHashSet;
 use std::io::BufRead;
 use std::path::Path;
 
+/// Trainscannerargs.
 pub struct TrainScannerArgs {
+    /// Input.
     pub input: String,
+    /// Output.
     pub output: String,
+    /// Wordlists.
     pub wordlists: Option<String>,
+    /// Threshold.
     pub threshold: f64,
+    /// Csic.
     pub csic: bool,
 }
 
@@ -53,14 +63,21 @@ pub const DEFAULT_FRAGMENTS: &[&str] = &[
 const ATTACK_EXTENSIONS: &[&str] = &[".env", ".sql", ".bak", ".git/config"];
 const TRAVERSAL_MARKERS: &[&str] = &["..", "%00", "%0a"];
 
+/// Labeledsample.
 pub struct LabeledSample {
+    /// Features.
     pub features: ScannerFeatureVector,
+    /// Label.
     pub label: f64, // 1.0 = attack, 0.0 = normal
 }
 
+/// Scannertrainresult.
 pub struct ScannerTrainResult {
+    /// Model.
     pub model: ScannerModel,
+    /// Train metrics.
     pub train_metrics: Metrics,
+    /// Test metrics.
     pub test_metrics: Metrics,
 }
 
@@ -251,6 +268,7 @@ pub fn train_and_evaluate(
     })
 }
 
+/// Run.
 pub fn run(args: TrainScannerArgs) -> Result<()> {
     let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
     let fragment_hashes: FxHashSet<u64> = fragments
@@ -493,10 +511,15 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     Ok(())
 }
 
+/// Metrics.
 pub struct Metrics {
+    /// Tp.
     pub tp: u32,
+    /// Fp.
     pub fp: u32,
+    /// Tn.
     pub tn: u32,
+    /// Fn .
     pub fn_: u32,
 }
 

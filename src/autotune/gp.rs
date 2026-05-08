@@ -10,6 +10,7 @@ fn rbf_kernel(x1: &[f64], x2: &[f64], length_scale: f64) -> f64 {
     (-sq_dist / (2.0 * length_scale * length_scale)).exp()
 }
 
+/// Gaussianprocess.
 pub struct GaussianProcess {
     xs: Vec<Vec<f64>>,
     ys: Vec<f64>,

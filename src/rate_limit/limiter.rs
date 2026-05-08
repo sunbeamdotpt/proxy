@@ -15,7 +15,9 @@ const NUM_SHARDS: usize = 256;
 /// Result of a rate limit check.
 #[derive(Debug, PartialEq)]
 pub enum RateLimitResult {
+    /// Allow.
     Allow,
+    /// Reject.
     Reject { retry_after: u64 },
 }
 
@@ -25,6 +27,7 @@ struct Bucket {
     authenticated: bool,
 }
 
+/// Ratelimiter.
 pub struct RateLimiter {
     shards: Vec<RwLock<FxHashMap<RateLimitKey, Bucket>>>,
     bypass_cidrs: Vec<CidrBlock>,

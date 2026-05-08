@@ -37,11 +37,15 @@ fn make_peer(addr: &str, timeout_secs: Option<u64>) -> Box<HttpPeer> {
 
 /// A compiled rewrite rule (regex compiled once at startup).
 pub struct CompiledRewrite {
+    /// Pattern.
     pub pattern: Regex,
+    /// Target.
     pub target: String,
 }
 
+/// Sunbeamproxy.
 pub struct SunbeamProxy {
+    /// Routes.
     pub routes: Vec<RouteConfig>,
     /// Per-challenge route table populated by the Ingress watcher.
     pub acme_routes: AcmeRoutes,
@@ -67,8 +71,11 @@ pub struct SunbeamProxy {
     pub scanner_observe_only: bool,
 }
 
+/// Requestctx.
 pub struct RequestCtx {
+    /// Route.
     pub route: Option<RouteConfig>,
+    /// Start time.
     pub start_time: Instant,
     /// Unique request identifier (monotonic hex counter).
     pub request_id: String,
