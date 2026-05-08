@@ -7,14 +7,21 @@ use serde::Serialize;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
+/// Trial.
 pub struct Trial {
+    /// Trial num.
     pub trial_num: usize,
+    /// Params.
     pub params: Vec<f64>,
+    /// Param names.
     pub param_names: Vec<String>,
+    /// Objective.
     pub objective: f64,
+    /// Duration secs.
     pub duration_secs: f64,
 }
 
+/// Bayesianoptimizer.
 pub struct BayesianOptimizer {
     gp: GaussianProcess,
     space: ParamSpace,

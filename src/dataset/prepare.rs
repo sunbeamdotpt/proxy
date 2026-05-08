@@ -54,6 +54,7 @@ impl Default for PrepareDatasetArgs {
     }
 }
 
+/// Run.
 pub fn run(args: PrepareDatasetArgs) -> Result<()> {
     let mut scanner_samples: Vec<TrainingSample> = Vec::new();
     let mut ddos_samples: Vec<TrainingSample> = Vec::new();

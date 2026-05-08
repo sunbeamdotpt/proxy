@@ -17,7 +17,9 @@ use burn::train::{ClassificationOutput, InferenceStep, TrainOutput, TrainStep};
 /// Two-layer MLP: input -> hidden (ReLU) -> output (sigmoid).
 #[derive(Module, Debug)]
 pub struct MlpModel<B: Backend> {
+    /// Linear1.
     pub linear1: Linear<B>,
+    /// Linear2.
     pub linear2: Linear<B>,
 }
 

@@ -9,16 +9,23 @@ use super::tree::{tree_predict, TreeDecision};
 /// Which path the ensemble took to reach its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsemblePath {
+    /// Treeblock.
     TreeBlock,
+    /// Treeallow.
     TreeAllow,
+    /// Mlp.
     Mlp,
 }
 
 /// Result of the scanner ensemble: action + confidence score + explanation.
 pub struct EnsembleVerdict {
+    /// Action.
     pub action: ScannerAction,
+    /// Score.
     pub score: f64,
+    /// Reason.
     pub reason: &'static str,
+    /// Path.
     pub path: EnsemblePath,
 }
 

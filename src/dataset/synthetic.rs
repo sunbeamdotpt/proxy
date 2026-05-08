@@ -21,10 +21,15 @@ use std::path::Path;
 /// Configuration for synthetic sample generation.
 #[derive(Debug, Clone)]
 pub struct SyntheticConfig {
+    /// Num ddos attack.
     pub num_ddos_attack: usize,
+    /// Num ddos normal.
     pub num_ddos_normal: usize,
+    /// Num scanner attack.
     pub num_scanner_attack: usize,
+    /// Num scanner normal.
     pub num_scanner_normal: usize,
+    /// Seed.
     pub seed: u64,
 }
 
