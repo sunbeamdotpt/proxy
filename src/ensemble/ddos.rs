@@ -9,16 +9,23 @@ use super::tree::{tree_predict, TreeDecision};
 /// Which path the DDoS ensemble took to reach its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DDoSEnsemblePath {
+    /// Treeblock.
     TreeBlock,
+    /// Treeallow.
     TreeAllow,
+    /// Mlp.
     Mlp,
 }
 
 /// Result of the DDoS ensemble inference.
 pub struct DDoSEnsembleVerdict {
+    /// Action.
     pub action: DDoSAction,
+    /// Score.
     pub score: f64,
+    /// Reason.
     pub reason: &'static str,
+    /// Path.
     pub path: DDoSEnsemblePath,
 }
 

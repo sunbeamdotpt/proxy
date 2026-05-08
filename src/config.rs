@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::fs;
 
 #[derive(Debug, Deserialize, Clone)]
+/// Sshconfig.
 pub struct SshConfig {
     /// Address to bind the SSH listener on, e.g. "0.0.0.0:22" or "[::]:22".
     pub listen: String,
@@ -14,10 +15,15 @@ pub struct SshConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Config.
 pub struct Config {
+    /// Listen.
     pub listen: ListenConfig,
+    /// Tls.
     pub tls: TlsFileConfig,
+    /// Telemetry.
     pub telemetry: TelemetryConfig,
+    /// Routes.
     pub routes: Vec<RouteConfig>,
     /// Optional SSH TCP passthrough (port 22 → Gitea SSH).
     pub ssh: Option<SshConfig>,
@@ -41,6 +47,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Tlspassthroughroute.
 pub struct TlsPassthroughRoute {
     /// Subdomain prefix to match against the SNI hostname (same convention
     /// as `RouteConfig::host_prefix`).
@@ -51,6 +58,7 @@ pub struct TlsPassthroughRoute {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Kubernetesconfig.
 pub struct KubernetesConfig {
     /// Namespace where the proxy's resources live (Secret, ConfigMap, Ingresses).
     #[serde(default = "default_k8s_namespace")]
@@ -78,16 +86,22 @@ fn default_tls_secret() -> String { "pingora-tls".to_string() }
 fn default_config_configmap() -> String { "pingora-config".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Ddosconfig.
 pub struct DDoSConfig {
     #[serde(default = "default_threshold")]
+    /// Threshold.
     pub threshold: f64,
     #[serde(default = "default_window_secs")]
+    /// Window secs.
     pub window_secs: u64,
     #[serde(default = "default_window_capacity")]
+    /// Window capacity.
     pub window_capacity: usize,
     #[serde(default = "default_min_events")]
+    /// Min events.
     pub min_events: usize,
     #[serde(default = "default_enabled")]
+    /// Enabled.
     pub enabled: bool,
     /// When true, run the model and log decisions but never block traffic.
     /// Useful for gathering data on model accuracy before enforcing.
@@ -96,30 +110,43 @@ pub struct DDoSConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Ratelimitconfig.
 pub struct RateLimitConfig {
     #[serde(default = "default_rl_enabled")]
+    /// Enabled.
     pub enabled: bool,
     #[serde(default)]
+    /// Bypass cidrs.
     pub bypass_cidrs: Vec<String>,
     #[serde(default = "default_eviction_interval")]
+    /// Eviction interval secs.
     pub eviction_interval_secs: u64,
     #[serde(default = "default_stale_after")]
+    /// Stale after secs.
     pub stale_after_secs: u64,
+    /// Authenticated.
     pub authenticated: BucketConfig,
+    /// Unauthenticated.
     pub unauthenticated: BucketConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Bucketconfig.
 pub struct BucketConfig {
+    /// Burst.
     pub burst: u32,
+    /// Rate.
     pub rate: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Scannerconfig.
 pub struct ScannerConfig {
     #[serde(default = "default_scanner_threshold")]
+    /// Threshold.
     pub threshold: f64,
     #[serde(default = "default_scanner_enabled")]
+    /// Enabled.
     pub enabled: bool,
     /// Bot allowlist rules. Verified bots bypass the scanner model.
     #[serde(default)]
@@ -134,6 +161,7 @@ pub struct ScannerConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Botallowlistrule.
 pub struct BotAllowlistRule {
     /// Case-insensitive UA prefix to match, e.g. "Googlebot".
     pub ua_prefix: String,
@@ -165,6 +193,7 @@ fn default_min_events() -> usize { 10 }
 fn default_enabled() -> bool { true }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Listenconfig.
 pub struct ListenConfig {
     /// HTTP listener address, e.g., "0.0.0.0:80" or "[::]:80".
     pub http: String,
@@ -173,13 +202,18 @@ pub struct ListenConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Tlsfileconfig.
 pub struct TlsFileConfig {
+    /// Cert path.
     pub cert_path: String,
+    /// Key path.
     pub key_path: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Telemetryconfig.
 pub struct TelemetryConfig {
+    /// Otlp endpoint.
     pub otlp_endpoint: String,
     /// Port for the Prometheus metrics scrape endpoint. 0 = disabled.
     #[serde(default = "default_metrics_port")]
@@ -192,12 +226,15 @@ fn default_metrics_port() -> u16 { 9090 }
 /// Matched longest-prefix-first when multiple entries share a prefix.
 #[derive(Debug, Deserialize, Clone)]
 pub struct PathRoute {
+    /// Prefix.
     pub prefix: String,
+    /// Backend.
     pub backend: String,
     /// Strip the matched prefix before forwarding to the backend.
     #[serde(default)]
     pub strip_prefix: bool,
     #[serde(default)]
+    /// Websocket.
     pub websocket: bool,
     /// URL for auth subrequest (like nginx `auth_request`).
     /// If set, the proxy makes an HTTP request to this URL before forwarding.
@@ -243,7 +280,9 @@ pub struct BodyRewrite {
 /// A response header to add to every response for this route.
 #[derive(Debug, Deserialize, Clone)]
 pub struct HeaderRule {
+    /// Name.
     pub name: String,
+    /// Value.
     pub value: String,
 }
 
@@ -251,6 +290,7 @@ pub struct HeaderRule {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CacheConfig {
     #[serde(default = "default_cache_enabled")]
+    /// Enabled.
     pub enabled: bool,
     /// Default TTL in seconds when the upstream response has no Cache-Control header.
     #[serde(default = "default_cache_ttl")]
@@ -267,10 +307,14 @@ fn default_cache_enabled() -> bool { true }
 fn default_cache_ttl() -> u64 { 60 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Routeconfig.
 pub struct RouteConfig {
+    /// Host prefix.
     pub host_prefix: String,
+    /// Backend.
     pub backend: String,
     #[serde(default)]
+    /// Websocket.
     pub websocket: bool,
     /// When true, plain-HTTP requests for this host are forwarded as-is rather
     /// than being redirected to HTTPS. Defaults to false (redirect enforced).
@@ -305,8 +349,10 @@ pub struct RouteConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Clusterconfig.
 pub struct ClusterConfig {
     #[serde(default = "default_cluster_enabled")]
+    /// Enabled.
     pub enabled: bool,
     /// Tenant UUID — isolates unrelated deployments.
     pub tenant: String,
@@ -331,6 +377,7 @@ fn default_cluster_enabled() -> bool { true }
 fn default_gossip_port() -> u16 { 11204 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Discoveryconfig.
 pub struct DiscoveryConfig {
     /// "k8s" or "bootstrap".
     #[serde(default = "default_discovery_method")]
@@ -356,10 +403,13 @@ impl Default for DiscoveryConfig {
 fn default_discovery_method() -> String { "k8s".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Bandwidthclusterconfig.
 pub struct BandwidthClusterConfig {
     #[serde(default = "default_broadcast_interval")]
+    /// Broadcast interval secs.
     pub broadcast_interval_secs: u64,
     #[serde(default = "default_stale_peer_timeout")]
+    /// Stale peer timeout secs.
     pub stale_peer_timeout_secs: u64,
     /// Sliding window size for aggregate bandwidth rate calculation.
     #[serde(default = "default_meter_window")]
@@ -372,12 +422,16 @@ fn default_broadcast_interval() -> u64 { 1 }
 fn default_stale_peer_timeout() -> u64 { 30 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Modelsconfig.
 pub struct ModelsConfig {
     #[serde(default = "default_model_dir")]
+    /// Model dir.
     pub model_dir: String,
     #[serde(default = "default_max_model_size")]
+    /// Max model size bytes.
     pub max_model_size_bytes: u64,
     #[serde(default = "default_chunk_size")]
+    /// Chunk size.
     pub chunk_size: u32,
 }
 
