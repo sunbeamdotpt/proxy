@@ -1,8 +1,11 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
+/// Bandwidth.
 pub mod bandwidth;
+/// Messages.
 pub mod messages;
+/// Node.
 pub mod node;
 
 use std::sync::Arc;
@@ -16,13 +19,17 @@ use bandwidth::{
     ClusterBandwidthState,
 };
 
+/// Clusterhandle.
 pub struct ClusterHandle {
+    /// Bandwidth.
     pub bandwidth: Arc<BandwidthTracker>,
+    /// Cluster bandwidth.
     pub cluster_bandwidth: Arc<ClusterBandwidthState>,
     /// Sliding-window aggregate bandwidth rate across the cluster.
     pub meter: Arc<BandwidthMeter>,
     /// Cluster-wide bandwidth limiter (0 = unlimited).
     pub limiter: Arc<BandwidthLimiter>,
+    /// Endpoint id.
     pub endpoint_id: iroh::PublicKey,
     shutdown_tx: watch::Sender<bool>,
 }

@@ -1,6 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
+/// Allowlist.
 pub mod allowlist;
 /// Csic.
 pub mod csic;

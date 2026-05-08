@@ -14,13 +14,21 @@ use std::path::Path;
 /// Statistical timing profile for one attack type from CIC-IDS2017.
 #[derive(Debug, Clone)]
 pub struct TimingProfile {
+    /// Attack type.
     pub attack_type: String,
+    /// Inter arrival mean.
     pub inter_arrival_mean: f64,
+    /// Inter arrival std.
     pub inter_arrival_std: f64,
+    /// Burst duration mean.
     pub burst_duration_mean: f64,
+    /// Burst duration std.
     pub burst_duration_std: f64,
+    /// Flow bytes per sec mean.
     pub flow_bytes_per_sec_mean: f64,
+    /// Flow bytes per sec std.
     pub flow_bytes_per_sec_std: f64,
+    /// Sample count.
     pub sample_count: usize,
 }
 
