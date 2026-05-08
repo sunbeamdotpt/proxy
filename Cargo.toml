@@ -116,3 +116,7 @@ opt-level = 3
 lto       = true
 codegen-units = 1
 strip     = true
+
+description = "Pingora-based reverse proxy with ML-powered security"
+license = "MIT"
+repository = "https://src.sunbeam.pt/studio/sunbeam"
