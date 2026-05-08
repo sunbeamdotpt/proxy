@@ -17,12 +17,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 
+/// Replayensembleargs.
 pub struct ReplayEnsembleArgs {
+    /// Input.
     pub input: String,
+    /// Window secs.
     pub window_secs: u64,
+    /// Min events.
     pub min_events: usize,
 }
 
+/// Run.
 pub fn run(args: ReplayEnsembleArgs) -> Result<()> {
     eprintln!("replaying {} through ensemble models...\n", args.input);
 

@@ -22,8 +22,11 @@ pub type PackedNode = (u8, f32, u16, u16);
 /// Decision from a tree leaf node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeDecision {
+    /// Block.
     Block,
+    /// Allow.
     Allow,
+    /// Defer.
     Defer,
 }
 
