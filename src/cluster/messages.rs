@@ -7,13 +7,18 @@ use serde::{Deserialize, Serialize};
 /// Serialized with bincode before broadcast.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClusterMessage {
+    /// Version.
     pub version: u8,
+    /// Sender.
     pub sender: [u8; 32],
+    /// Payload.
     pub payload: Payload,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// Payload.
 pub enum Payload {
+    /// Bandwidthreport.
     BandwidthReport {
         timestamp: u64,
         bytes_in: u64,
@@ -22,21 +27,25 @@ pub enum Payload {
         cumulative_in: u64,
         cumulative_out: u64,
     },
+    /// Modelannounce.
     ModelAnnounce {
         model_type: String,
         hash: [u8; 32],
         total_size: u64,
         chunk_count: u32,
     },
+    /// Modelchunk.
     ModelChunk {
         hash: [u8; 32],
         chunk_index: u32,
         data: Vec<u8>,
     },
+    /// Leaderheartbeat.
     LeaderHeartbeat {
         term: u64,
         leader_id: [u8; 32],
     },
+    /// Licensequota.
     LicenseQuota {
         max_bytes: u64,
         current_bytes: u64,

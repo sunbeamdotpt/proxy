@@ -14,16 +14,24 @@ use std::io::BufRead;
 /// which produces bincode model files for offline evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrafficLabel {
+    /// Normal.
     Normal,
+    /// Attack.
     Attack,
 }
 
 #[derive(Serialize, Deserialize)]
+/// Serializedmodel.
 pub struct SerializedModel {
+    /// Points.
     pub points: Vec<FeatureVector>,
+    /// Labels.
     pub labels: Vec<TrafficLabel>,
+    /// Norm params.
     pub norm_params: NormParams,
+    /// K.
     pub k: usize,
+    /// Threshold.
     pub threshold: f64,
 }
 
@@ -83,12 +91,17 @@ impl HeuristicThresholds {
     }
 }
 
+/// Ddostrainresult.
 pub struct DdosTrainResult {
+    /// Model.
     pub model: SerializedModel,
+    /// Attack count.
     pub attack_count: usize,
+    /// Normal count.
     pub normal_count: usize,
 }
 
+/// Trainargs.
 pub struct TrainArgs {
     /// Input.
     pub input: String,
@@ -383,6 +396,7 @@ fn label_ips(
     Ok(ip_labels)
 }
 
+/// Run.
 pub fn run(args: TrainArgs) -> Result<()> {
     eprintln!("Parsing logs from {}...", args.input);
 
