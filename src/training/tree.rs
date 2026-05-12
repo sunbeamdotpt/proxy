@@ -41,6 +41,12 @@ pub struct TreeConfig {
     pub min_purity: f32,
     /// Number of input features (12 for scanner, 14 for DDoS).
     pub num_features: usize,
+    /// Feature indices the tree must not split on. Forces those decisions to
+    /// flow through the MLP — typically the "circumstantial" header-presence
+    /// features (cookies/referer/accept-language ratios) whose values are
+    /// easy class indicators in synthetic data but unreliable in production
+    /// (privacy mode, mobile apps, etc.).
+    pub excluded_features: Vec<usize>,
 }
 
 /// Internal representation during tree construction.
@@ -125,6 +131,9 @@ fn build_node(
     let mut best_right: Vec<usize> = Vec::new();
 
     for feat in 0..config.num_features {
+        if config.excluded_features.contains(&feat) {
+            continue;
+        }
         // Gather and sort feature values.
         let mut vals: Vec<(f32, usize)> = indices
             .iter()
@@ -303,6 +312,7 @@ mod tests {
             min_samples_leaf: 1,
             min_purity: 0.90,
             num_features: 2,
+            excluded_features: vec![],
         };
 
         let tree = train_tree(&samples, &config);
@@ -337,6 +347,7 @@ mod tests {
             min_samples_leaf: 5,
             min_purity: 0.95, // Very high purity requirement.
             num_features: 1,
+            excluded_features: vec![],
         };
 
         let tree = train_tree(&samples, &config);
@@ -370,6 +381,7 @@ mod tests {
             min_samples_leaf: 1,
             min_purity: 0.90,
             num_features: 4,
+            excluded_features: vec![],
         };
 
         let tree = train_tree(&samples, &config);
@@ -394,6 +406,7 @@ mod tests {
             min_samples_leaf: 1,
             min_purity: 0.90,
             num_features: 1,
+            excluded_features: vec![],
         };
 
         let tree = train_tree(&samples, &config);

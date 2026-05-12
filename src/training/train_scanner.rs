@@ -53,6 +53,12 @@ pub struct TrainScannerMlpArgs {
     pub min_samples_leaf: usize,
     /// Weight for cookie feature (feature 3: has_cookies). 0.0 = ignore, 1.0 = full weight.
     pub cookie_weight: f32,
+    /// Feature indices the tree must not split on. Defaults to the circumstantial
+    /// header-presence features (has_cookies/has_referer/has_accept_language/
+    /// accept_quality), forcing those decisions through the MLP where the
+    /// certified-radius story applies. Content features like has_suspicious_extension
+    /// and path_has_traversal stay tree-eligible.
+    pub tree_excluded_features: Vec<usize>,
 }
 
 impl Default for TrainScannerMlpArgs {
@@ -68,6 +74,7 @@ impl Default for TrainScannerMlpArgs {
             tree_min_purity: 0.98,
             min_samples_leaf: 2,
             cookie_weight: 1.0,
+            tree_excluded_features: vec![3, 4, 5, 6],
         }
     }
 }
@@ -139,6 +146,7 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
         min_samples_leaf: args.min_samples_leaf,
         min_purity: args.tree_min_purity,
         num_features: NUM_FEATURES,
+        excluded_features: args.tree_excluded_features.clone(),
     };
     let tree_nodes = train_tree(&tree_train_set, &tree_config);
     println!("[scanner] CART tree: {} nodes (max_depth={})", tree_nodes.len(), args.tree_max_depth);
