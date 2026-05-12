@@ -85,4 +85,82 @@ theorem scalarMul_sound (w : IEEE32Exec) (x : Interval32) (wPos : Bool)
     · simp only [scalarMulUp]
       exact le_trans ((EReal.coe_le_coe_iff).2 hzhi) hmuLo
 
+/-! ## IBP step and linear-layer composition
+
+`stepIBP` extends an accumulator with one weighted-input term using
+outward-rounded f32 arithmetic. The soundness theorem `stepIBP_sound`
+composes `scalarMul_sound` with TorchLean's `toEReal_addDown_le` /
+`toEReal_addUp_ge` to show the new accumulator soundly encloses the extended
+real-valued partial sum.
+
+Linear-layer soundness follows by induction: instantiate `stepIBP_sound` for
+each input dimension, starting from `Interval32.point bias` and folding over
+`Fin inputDim`. -/
+
+/-- One IBP step: extend the accumulator with `scalarMul w xB` term. -/
+@[inline] def stepIBP (acc : Interval32) (w : IEEE32Exec) (xB : Interval32)
+    (wPos : Bool) : Interval32 :=
+  ⟨addDown acc.lo (scalarMulDown w xB wPos),
+   addUp acc.hi (scalarMulUp w xB wPos)⟩
+
+/-- Bridge: an EReal upper bound by a finite-coercion lifts to a real upper
+bound when the value is finite. -/
+private lemma toReal_le_of_toEReal_le {x : IEEE32Exec} {S : ℝ}
+    (hxFin : isFinite x = true) (h : toEReal x ≤ (S : EReal)) :
+    toReal x ≤ S := by
+  have hcoe : toEReal x = ((toReal x : ℝ) : EReal) :=
+    toEReal_eq_coe_toReal_of_isFinite (x := x) hxFin
+  rw [hcoe] at h
+  exact (EReal.coe_le_coe_iff).1 h
+
+/-- Bridge: an EReal lower bound by a finite-coercion lifts to a real lower
+bound when the value is finite. -/
+private lemma le_toReal_of_le_toEReal {x : IEEE32Exec} {S : ℝ}
+    (hxFin : isFinite x = true) (h : (S : EReal) ≤ toEReal x) :
+    S ≤ toReal x := by
+  have hcoe : toEReal x = ((toReal x : ℝ) : EReal) :=
+    toEReal_eq_coe_toReal_of_isFinite (x := x) hxFin
+  rw [hcoe] at h
+  exact (EReal.coe_le_coe_iff).1 h
+
+/-- Soundness of one IBP step: extending the accumulator with `scalarMul w xB`
+in directed-rounded f32 produces a new accumulator that soundly encloses the
+real-valued partial sum `S + toReal w * z` for any `z ∈ xB`. -/
+theorem stepIBP_sound (acc : Interval32) (w : IEEE32Exec) (xB : Interval32)
+    (wPos : Bool)
+    (hAccLoFin : isFinite acc.lo = true) (hAccHiFin : isFinite acc.hi = true)
+    (hw : isFinite w = true) (hxValid : Interval32.Valid xB)
+    (hSmDownFin : isFinite (scalarMulDown w xB wPos) = true)
+    (hSmUpFin : isFinite (scalarMulUp w xB wPos) = true)
+    (hwSign : if wPos then (0 : ℝ) ≤ toReal w else toReal w ≤ 0)
+    {S : ℝ} {z : ℝ} (hz : toReal xB.lo ≤ z ∧ z ≤ toReal xB.hi)
+    (hAccBoundLo : toEReal acc.lo ≤ (S : EReal))
+    (hAccBoundHi : (S : EReal) ≤ toEReal acc.hi) :
+    toEReal (stepIBP acc w xB wPos).lo ≤ ((S + toReal w * z : ℝ) : EReal) ∧
+    ((S + toReal w * z : ℝ) : EReal) ≤ toEReal (stepIBP acc w xB wPos).hi := by
+  have hsm := scalarMul_sound w xB wPos hw hxValid hwSign hz
+  have hAccLoR : toReal acc.lo ≤ S :=
+    toReal_le_of_toEReal_le hAccLoFin hAccBoundLo
+  have hAccHiR : S ≤ toReal acc.hi :=
+    le_toReal_of_le_toEReal hAccHiFin hAccBoundHi
+  have hSmDownR : toReal (scalarMulDown w xB wPos) ≤ toReal w * z :=
+    toReal_le_of_toEReal_le hSmDownFin hsm.1
+  have hSmUpR : toReal w * z ≤ toReal (scalarMulUp w xB wPos) :=
+    le_toReal_of_le_toEReal hSmUpFin hsm.2
+  have hAddDownLe :
+      toEReal (addDown acc.lo (scalarMulDown w xB wPos))
+        ≤ ((toReal acc.lo + toReal (scalarMulDown w xB wPos) : ℝ) : EReal) :=
+    toEReal_addDown_le (x := acc.lo) (y := scalarMulDown w xB wPos) hAccLoFin hSmDownFin
+  have hAddUpGe :
+      ((toReal acc.hi + toReal (scalarMulUp w xB wPos) : ℝ) : EReal)
+        ≤ toEReal (addUp acc.hi (scalarMulUp w xB wPos)) :=
+    toEReal_addUp_ge (x := acc.hi) (y := scalarMulUp w xB wPos) hAccHiFin hSmUpFin
+  have hLoR : toReal acc.lo + toReal (scalarMulDown w xB wPos) ≤ S + toReal w * z :=
+    add_le_add hAccLoR hSmDownR
+  have hHiR : S + toReal w * z ≤ toReal acc.hi + toReal (scalarMulUp w xB wPos) :=
+    add_le_add hAccHiR hSmUpR
+  refine ⟨?_, ?_⟩
+  · exact le_trans hAddDownLe ((EReal.coe_le_coe_iff).2 hLoR)
+  · exact le_trans ((EReal.coe_le_coe_iff).2 hHiR) hAddUpGe
+
 end Sunbeam.Verify.Interval32IBP
