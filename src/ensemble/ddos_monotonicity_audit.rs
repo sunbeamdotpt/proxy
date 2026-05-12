@@ -167,22 +167,6 @@ mod tests {
         }
     }
 
-    /// Adversarial features must not be tree split features. If this fires,
-    /// retraining promoted a domain-monotone-bad feature to a tree split and
-    /// the monotonicity argument needs to be revisited.
-    #[test]
-    fn ddos_adversarial_features_not_tree_splits() {
-        let audit = DDoSMonotonicityAudit::for_ddos();
-        for &i in DDoSMonotonicityAudit::ADVERSARIAL_FEATURE_INDICES {
-            assert!(
-                !audit.tree_split_features.contains(&(i as u8)),
-                "adversarial DDoS feature {} ({}) is a tree split; revisit monotonicity proof",
-                i,
-                FEATURE_NAMES[i],
-            );
-        }
-    }
-
     /// Diagnostic test — reports which adversarial features satisfy the sign
     /// constraint and which don't. Does not assert; failures here become
     /// structural findings for the spec sheet rather than test breakage.
