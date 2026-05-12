@@ -95,7 +95,7 @@ tempfile    = { workspace = true }
 csv         = { workspace = true }
 
 # burn-rs ML framework (training only, behind `training` feature)
-burn = { workspace = true, optional = true, features = ["train", "wgpu", "autodiff", "dataset"] }
+burn = { workspace = true, optional = true, features = ["wgpu", "autodiff", "train", "std"] }
 
 [features]
 training = ["burn"]
