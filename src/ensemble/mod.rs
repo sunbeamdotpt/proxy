@@ -5,6 +5,8 @@
 pub mod crown;
 /// Ddos.
 pub mod ddos;
+/// DDoS-specific CROWN certified radius wired to trained DDoS weights.
+pub mod ddos_crown;
 /// Gen.
 pub mod gen;
 /// Mlp.
