@@ -7,6 +7,8 @@ pub mod ddos;
 pub mod gen;
 /// Mlp.
 pub mod mlp;
+/// Empirical audit of the Lean Tier 2 monotonicity proof's side conditions.
+pub mod monotonicity_audit;
 /// Replay.
 pub mod replay;
 /// Scanner.
