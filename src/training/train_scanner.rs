@@ -59,6 +59,10 @@ pub struct TrainScannerMlpArgs {
     /// certified-radius story applies. Content features like has_suspicious_extension
     /// and path_has_traversal stay tree-eligible.
     pub tree_excluded_features: Vec<usize>,
+    /// Tier 2 sign-constraint penalty coefficient. Adds
+    /// `λ · Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])` to the loss, encouraging
+    /// MLP monotonicity in adversarial features. 0.0 disables the penalty.
+    pub sign_constraint_lambda: f32,
 }
 
 impl Default for TrainScannerMlpArgs {
@@ -75,6 +79,7 @@ impl Default for TrainScannerMlpArgs {
             min_samples_leaf: 2,
             cookie_weight: 1.0,
             tree_excluded_features: vec![3, 4, 5, 6],
+            sign_constraint_lambda: 0.0,
         }
     }
 }
@@ -161,9 +166,14 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
 
     // 5. Train MLP with SupervisedTraining (uses mlp_norm_maxs for cookie scaling).
     let device = Default::default();
+    // Adversarial features for scanner (domain-monotone-bad):
+    // suspicious_path_score (0), has_suspicious_extension (2),
+    // method_is_unusual (8), content_length_mismatch (10), path_has_traversal (11).
     let mlp_config = MlpConfig {
         input_dim: NUM_FEATURES,
         hidden_dim: args.hidden_dim,
+        adversarial_indices: vec![0, 2, 8, 10, 11],
+        sign_constraint_lambda: args.sign_constraint_lambda,
     };
 
     let artifact_dir = Path::new(&args.output_dir).join("scanner_artifacts");

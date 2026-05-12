@@ -74,6 +74,7 @@ pub fn run_cookie_sweep(
                     min_samples_leaf,
                     cookie_weight: cw,
                     tree_excluded_features: vec![3, 4, 5, 6],
+                    sign_constraint_lambda: 0.0,
                 })?;
             }
             "ddos" => {
@@ -89,6 +90,7 @@ pub fn run_cookie_sweep(
                     min_samples_leaf,
                     cookie_weight: cw,
                     tree_excluded_features: vec![10, 11, 12],
+                    sign_constraint_lambda: 0.0,
                 })?;
             }
             _ => unreachable!(),

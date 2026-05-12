@@ -57,6 +57,10 @@ pub struct TrainDdosMlpArgs {
     /// header-presence features (cookie/referer/accept-language ratios), forcing
     /// those decisions through the MLP where the certified-radius story applies.
     pub tree_excluded_features: Vec<usize>,
+    /// Tier 2 sign-constraint penalty coefficient. Adds
+    /// `λ · Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])` to the loss, encouraging
+    /// MLP monotonicity in adversarial features. 0.0 disables the penalty.
+    pub sign_constraint_lambda: f32,
 }
 
 impl Default for TrainDdosMlpArgs {
@@ -73,6 +77,7 @@ impl Default for TrainDdosMlpArgs {
             min_samples_leaf: 2,
             cookie_weight: 1.0,
             tree_excluded_features: vec![10, 11, 12],
+            sign_constraint_lambda: 0.0,
         }
     }
 }
@@ -155,9 +160,13 @@ pub fn run(args: TrainDdosMlpArgs) -> Result<()> {
 
     // 5. Train MLP with SupervisedTraining (uses mlp_norm_maxs for cookie scaling).
     let device = Default::default();
+    // Adversarial features for DDoS (domain-monotone-bad): request_rate (0),
+    // error_rate (3), burst_score (6), path_repetition (7), suspicious_path_ratio (13).
     let mlp_config = MlpConfig {
         input_dim: NUM_FEATURES,
         hidden_dim: args.hidden_dim,
+        adversarial_indices: vec![0, 3, 6, 7, 13],
+        sign_constraint_lambda: args.sign_constraint_lambda,
     };
 
     let artifact_dir = Path::new(&args.output_dir).join("ddos_artifacts");
