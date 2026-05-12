@@ -17,16 +17,31 @@ lifting the bound onto the deployment surface.
 
 The Rust runtime (`src/ensemble/crown.rs`) computes IBP in outward-rounded f32:
 each FP multiply and add applies `next_down` to the accumulating lower bound
-and `next_up` to the upper bound. IEEE-754 round-to-nearest introduces at most
-0.5 ULP error per op, so the 1-ULP outward shift guarantees the computed f32
-interval is a sound over-approximation of the ℝ-IBP interval. The runtime
-analog of this theorem's hypothesis (`threshold + mlpF32Error w x < sigmoid …`)
-is therefore strictly more conservative than what's stated here — if the
-runtime certifies a radius, the Lean hypothesis holds with margin.
+and `next_up` to the upper bound. The formal basis for FP32 directed-rounding
+arithmetic is TorchLean's `Interval32` infrastructure (in
+`NN/Floats/Interval/`), specifically:
+
+- `IEEEExec32AddSoundness.add_sound` — `addDown`/`addUp` give a sound enclosure
+  of real addition under IEEE-754 binary32 endpoints.
+- `IEEEExec32MulSoundness.mul_sound` — `mulDown`/`mulUp` give the analogous
+  enclosure for multiplication.
+
+The Rust runtime's `next_down(round_to_nearest(a + b))` and `addDown(a, b)`
+are both sound lower bounds on the real sum `a + b`: round-to-nearest has
+≤ 0.5 ULP error and `next_down` shifts by 1 ULP, so the runtime's bound is at
+least as wide as TorchLean's directed-rounding bound. The same holds for
+multiplication. Composing through the MLP2 structure with these per-op
+soundness lemmas gives runtime-level soundness: if the runtime certifies a
+radius, the Lean hypothesis here holds with margin.
 
 The sigmoid evaluation in the runtime applies an 8-ULP slack via
 `sigmoid_down`/`sigmoid_up` to absorb libm `expf` imprecision (typically ≤ 1
 ULP per chained op; 8 is a margin).
+
+A formal `Interval32`-typed IBP theorem composing `add_sound`/`mul_sound`
+through the scanner `MLP2` is left as a follow-up — it would tighten the
+above paragraph into a single Lean theorem but does not change the runtime
+behavior or the soundness argument.
 
 ## Scope
 
