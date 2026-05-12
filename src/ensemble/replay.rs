@@ -91,7 +91,7 @@ fn replay_scanner(entries: &[AuditLogLine]) {
     let mut total = 0u64;
     let mut blocked = 0u64;
     let mut allowed = 0u64;
-    let mut path_counts = [0u64; 3]; // TreeBlock, TreeAllow, Mlp
+    let mut mlp_count = 0u64;
     let mut blocked_examples: Vec<(String, String, String, f64)> = Vec::new(); // (path, ua, reason, score)
     let mut fp_candidates: Vec<(String, String, u16, f64)> = Vec::new(); // blocked but had 2xx status
 
@@ -121,9 +121,7 @@ fn replay_scanner(entries: &[AuditLogLine]) {
         total += 1;
 
         match verdict.path {
-            EnsemblePath::TreeBlock => path_counts[0] += 1,
-            EnsemblePath::TreeAllow => path_counts[1] += 1,
-            EnsemblePath::Mlp => path_counts[2] += 1,
+            EnsemblePath::Mlp => mlp_count += 1,
         }
 
         match verdict.action {
@@ -165,8 +163,8 @@ fn replay_scanner(entries: &[AuditLogLine]) {
         pct(allowed)
     );
     eprintln!(
-        "  paths:       tree_block={} tree_allow={} mlp={}",
-        path_counts[0], path_counts[1], path_counts[2]
+        "  paths:       mlp={}",
+        mlp_count
     );
 
     if !blocked_examples.is_empty() {
@@ -238,7 +236,7 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
     let mut blocked_ips = 0u64;
     let mut allowed_ips = 0u64;
     let mut skipped_ips = 0u64;
-    let mut path_counts = [0u64; 3]; // TreeBlock, TreeAllow, Mlp
+    let mut mlp_count = 0u64;
     let mut blocked_details: Vec<(String, usize, f64, &'static str)> = Vec::new();
 
     for (ip, state) in &ip_states {
@@ -261,9 +259,7 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         let verdict = ddos_ensemble_predict(&fv_f32);
 
         match verdict.path {
-            DDoSEnsemblePath::TreeBlock => path_counts[0] += 1,
-            DDoSEnsemblePath::TreeAllow => path_counts[1] += 1,
-            DDoSEnsemblePath::Mlp => path_counts[2] += 1,
+            DDoSEnsemblePath::Mlp => mlp_count += 1,
         }
 
         match verdict.action {
@@ -298,8 +294,8 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         pct(allowed_ips, total_ips)
     );
     eprintln!(
-        "  paths:       tree_block={} tree_allow={} mlp={}",
-        path_counts[0], path_counts[1], path_counts[2]
+        "  paths:       mlp={}",
+        mlp_count
     );
 
     if !blocked_details.is_empty() {

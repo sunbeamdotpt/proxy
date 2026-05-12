@@ -1,19 +1,24 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
+//! Scanner ensemble inference: MLP-only.
+//!
+//! The shipped tree was a single-feature classifier in practice (never
+//! deferred to the MLP), so the tree path is no longer wired into the
+//! verdict pipeline. Every request flows through `mlp_predict_32`, which is
+//! the model that carries the CROWN / Interval32 IBP soundness story.
+//!
+//! `EnsemblePath::Mlp` is the only path retained for downstream telemetry
+//! that expected the enum.
+
 use crate::scanner::model::{ScannerAction, ScannerVerdict};
 use super::gen::scanner_weights;
 use super::mlp::mlp_predict_32;
-use super::tree::{tree_predict, TreeDecision};
 
 /// Which path the ensemble took to reach its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsemblePath {
-    /// Treeblock.
-    TreeBlock,
-    /// Treeallow.
-    TreeAllow,
-    /// Mlp.
+    /// MLP forward pass.
     Mlp,
 }
 
@@ -44,47 +49,26 @@ fn normalize(raw: &[f32; 12]) -> [f32; 12] {
     out
 }
 
-/// Full ensemble inference: decision tree first, MLP only on `Defer`.
-///
-/// Returns an [`EnsembleVerdict`] that can be converted into a
-/// [`ScannerVerdict`] for the rest of the pipeline.
+/// Full ensemble inference: MLP forward + threshold.
 pub fn scanner_ensemble_predict(raw: &[f32; 12]) -> EnsembleVerdict {
     let input = normalize(raw);
-
-    let tree_result = tree_predict(&scanner_weights::TREE_NODES, &input);
-    match tree_result {
-        TreeDecision::Block => EnsembleVerdict {
-            action: ScannerAction::Block,
-            score: 1.0,
-            reason: "ensemble:tree_block",
-            path: EnsemblePath::TreeBlock,
-        },
-        TreeDecision::Allow => EnsembleVerdict {
-            action: ScannerAction::Allow,
-            score: 0.0,
-            reason: "ensemble:tree_allow",
-            path: EnsemblePath::TreeAllow,
-        },
-        TreeDecision::Defer => {
-            let mlp_score = mlp_predict_32::<12>(
-                &scanner_weights::W1,
-                &scanner_weights::B1,
-                &scanner_weights::W2,
-                scanner_weights::B2,
-                &input,
-            );
-            let action = if mlp_score > scanner_weights::THRESHOLD {
-                ScannerAction::Block
-            } else {
-                ScannerAction::Allow
-            };
-            EnsembleVerdict {
-                action,
-                score: mlp_score as f64,
-                reason: "ensemble:mlp",
-                path: EnsemblePath::Mlp,
-            }
-        }
+    let mlp_score = mlp_predict_32::<12>(
+        &scanner_weights::W1,
+        &scanner_weights::B1,
+        &scanner_weights::W2,
+        scanner_weights::B2,
+        &input,
+    );
+    let action = if mlp_score > scanner_weights::THRESHOLD {
+        ScannerAction::Block
+    } else {
+        ScannerAction::Allow
+    };
+    EnsembleVerdict {
+        action,
+        score: mlp_score as f64,
+        reason: "ensemble:mlp",
+        path: EnsemblePath::Mlp,
     }
 }
 
@@ -103,33 +87,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tree_block_path() {
-        // Tree: root splits on feature 7 (ua_category) at 0.75.
-        // All zeros → ua_category normalized = 0.0 <= 0.75 → Block (node 1)
-        let raw = [0.0f32; 12];
-        let v = scanner_ensemble_predict(&raw);
-        assert_eq!(v.action, ScannerAction::Block);
-        assert_eq!(v.path, EnsemblePath::TreeBlock);
-        assert_eq!(v.reason, "ensemble:tree_block");
+    fn mlp_path_is_only_path() {
+        let input = [0.5f32; 12];
+        let v = scanner_ensemble_predict(&input);
+        assert_eq!(v.path, EnsemblePath::Mlp);
+        assert_eq!(v.reason, "ensemble:mlp");
     }
 
     #[test]
-    fn test_tree_allow_path() {
-        // Tree: root feature 7 > 0.75 → node 2, checks feature 3 (has_cookies) at 0.25.
-        // raw[7] = 1.0 → normalized 1.0 > 0.75 → right.
-        // raw[3] = 1.0 → normalized ~0.7 > 0.25 → right child node 6 → Allow leaf.
-        let mut raw = [0.0f32; 12];
-        raw[7] = 1.0; // ua_category = browser
-        raw[3] = 1.0; // has_cookies = yes
-        let v = scanner_ensemble_predict(&raw);
-        assert_eq!(v.action, ScannerAction::Allow);
-        assert_eq!(v.path, EnsemblePath::TreeAllow);
-        assert_eq!(v.reason, "ensemble:tree_allow");
-    }
-
-    #[test]
-    fn test_mlp_direct() {
-        // Current tree has no Defer leaves, so test MLP inference directly.
+    fn mlp_score_in_unit_interval() {
         let input = [0.5f32; 12];
         let score = mlp_predict_32::<12>(
             &scanner_weights::W1,
@@ -143,7 +109,6 @@ mod tests {
 
     #[test]
     fn test_normalize_clamps() {
-        // Values beyond max should be clamped to 1.0
         let mut raw = [0.0f32; 12];
         raw[0] = 100.0;
         let normed = normalize(&raw);
@@ -153,7 +118,7 @@ mod tests {
     #[test]
     fn test_normalize_negative_clamps() {
         let mut raw = [0.0f32; 12];
-        raw[0] = -5.0; // min is 0.0
+        raw[0] = -5.0;
         let normed = normalize(&raw);
         assert!((normed[0] - 0.0).abs() < f64::EPSILON as f32);
     }

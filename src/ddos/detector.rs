@@ -90,8 +90,6 @@ impl DDoSDetector {
         let ev = crate::ensemble::ddos::ddos_ensemble_predict(&f32_features);
         crate::metrics::DDOS_ENSEMBLE_PATH
             .with_label_values(&[match ev.path {
-                crate::ensemble::ddos::DDoSEnsemblePath::TreeBlock => "tree_block",
-                crate::ensemble::ddos::DDoSEnsemblePath::TreeAllow => "tree_allow",
                 crate::ensemble::ddos::DDoSEnsemblePath::Mlp => "mlp",
             }])
             .inc();
