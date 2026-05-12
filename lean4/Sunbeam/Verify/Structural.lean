@@ -13,11 +13,6 @@ apply to the mathematical model that `f32` approximates. This is the standard
 convention in ML formal verification — the `f32 ↔ ℝ` gap is handled separately
 by finite-precision bridges (e.g. TorchLean's `Float32Bridge`) when needed.
 
-`mlpForward` is defined as `sigmoid ∘ MLP2.forward ∘ vecToTensor`, delegating
-the pre-sigmoid linear/ReLU/linear computation to TorchLean's `Spec.linearSpec`
-and `Activation.reluSpec`. Tier 2+ proofs use TorchLean's verified properties
-of these operations.
-
 ## Theorems (no Sunbeam-local axioms)
 - `sigmoid_pos`: σ(x) > 0  (via `Real.exp_pos`)
 - `sigmoid_lt_one`: σ(x) < 1  (via `Real.exp_pos`)
@@ -32,12 +27,10 @@ of these operations.
 - All tree predictions terminate (structural recursion on `TreeNode` inductive)
 - Ensemble composition is total (all match arms covered)
 
-## Refactor status
-Tier 2 (monotonicity), Tier 3 (Lipschitz), Tier 4 (FP32 precision), and the
-deployment-soundness composition were previously derived against a hand-rolled
-`mlpForward` body. After the TorchLean-integration refactor, those tiers are
-being re-derived against TorchLean's `Spec`/`Activation`/`CROWN` machinery.
-This file currently covers Tier 1 only; subsequent commits restore Tier 2+.
+## Tier 2: shape properties
+Conditional on a per-neuron sign constraint, the MLP and ensemble are monotone
+in any designated input feature. See `Sunbeam.Verify.Monotonicity` for the
+theorems and their (axiom-free) proofs.
 
 ## Trust base
 The only kernel axioms now in play are Mathlib's standard set (`propext`,

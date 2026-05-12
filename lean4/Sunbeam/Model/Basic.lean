@@ -16,8 +16,12 @@ The Sunbeam Lean spec is stated over `ℝ` rather than Lean's `Float`. The runti
 uses `f32` (see `ensemble::mlp` in Rust); the Lean proofs apply to the mathematical
 model that `f32` approximates. This trade is explicit: Tier 1 properties become
 axiom-free at the cost of an informal `f32 ↔ ℝ` correspondence, which is the
-standard convention in ML formal verification. -/
-def RealVec (n : Nat) := Fin n → ℝ
+standard convention in ML formal verification.
+
+`abbrev` (not `def`) so unification automatically reduces `RealVec n` to
+`Fin n → ℝ` — needed for proofs that mix our vector type with TorchLean's
+tensor primitives. -/
+abbrev RealVec (n : Nat) := Fin n → ℝ
 
 /-- Dot product of two vectors. Uses `Finset.sum` so the standard algebraic
 lemmas (linearity, sum-over-single-coord) apply directly. -/
