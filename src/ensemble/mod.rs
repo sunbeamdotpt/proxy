@@ -7,6 +7,8 @@ pub mod crown;
 pub mod ddos;
 /// DDoS-specific CROWN certified radius wired to trained DDoS weights.
 pub mod ddos_crown;
+/// Empirical audit of DDoS monotonicity side conditions.
+pub mod ddos_monotonicity_audit;
 /// Gen.
 pub mod gen;
 /// Mlp.
