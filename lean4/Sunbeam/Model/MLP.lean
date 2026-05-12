@@ -12,14 +12,11 @@ namespace Sunbeam
 
 /-! # MLP forward pass
 
-The MLP forward is defined in scalar form (`matVecMul`/`dot`/`vecAdd`). This is
-the primary representation used by Tier 1-4 + Deployment proofs.
-
-The TorchLean view (`vecToTensor`, `matToTensor`, `toMLP2`) is provided alongside
-for CROWN bound-propagation integration in `Verify/CrownBound.lean`. The
-equivalence between the two representations is proven there, not here — keeping
-TorchLean's tensor machinery off the critical path for the domain-specific
-proofs (monotonicity-under-sign, Lipschitz, FP32 composition). -/
+`mlpForward` is defined in scalar form (`matVecMul` / `dot` / `vecAdd`) and is
+the representation used by Tier 1-4 + Deployment. The TorchLean view
+(`vecToTensor`, `matToTensor`, `toMLP2`) is provided alongside for the CROWN
+integration in `Verify/CrownBound.lean`; the bridge equation is proved there.
+Tensor machinery stays off the critical path for the domain-specific proofs. -/
 
 /-- Weights for a 2-layer MLP (input → hidden → scalar output).
 
@@ -48,11 +45,11 @@ theorem mlp_output_bounded {inputDim hiddenDim : Nat}
   · exact sigmoid_pos _
   · exact sigmoid_lt_one _
 
-/-! ## TorchLean views (for CROWN integration only)
+/-! ## TorchLean views (CROWN integration only)
 
-`abbrev` (not `def`) so unification reduces them automatically — needed for the
-`matVecMulSpec` ↔ `matVecMul` bridge proof in `Verify/CrownBound.lean`. These
-definitions are NOT used by Tier 1-4 + Deployment proofs. -/
+`abbrev` so unification reduces them automatically; this is what makes the
+`matVecMulSpec` ↔ `matVecMul` bridge in `CrownBound` tractable. These views
+are not referenced by Tier 1-4 + Deployment. -/
 
 /-- Lift a `RealVec` to a 1-D `Spec.Tensor`. -/
 abbrev vecToTensor {n : Nat} (v : RealVec n) : Spec.Tensor ℝ (.dim n .scalar) :=
@@ -68,8 +65,8 @@ abbrev tensorGet {n : Nat} (t : Spec.Tensor ℝ (.dim n .scalar)) (i : Fin n) : 
   match t with
   | Spec.Tensor.dim f => match f i with | Spec.Tensor.scalar a => a
 
-/-- View `MLPWeights` as a TorchLean `MLP2` with single-element output. Used
-only by `Verify/CrownBound.lean` to apply CROWN bound propagation. -/
+/-- View `MLPWeights` as a TorchLean `MLP2` with single-element output, so
+CROWN bound propagation can be applied. -/
 def toMLP2 {inputDim hiddenDim : Nat}
     (w : MLPWeights inputDim hiddenDim) :
     NN.MLTheory.CROWN.MLP2 ℝ inputDim hiddenDim 1 where
