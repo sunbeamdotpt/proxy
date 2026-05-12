@@ -1,6 +1,8 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
+/// CROWN-based certified adversarial robustness radius.
+pub mod crown;
 /// Ddos.
 pub mod ddos;
 /// Gen.
