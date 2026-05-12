@@ -15,16 +15,16 @@ namespace Sunbeam.Verify
 
 open Sunbeam
 
-/-! # CROWN bound integration — TorchLean ↔ scalar bridge
+/-! # CROWN bound integration: TorchLean ↔ scalar bridge
 
-This file is the *single* place where TorchLean's tensor representation meets
-our scalar `mlpForward`. We prove
+The bridge between our scalar `mlpForward` and TorchLean's tensor-typed
+`MLP2.forward`, plus the resulting CROWN soundness theorem at the ℝ surface.
 
-  `mlpForward w x = sigmoid (tensorGet (MLP2.forward (toMLP2 w) (vecToTensor x)) 0)`
-
-via coordinate-wise bridge lemmas composed with TorchLean's already-proven
-`Spec.toVec_mat_vec_mul_spec` (the foldl-to-Finset.sum bridge for
-`matVecMulSpec`). -/
+The bridge proof reduces to coordinate-wise lemmas about `addSpec`, `reluSpec`,
+and `linearSpec`, composed with TorchLean's `Spec.toVec_mat_vec_mul_spec` (the
+existing foldl-to-`Finset.sum` reduction for `matVecMulSpec`). TorchLean's
+tensor machinery only enters at this file — Tier 1-4 + Deployment operate on
+the scalar `mlpForward` directly. -/
 
 /-- `tensorGet` is TorchLean's `Spec.toVec` under another name. -/
 @[simp] lemma tensorGet_eq_toVec {n : Nat}
@@ -143,18 +143,12 @@ theorem mlpForward_eq_torchlean {inputDim hiddenDim : Nat}
       linearSpec_lifted_eq_vecToTensor]
   congr 1
 
-/-! ## CROWN soundness — certified output bounds on `mlpForward`
+/-! ## CROWN soundness
 
-Given a perturbation box `xB` around an input and a witness `Box.contains xB x`,
 TorchLean's `bound_affine_sound` produces an interval bound on the pre-sigmoid
-tensor output. Composing with `mlpForward_eq_torchlean` and sigmoid monotonicity
-gives a scalar interval bound on `mlpForward w x` itself.
-
-This is the foundational lemma for per-input certified adversarial robustness:
-if both the lower and upper sigmoid bounds fall on the same side of the
-decision threshold (0.5), the verdict is provably stable across the entire
-perturbation box.  Verdict stability and certified radii live in
-`CertifiedRadius.lean` (task A3). -/
+tensor output for a 2-layer MLP. Composing with `mlpForward_eq_torchlean` and
+sigmoid monotonicity gives a scalar interval bound on `mlpForward w x`.
+Verdict-stability theorems built on this are in `CertifiedRadius`. -/
 
 /-- Extract scalar `≤` bounds from a `Box.contains` predicate at output
 shape `.dim 1 .scalar`, expressed via our `tensorGet` projection. -/
@@ -182,11 +176,9 @@ private lemma box_contains_dim1_extract
               simp only [tensorGet, hlo, hhi, htf]
               exact h0
 
-/-- **CROWN soundness for `mlpForward`** (per-input certified output interval).
-
-Given a perturbation box `xB` around the input and a witness that the input
-lies in the box, the model output `mlpForward w x` is bounded by the sigmoid
-of the affine-CROWN pre-sigmoid bounds. -/
+/-- CROWN soundness on `mlpForward`: if `x` lies in box `xB`, then
+`mlpForward w x` lies in `[sigmoid(lo), sigmoid(hi)]` for the affine-CROWN
+pre-sigmoid coordinates of `boundAffine (toMLP2 w) xB`. -/
 theorem mlpForward_crown_bound {inputDim hiddenDim : Nat}
     (w : MLPWeights inputDim hiddenDim) (x : RealVec inputDim)
     (xB : NN.MLTheory.CROWN.Box ℝ (.dim inputDim .scalar))
@@ -199,13 +191,10 @@ theorem mlpForward_crown_bound {inputDim hiddenDim : Nat}
       ≤ sigmoid (tensorGet
           (NN.MLTheory.CROWN.boundAffine (toMLP2 w) xB).hi
           ⟨0, Nat.zero_lt_succ 0⟩) := by
-  -- TorchLean's affine bound is sound on the pre-sigmoid tensor.
   have hsound :=
     NN.MLTheory.CROWN.Theorems.bound_affine_sound
       (net := toMLP2 w) (xB := xB) (x := vecToTensor x) hx
-  -- Extract the scalar bounds at output coordinate 0.
   have hbounds := box_contains_dim1_extract _ _ _ hsound
-  -- Bridge to the scalar mlpForward and apply sigmoid monotonicity.
   rw [mlpForward_eq_torchlean]
   exact ⟨sigmoid_monotone hbounds.1, sigmoid_monotone hbounds.2⟩
 

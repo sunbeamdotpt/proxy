@@ -3,36 +3,24 @@ import NN.Floats.NeuralFloat.NNOps
 import Sunbeam.Model.Basic
 
 /-!
-# Sunbeam MLP and ensemble — IEEE-754 binary32 surface
+# Sunbeam MLP, IEEE-754 binary32 surface
 
-Defines the ensemble's operations using TorchLean's `FP32` (proof-oriented
-"round-to-grid after every real-valued op") rather than `ℝ`.
+`FP32` is TorchLean's `NF binaryRadix fexp32 rnd32`: a real value constrained
+to the binary32 grid, with arithmetic semantically defined as "compute in ℝ,
+then round" using round-to-nearest-even.
 
-`FP32` (from `TorchLean.Floats.FP32`) is `NF binaryRadix fexp32 rnd32`. It wraps
-a real-valued `.val` that lives on the IEEE-754 binary32 grid; arithmetic is
-"compute in ℝ, then round". The rounding mode `rnd32` is round-to-nearest-even.
+Definitions only. The theorems are in:
 
-This module mirrors `Sunbeam.Model.MLP`, `Sunbeam.Model.ReLU`, `Sunbeam.Model.Sigmoid`,
-`Sunbeam.Model.DecisionTree`, `Sunbeam.Model.Ensemble` — but on `FP32` instead of `ℝ`.
-It is the type-level surface used by the FP32 proof files.
+- `Sunbeam.Verify.F32ErrorBounds` — per-op half-ULP rounding bounds plus the
+  cumulative forward-error bound `mlpForwardF32_error_bound` (Tier 4).
+- `Sunbeam.Verify.Deployment` — composes the FP32 error bound with the ℝ-side
+  Lipschitz bound (Tier 3) for the deployment-soundness theorem.
+- `Sunbeam.Verify.F32CrownBound` — composes the FP32 error bound with CROWN
+  for the FP32-side verdict-stability theorem (Phase A).
 
-## Where the theorems live
-
-This file contains definitions only — types, operations, and conversions.
-Theorems about these operations are in:
-
-- `Sunbeam.Verify.F32ErrorBounds` — per-op half-ULP rounding bounds and the
-  cumulative `mlpForwardF32_error_bound` (Tier 4 forward-error analysis).
-- `Sunbeam.Verify.Deployment` — combines the FP32 error bound with the ℝ-side
-  Lipschitz bound into a deployment-soundness theorem.
-
-The proof stack does not directly re-prove Tier 1 / Tier 2 on FP32 (that would
-require a `roundR_mono` lemma not exposed by TorchLean). It bounds the
-FP32-vs-ℝ gap via `neural_error_bound_ulp` and propagates the gap through
-the Lipschitz constants from `Sunbeam.Verify.Lipschitz`.
-
-Trust-base-neutral: no `axiom`, no `opaque`.
--/
+Tier 1 / Tier 2 are not re-proved on `FP32`; instead the FP32-vs-ℝ gap is
+bounded via TorchLean's `neural_error_bound_ulp` and propagated through the
+Lipschitz constants. -/
 
 namespace Sunbeam.F32
 

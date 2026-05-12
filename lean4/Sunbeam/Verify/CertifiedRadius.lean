@@ -13,27 +13,12 @@ open Sunbeam
 
 /-! # Certified per-input adversarial robustness radius
 
-A **certified radius** for an input `x` is a value `ε` such that the model's
-verdict is provably stable across the entire L∞ ε-ball around `x`. This is the
-strongest formal guarantee available for adversarial robustness: not just
-empirical robustness on a test set, but a proof that *no* perturbation within
-the certified radius can flip the verdict.
+A certified radius for input `x` is an `ε` such that every `x'` with
+`‖x' - x‖∞ ≤ ε` yields the same verdict (above or below the threshold). The
+runtime binary-searches for the largest such `ε`; the theorems here establish
+soundness for any specific `ε` that satisfies the bound condition.
 
-The radius is per-input: inputs deep in their decision region certify with
-large radii; inputs near a decision boundary certify with small radii (or none).
-
-The runtime computes the largest ε satisfying these conditions via binary
-search; the theorems here guarantee soundness for any such ε.
-
-## API
-
-- `epsBox`                       — L∞ ε-box around an input point
-- `epsBox_contains_self`         — center is in its own ε-box (for `ε ≥ 0`)
-- `epsBox_contains_of_linf_le`   — any L∞-close point lies in the ε-box
-- `verdict_stable_block`         — block verdict stable when CROWN lower-bound
-                                   sigmoid exceeds the threshold
-- `verdict_stable_allow`         — allow verdict stable when CROWN upper-bound
-                                   sigmoid is below the threshold -/
+Stated over ℝ. The FP32 composition is in `F32CrownBound`. -/
 
 /-- L∞ ε-box around input vector `x`. The box is `[x - ε, x + ε]` per coordinate. -/
 def epsBox {n : Nat} (x : RealVec n) (ε : ℝ) :
@@ -59,13 +44,9 @@ lemma epsBox_contains_of_linf_le {n : Nat} (x x' : RealVec n) (ε : ℝ)
   rw [abs_le] at hi
   exact ⟨by linarith, by linarith⟩
 
-/-- **Verdict stability under block** — if the CROWN-certified lower bound on
-the sigmoid output exceeds the threshold, the model emits a probability above
-the threshold for every input in the ε-ball, not just the center.
-
-This is the formal statement of "certified block within radius ε": no
-adversarial perturbation up to L∞ radius ε can flip the verdict away from
-block. -/
+/-- Verdict stability (block side): if the CROWN lower bound on the sigmoid
+output exceeds `threshold`, then every `x' ∈ epsBox x ε` satisfies
+`threshold < mlpForward w x'`. -/
 theorem verdict_stable_block {inputDim hiddenDim : Nat}
     (w : MLPWeights inputDim hiddenDim) (x : RealVec inputDim) (ε threshold : ℝ)
     (hbound : threshold < sigmoid (tensorGet
@@ -78,13 +59,9 @@ theorem verdict_stable_block {inputDim hiddenDim : Nat}
   have ⟨h1, _⟩ := mlpForward_crown_bound w x' (epsBox x ε) hx'
   linarith
 
-/-- **Verdict stability under allow** — if the CROWN-certified upper bound on
-the sigmoid output is below the threshold, the model emits a probability below
-the threshold for every input in the ε-ball, not just the center.
-
-This is the formal statement of "certified allow within radius ε": no
-adversarial perturbation up to L∞ radius ε can flip the verdict away from
-allow. -/
+/-- Verdict stability (allow side): if the CROWN upper bound on the sigmoid
+output is below `threshold`, then every `x' ∈ epsBox x ε` satisfies
+`mlpForward w x' < threshold`. -/
 theorem verdict_stable_allow {inputDim hiddenDim : Nat}
     (w : MLPWeights inputDim hiddenDim) (x : RealVec inputDim) (ε threshold : ℝ)
     (hbound : sigmoid (tensorGet
