@@ -5,7 +5,3 @@ import Sunbeam.Model.MLP
 import Sunbeam.Model.DecisionTree
 import Sunbeam.Model.Ensemble
 import Sunbeam.Verify.Structural
-import Sunbeam.Verify.Monotonicity
-import Sunbeam.Verify.Lipschitz
-import Sunbeam.Verify.F32ErrorBounds
-import Sunbeam.Verify.Deployment
