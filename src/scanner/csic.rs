@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 const REPO_BASE: &str =
-    "https://src.sunbeam.pt/studio/csic-dataset/raw/branch/mainline";
+    "https://raw.githubusercontent.com/sunbeamdotpt/csic-dataset/main";
 
 const FILES: &[(&str, &str)] = &[
     ("normalTrafficTraining.txt", "normal"),
