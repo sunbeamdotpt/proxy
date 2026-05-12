@@ -112,6 +112,9 @@ enum Commands {
         /// Default: has_cookies/has_referer/has_accept_language/accept_quality (3,4,5,6).
         #[arg(long, value_delimiter = ',', default_value = "3,4,5,6")]
         tree_excluded_features: Vec<usize>,
+        /// Tier 2 sign-constraint penalty coefficient (0.0 disables).
+        #[arg(long, default_value = "0.0")]
+        sign_constraint_lambda: f32,
     },
     #[cfg(feature = "training")]
     /// Train DDoS ensemble (decision tree + MLP) from prepared dataset
@@ -143,6 +146,9 @@ enum Commands {
         /// Default: cookie/referer/accept-language ratios (10,11,12).
         #[arg(long, value_delimiter = ',', default_value = "10,11,12")]
         tree_excluded_features: Vec<usize>,
+        /// Tier 2 sign-constraint penalty coefficient (0.0 disables).
+        #[arg(long, default_value = "0.0")]
+        sign_constraint_lambda: f32,
     },
     #[cfg(feature = "training")]
     /// Sweep cookie_weight values and report tree structure + validation accuracy for each
@@ -187,15 +193,15 @@ fn main() -> Result<()> {
             })
         },
         #[cfg(feature = "training")]
-        Commands::TrainMlpScanner { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features } => {
+        Commands::TrainMlpScanner { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda } => {
             sunbeam_proxy::training::train_scanner::run(sunbeam_proxy::training::train_scanner::TrainScannerMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features,
+                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda,
             })
         },
         #[cfg(feature = "training")]
-        Commands::TrainMlpDdos { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features } => {
+        Commands::TrainMlpDdos { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda } => {
             sunbeam_proxy::training::train_ddos::run(sunbeam_proxy::training::train_ddos::TrainDdosMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features,
+                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight, tree_excluded_features, sign_constraint_lambda,
             })
         },
         #[cfg(feature = "training")]
