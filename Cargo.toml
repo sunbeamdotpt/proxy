@@ -114,6 +114,10 @@ harness = false
 name = "ddos_bench"
 harness = false
 
+[[bench]]
+name = "crown_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto       = true
