@@ -88,8 +88,6 @@ impl ScannerDetector {
         let ev = crate::ensemble::scanner::scanner_ensemble_predict(&raw_f32);
         crate::metrics::SCANNER_ENSEMBLE_PATH
             .with_label_values(&[match ev.path {
-                crate::ensemble::scanner::EnsemblePath::TreeBlock => "tree_block",
-                crate::ensemble::scanner::EnsemblePath::TreeAllow => "tree_allow",
                 crate::ensemble::scanner::EnsemblePath::Mlp => "mlp",
             }])
             .inc();
