@@ -115,91 +115,186 @@ fn generate_ddos_attack_features(profiles: &[TimingProfile], rng: &mut StdRng) -
         (iat, burst, bps)
     };
 
-    // 0: request_rate — high for attacks.
-    features[0] = if iat_mean > 0.0 {
+    // Each feature follows an 80% "typical attack" / 20% "stealthy adversary"
+    // pattern. The stealthy minority overlaps the legitimate-user range,
+    // preventing trivial single-feature separation.
+    let stealthy = rng.random_bool(0.2);
+
+    // 0: request_rate — most attacks are high-rate, stealthy minority is slow-and-low.
+    features[0] = if stealthy {
+        rng.random_range(0.5..30.0) as f32
+    } else if iat_mean > 0.0 {
         (1.0 / iat_mean).min(1000.0) as f32
     } else {
         rng.random_range(50.0..500.0) as f32
     };
 
-    // 1: unique_paths — low to moderate (attackers repeat paths).
-    features[1] = rng.random_range(1.0..10.0) as f32;
+    // 1: unique_paths — repeat-heavy bots vs scanning bots.
+    features[1] = if stealthy {
+        rng.random_range(5.0..40.0) as f32
+    } else {
+        rng.random_range(1.0..10.0) as f32
+    };
 
-    // 2: unique_hosts — typically 1 for DDoS.
-    features[2] = rng.random_range(1.0..3.0) as f32;
+    // 2: unique_hosts — typically 1 for DDoS, stealthy attackers spread across vhosts.
+    features[2] = rng.random_range(1.0..6.0) as f32;
 
-    // 3: error_rate — moderate to high.
-    features[3] = rng.random_range(0.3..0.9) as f32;
+    // 3: error_rate — most attacks miss a lot, stealthy ones target real endpoints.
+    features[3] = if stealthy {
+        rng.random_range(0.0..0.3) as f32
+    } else {
+        rng.random_range(0.2..0.9) as f32
+    };
 
-    // 4: avg_duration_ms — derived from burst duration.
-    features[4] = (burst_mean * 100.0).max(1.0).min(5000.0) as f32;
+    // 4: avg_duration_ms — derived from burst duration; clamp into a realistic band.
+    features[4] = (burst_mean * 100.0).clamp(1.0, 5000.0) as f32;
 
-    // 5: method_entropy — low (mostly GET).
-    features[5] = rng.random_range(0.0..0.3) as f32;
+    // 5: method_entropy — most attacks are GET-only, stealthy attackers mix verbs.
+    features[5] = if stealthy {
+        rng.random_range(0.2..1.2) as f32
+    } else {
+        rng.random_range(0.0..0.4) as f32
+    };
 
-    // 6: burst_score — high (inverse of inter-arrival).
-    features[6] = if iat_mean > 0.0 {
+    // 6: burst_score — typical attacks are bursty, stealthy ones are paced.
+    features[6] = if stealthy {
+        rng.random_range(0.5..15.0) as f32
+    } else if iat_mean > 0.0 {
         (1.0 / iat_mean).min(500.0) as f32
     } else {
         rng.random_range(10.0..200.0) as f32
     };
 
-    // 7: path_repetition — high (attackers repeat same paths).
-    features[7] = rng.random_range(0.6..1.0) as f32;
+    // 7: path_repetition — typical attacks hammer a path; stealthy ones distribute.
+    features[7] = if stealthy {
+        rng.random_range(0.1..0.6) as f32
+    } else {
+        rng.random_range(0.5..1.0) as f32
+    };
 
-    // 8: avg_content_length — derived from flow bytes.
-    features[8] = (bps_mean * 0.01).max(0.0).min(10000.0) as f32;
+    // 8: avg_content_length — derived from flow bytes (no overlap shaping; signal lives in tails).
+    features[8] = (bps_mean * 0.01).clamp(0.0, 10000.0) as f32;
 
-    // 9: unique_user_agents — low (1-2 UAs).
-    features[9] = rng.random_range(1.0..3.0) as f32;
+    // 9: unique_user_agents — typical bots use 1-2 UAs, advanced bots rotate.
+    features[9] = if stealthy {
+        rng.random_range(3.0..8.0) as f32
+    } else {
+        rng.random_range(1.0..3.0) as f32
+    };
 
-    // 10: cookie_ratio — very low (bots don't send cookies).
-    features[10] = rng.random_range(0.0..0.1) as f32;
+    // 10: cookie_ratio — typical bots send no cookies; stealthy adversaries replay sessions.
+    features[10] = if stealthy {
+        rng.random_range(0.3..0.9) as f32
+    } else {
+        rng.random_range(0.0..0.3) as f32
+    };
 
-    // 11: referer_ratio — very low.
-    features[11] = rng.random_range(0.0..0.1) as f32;
+    // 11: referer_ratio — typical bots send no referer; stealthy ones forge headers.
+    features[11] = if stealthy {
+        rng.random_range(0.2..0.8) as f32
+    } else {
+        rng.random_range(0.0..0.2) as f32
+    };
 
-    // 12: accept_language_ratio — very low.
-    features[12] = rng.random_range(0.0..0.1) as f32;
+    // 12: accept_language_ratio — typical bots omit; stealthy ones send realistic headers.
+    features[12] = if stealthy {
+        rng.random_range(0.3..0.9) as f32
+    } else {
+        rng.random_range(0.0..0.2) as f32
+    };
 
-    // 13: suspicious_path_ratio — moderate to high.
-    features[13] = rng.random_range(0.1..0.7) as f32;
+    // 13: suspicious_path_ratio — typical attacks hit known-bad paths; stealthy ones probe legit endpoints.
+    features[13] = if stealthy {
+        rng.random_range(0.0..0.2) as f32
+    } else {
+        rng.random_range(0.1..0.7) as f32
+    };
 
     features
 }
 
 /// Generate a single DDoS normal feature vector.
+///
+/// 80% "typical browser user" / 20% "unusual but legitimate": privacy-mode
+/// users, fresh-visit users without cookies, mobile-app traffic, API clients,
+/// genuine flash-crowd bursts. The unusual minority overlaps the attack
+/// range, preventing single-feature separation.
 fn generate_ddos_normal_features(rng: &mut StdRng) -> Vec<f32> {
     let mut features = vec![0.0f32; NUM_FEATURES];
+    let unusual = rng.random_bool(0.2);
 
-    // 0: request_rate — moderate.
-    features[0] = rng.random_range(0.1..5.0) as f32;
-    // 1: unique_paths — moderate.
-    features[1] = rng.random_range(3.0..30.0) as f32;
-    // 2: unique_hosts — typically 1-3.
-    features[2] = rng.random_range(1.0..5.0) as f32;
-    // 3: error_rate — low.
-    features[3] = rng.random_range(0.0..0.15) as f32;
+    // 0: request_rate — typical browsing is light; legitimate bursts (flash crowd, API client) reach attack-range.
+    features[0] = if unusual {
+        rng.random_range(3.0..60.0) as f32
+    } else {
+        rng.random_range(0.1..5.0) as f32
+    };
+    // 1: unique_paths — typical moderate; unusual narrow (single-page app, repeat polling).
+    features[1] = if unusual {
+        rng.random_range(1.0..8.0) as f32
+    } else {
+        rng.random_range(3.0..30.0) as f32
+    };
+    // 2: unique_hosts — typical 1-5; can be 1 for single-host sites.
+    features[2] = rng.random_range(1.0..6.0) as f32;
+    // 3: error_rate — typical low; some real users hit 404/500 from broken links.
+    features[3] = if unusual {
+        rng.random_range(0.1..0.4) as f32
+    } else {
+        rng.random_range(0.0..0.15) as f32
+    };
     // 4: avg_duration_ms — reasonable.
     features[4] = rng.random_range(10.0..500.0) as f32;
-    // 5: method_entropy — moderate (mix of GET/POST).
-    features[5] = rng.random_range(0.0..1.5) as f32;
-    // 6: burst_score — low.
-    features[6] = rng.random_range(0.05..2.0) as f32;
-    // 7: path_repetition — low to moderate.
-    features[7] = rng.random_range(0.05..0.5) as f32;
+    // 5: method_entropy — typical moderate; mobile apps often GET-only (entropy ≈ 0).
+    features[5] = if unusual {
+        rng.random_range(0.0..0.3) as f32
+    } else {
+        rng.random_range(0.2..1.5) as f32
+    };
+    // 6: burst_score — typical low; flash crowds genuinely burst.
+    features[6] = if unusual {
+        rng.random_range(2.0..15.0) as f32
+    } else {
+        rng.random_range(0.05..2.0) as f32
+    };
+    // 7: path_repetition — typical low; polling clients hammer one endpoint.
+    features[7] = if unusual {
+        rng.random_range(0.5..0.95) as f32
+    } else {
+        rng.random_range(0.05..0.5) as f32
+    };
     // 8: avg_content_length — reasonable.
     features[8] = rng.random_range(0.0..2000.0) as f32;
-    // 9: unique_user_agents — 1-3 (real users have few UAs).
-    features[9] = rng.random_range(1.0..4.0) as f32;
-    // 10: cookie_ratio — high (real users have cookies).
-    features[10] = rng.random_range(0.7..1.0) as f32;
-    // 11: referer_ratio — moderate to high.
-    features[11] = rng.random_range(0.4..1.0) as f32;
-    // 12: accept_language_ratio — high.
-    features[12] = rng.random_range(0.7..1.0) as f32;
-    // 13: suspicious_path_ratio — very low.
-    features[13] = rng.random_range(0.0..0.05) as f32;
+    // 9: unique_user_agents — typical 1-3; some legitimate proxy fleets rotate UAs.
+    features[9] = if unusual {
+        rng.random_range(3.0..8.0) as f32
+    } else {
+        rng.random_range(1.0..4.0) as f32
+    };
+    // 10: cookie_ratio — typical high; privacy-mode / fresh-visit users have none.
+    features[10] = if unusual {
+        rng.random_range(0.0..0.4) as f32
+    } else {
+        rng.random_range(0.5..1.0) as f32
+    };
+    // 11: referer_ratio — typical moderate-high; direct-navigation users have none.
+    features[11] = if unusual {
+        rng.random_range(0.0..0.3) as f32
+    } else {
+        rng.random_range(0.3..1.0) as f32
+    };
+    // 12: accept_language_ratio — typical high; some API clients omit.
+    features[12] = if unusual {
+        rng.random_range(0.0..0.4) as f32
+    } else {
+        rng.random_range(0.5..1.0) as f32
+    };
+    // 13: suspicious_path_ratio — typical near-zero; misconfigured pages can trigger false positives.
+    features[13] = if unusual {
+        rng.random_range(0.0..0.25) as f32
+    } else {
+        rng.random_range(0.0..0.05) as f32
+    };
 
     features
 }
@@ -328,21 +423,27 @@ fn generate_scanner_attack_features_from_path(path: &str, rng: &mut StdRng) -> V
         0.0
     };
 
-    // 3: has_cookies — scanners typically don't.
-    features[3] = if rng.random_bool(0.05) { 1.0 } else { 0.0 };
+    // 15% of scanner attacks mimic browser-like headers (stealthy scanners,
+    // headless-chrome / Selenium-based crawlers, captcha-solver bots).
+    let stealthy = rng.random_bool(0.15);
 
-    // 4: has_referer — scanners rarely send referer.
-    features[4] = if rng.random_bool(0.05) { 1.0 } else { 0.0 };
+    // 3: has_cookies — typical scanners don't; stealthy ones replay sessions.
+    features[3] = if stealthy { 1.0 } else if rng.random_bool(0.05) { 1.0 } else { 0.0 };
 
-    // 5: has_accept_language — scanners rarely send this.
-    features[5] = if rng.random_bool(0.1) { 1.0 } else { 0.0 };
+    // 4: has_referer — typical scanners no referer; stealthy ones forge it.
+    features[4] = if stealthy { 1.0 } else if rng.random_bool(0.05) { 1.0 } else { 0.0 };
 
-    // 6: accept_quality — scanners use */* or empty.
-    features[6] = 0.0;
+    // 5: has_accept_language — typical scanners omit; stealthy ones send it.
+    features[5] = if stealthy { 1.0 } else if rng.random_bool(0.1) { 1.0 } else { 0.0 };
 
-    // 7: ua_category — mix of curl/empty/bot UAs.
+    // 6: accept_quality — typical 0 (*/* or empty); stealthy 1 (browser-like).
+    features[6] = if stealthy { 1.0 } else { 0.0 };
+
+    // 7: ua_category — typical bot UAs; stealthy ones spoof browser.
     let ua_roll: f64 = rng.random();
-    features[7] = if ua_roll < 0.3 {
+    features[7] = if stealthy {
+        1.0 // browser-like UA
+    } else if ua_roll < 0.3 {
         0.0 // empty
     } else if ua_roll < 0.6 {
         0.25 // curl/wget
@@ -350,16 +451,17 @@ fn generate_scanner_attack_features_from_path(path: &str, rng: &mut StdRng) -> V
         0.5 // random bot
     };
 
-    // 8: method_is_unusual — mostly GET.
-    features[8] = if rng.random_bool(0.05) { 1.0 } else { 0.0 };
+    // 8: method_is_unusual — mostly GET; advanced scanners try DELETE/PATCH probes.
+    features[8] = if stealthy && rng.random_bool(0.3) { 1.0 }
+                  else if rng.random_bool(0.05) { 1.0 } else { 0.0 };
 
-    // 9: host_is_configured — often unknown host.
-    features[9] = if rng.random_bool(0.2) { 1.0 } else { 0.0 };
+    // 9: host_is_configured — typical scanners hit unknown host; some target known ones.
+    features[9] = if stealthy { 1.0 } else if rng.random_bool(0.2) { 1.0 } else { 0.0 };
 
-    // 10: content_length_mismatch.
+    // 10: content_length_mismatch — keep low; scanners rarely abuse content-length.
     features[10] = if rng.random_bool(0.1) { 1.0 } else { 0.0 };
 
-    // 11: path_has_traversal.
+    // 11: path_has_traversal — derived from the actual path.
     let traversal_patterns = ["..", "%00", "%0a", "%27", "%3c"];
     features[11] = if traversal_patterns.iter().any(|p| lower.contains(p)) {
         1.0
@@ -371,41 +473,54 @@ fn generate_scanner_attack_features_from_path(path: &str, rng: &mut StdRng) -> V
 }
 
 /// Generate scanner attack features without a specific path (built-in defaults).
+/// 15% stealthy minority mimics browser-like header signatures, overlapping
+/// the legitimate-traffic distribution.
 fn generate_scanner_attack_features(rng: &mut StdRng) -> Vec<f32> {
     let mut features = vec![0.0f32; NUM_SCANNER_FEATURES];
+    let stealthy = rng.random_bool(0.15);
 
-    features[0] = rng.random_range(0.3..1.0) as f32; // suspicious_path_score
-    features[1] = rng.random_range(2.0..8.0) as f32;  // path_depth
-    features[2] = if rng.random_bool(0.6) { 1.0 } else { 0.0 }; // suspicious_ext
-    features[3] = if rng.random_bool(0.05) { 1.0 } else { 0.0 }; // cookies
-    features[4] = if rng.random_bool(0.05) { 1.0 } else { 0.0 }; // referer
-    features[5] = if rng.random_bool(0.1) { 1.0 } else { 0.0 }; // accept_language
-    features[6] = 0.0; // accept_quality
-    features[7] = rng.random_range(0.0..0.5) as f32; // ua_category
-    features[8] = if rng.random_bool(0.1) { 1.0 } else { 0.0 }; // unusual method
-    features[9] = if rng.random_bool(0.2) { 1.0 } else { 0.0 }; // host_configured
-    features[10] = if rng.random_bool(0.1) { 1.0 } else { 0.0 }; // content_len mismatch
-    features[11] = if rng.random_bool(0.15) { 1.0 } else { 0.0 }; // traversal
+    // Typical attacks score high on suspicious_path; stealthy ones target legit-looking paths.
+    features[0] = if stealthy {
+        rng.random_range(0.0..0.3) as f32
+    } else {
+        rng.random_range(0.3..1.0) as f32
+    };
+    features[1] = rng.random_range(2.0..8.0) as f32;
+    features[2] = if stealthy { 0.0 } else if rng.random_bool(0.6) { 1.0 } else { 0.0 };
+    features[3] = if stealthy { 1.0 } else if rng.random_bool(0.05) { 1.0 } else { 0.0 };
+    features[4] = if stealthy { 1.0 } else if rng.random_bool(0.05) { 1.0 } else { 0.0 };
+    features[5] = if stealthy { 1.0 } else if rng.random_bool(0.1) { 1.0 } else { 0.0 };
+    features[6] = if stealthy { 1.0 } else { 0.0 };
+    features[7] = if stealthy { 1.0 } else { rng.random_range(0.0..0.5) as f32 };
+    features[8] = if rng.random_bool(0.1) { 1.0 } else { 0.0 };
+    features[9] = if stealthy { 1.0 } else if rng.random_bool(0.2) { 1.0 } else { 0.0 };
+    features[10] = if rng.random_bool(0.1) { 1.0 } else { 0.0 };
+    features[11] = if rng.random_bool(0.15) { 1.0 } else { 0.0 };
 
     features
 }
 
 /// Generate normal scanner features (browser-like).
+/// 10% unusual minority: mobile apps, API clients, dev tools, captive
+/// portals, or genuinely-misconfigured users whose headers look bot-ish.
 fn generate_scanner_normal_features(rng: &mut StdRng) -> Vec<f32> {
     let mut features = vec![0.0f32; NUM_SCANNER_FEATURES];
+    let unusual = rng.random_bool(0.1);
 
-    features[0] = 0.0; // suspicious_path_score — clean path
-    features[1] = rng.random_range(1.0..4.0) as f32; // path_depth — moderate
-    features[2] = 0.0; // no suspicious extension
-    features[3] = if rng.random_bool(0.85) { 1.0 } else { 0.0 }; // has_cookies — usually yes
-    features[4] = if rng.random_bool(0.7) { 1.0 } else { 0.0 }; // has_referer — often
-    features[5] = if rng.random_bool(0.9) { 1.0 } else { 0.0 }; // has_accept_language
-    features[6] = 1.0; // accept_quality — browsers send proper accept
-    features[7] = 1.0; // ua_category — browser UA
-    features[8] = 0.0; // method_is_unusual — GET/POST
-    features[9] = if rng.random_bool(0.95) { 1.0 } else { 0.0 }; // host_is_configured
-    features[10] = 0.0; // no content_length_mismatch
-    features[11] = 0.0; // no traversal
+    // Most normal traffic hits clean paths; some legit requests hit paths
+    // that incidentally match a suspicious fragment (e.g. /admin pages).
+    features[0] = if unusual { rng.random_range(0.0..0.3) as f32 } else { 0.0 };
+    features[1] = rng.random_range(1.0..4.0) as f32;
+    features[2] = 0.0;
+    features[3] = if unusual { 0.0 } else if rng.random_bool(0.85) { 1.0 } else { 0.0 };
+    features[4] = if unusual { 0.0 } else if rng.random_bool(0.7) { 1.0 } else { 0.0 };
+    features[5] = if unusual { 0.0 } else if rng.random_bool(0.9) { 1.0 } else { 0.0 };
+    features[6] = if unusual { 0.0 } else { 1.0 };
+    features[7] = if unusual { rng.random_range(0.0..0.5) as f32 } else { 1.0 };
+    features[8] = 0.0;
+    features[9] = if rng.random_bool(0.95) { 1.0 } else { 0.0 };
+    features[10] = 0.0;
+    features[11] = 0.0;
 
     features
 }
