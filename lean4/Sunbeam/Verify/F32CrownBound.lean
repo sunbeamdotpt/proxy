@@ -13,15 +13,27 @@ Composes `mlpForwardF32_error_bound` (Tier 4) with `mlpForward_crown_bound`
 (Phase A2) to widen the ℝ-side certified interval by the FP32 forward error,
 lifting the bound onto the deployment surface.
 
-Scope: stated at a specific FP32 input, not uniformly across the box. Lifting
-to all `x' ∈ box` requires a uniform upper bound on `mlpF32Error w x'` over
-the box.
+## Runtime soundness on IEEE-754 hardware
 
-A separate concern: the Rust runtime computes IBP itself in `f32` arithmetic,
-adding rounding error that `mlpF32Error` does not capture (it bounds only the
-forward pass). Closing that needs soundness for `boundIbpFloat` from
-TorchLean's `Extras/FloatIntegration` (no upstream theorem yet) or
-outward-rounded IBP in the runtime. -/
+The Rust runtime (`src/ensemble/crown.rs`) computes IBP in outward-rounded f32:
+each FP multiply and add applies `next_down` to the accumulating lower bound
+and `next_up` to the upper bound. IEEE-754 round-to-nearest introduces at most
+0.5 ULP error per op, so the 1-ULP outward shift guarantees the computed f32
+interval is a sound over-approximation of the ℝ-IBP interval. The runtime
+analog of this theorem's hypothesis (`threshold + mlpF32Error w x < sigmoid …`)
+is therefore strictly more conservative than what's stated here — if the
+runtime certifies a radius, the Lean hypothesis holds with margin.
+
+The sigmoid evaluation in the runtime applies an 8-ULP slack via
+`sigmoid_down`/`sigmoid_up` to absorb libm `expf` imprecision (typically ≤ 1
+ULP per chained op; 8 is a margin).
+
+## Scope
+
+Stated at a specific FP32 input, not uniformly across the box. Lifting to all
+`x' ∈ box` requires a uniform upper bound on `mlpF32Error w x'` over the box.
+The runtime-side outward rounding addresses the FP32 IBP arithmetic gap but
+does not by itself give the uniform-over-box statement. -/
 
 /-- FP32 CROWN bound at a specific input: when `vecToReal x ∈ xB`, the FP32
 forward output lies in the ℝ-side certified interval widened by
