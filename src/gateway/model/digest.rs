@@ -3,6 +3,7 @@
 
 //! Stable canonical digest of a [`ReconciledView`].
 
+use super::routing::HTTPRouteState;
 use super::view::{
     GatewayState, GrantSubject, ListenerState, ParentRef, ReferenceGrantState, ReconciledView,
     RouteState,
@@ -51,6 +52,18 @@ fn encode_view(buf: &mut Vec<u8>, view: &ReconciledView) {
         encode_route(buf, r);
     }
 
+    // HTTP routes — sorted by (namespace, name).
+    let mut http_routes = view.http_routes.clone();
+    http_routes.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    encode_u32(buf, http_routes.len() as u32);
+    for r in &http_routes {
+        encode_http_route(buf, r);
+    }
+
     // ReferenceGrants — sorted by (namespace, name).
     let mut grants = view.reference_grants.clone();
     grants.sort_by(|a, b| {
@@ -88,6 +101,54 @@ fn encode_route(buf: &mut Vec<u8>, r: &RouteState) {
     encode_str(buf, &r.name);
     encode_str(buf, &r.kind);
     encode_i64(buf, r.generation);
+
+    let mut refs = r.parent_refs.clone();
+    refs.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.section_name.cmp(&b.section_name))
+    });
+    encode_u32(buf, refs.len() as u32);
+    for p in &refs {
+        encode_parent_ref(buf, p);
+    }
+}
+
+fn encode_http_route(buf: &mut Vec<u8>, r: &HTTPRouteState) {
+    encode_str(buf, &r.namespace);
+    encode_str(buf, &r.name);
+    encode_i64(buf, r.generation);
+
+    let mut hostnames = r.hostnames.clone();
+    hostnames.sort_by(|a, b| {
+        use super::routing::HostnameMatch;
+        match (a, b) {
+            (HostnameMatch::Exact(a), HostnameMatch::Exact(b)) => a.cmp(b),
+            (HostnameMatch::Exact(_), _) => std::cmp::Ordering::Less,
+            (HostnameMatch::Wildcard(a), HostnameMatch::Wildcard(b)) => a.cmp(b),
+            (HostnameMatch::Wildcard(_), HostnameMatch::Exact(_)) => std::cmp::Ordering::Greater,
+            (HostnameMatch::Wildcard(_), HostnameMatch::Any) => std::cmp::Ordering::Less,
+            (HostnameMatch::Any, HostnameMatch::Any) => std::cmp::Ordering::Equal,
+            (HostnameMatch::Any, _) => std::cmp::Ordering::Greater,
+        }
+    });
+    encode_u32(buf, hostnames.len() as u32);
+    for h in &hostnames {
+        match h {
+            super::routing::HostnameMatch::Exact(s) => {
+                buf.push(0x00);
+                encode_str(buf, s);
+            }
+            super::routing::HostnameMatch::Wildcard(s) => {
+                buf.push(0x01);
+                encode_str(buf, s);
+            }
+            super::routing::HostnameMatch::Any => {
+                buf.push(0x02);
+            }
+        }
+    }
 
     let mut refs = r.parent_refs.clone();
     refs.sort_by(|a, b| {
@@ -222,6 +283,7 @@ mod tests {
                     section_name: Some(arc("http")),
                 }],
             }],
+            http_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
                 namespace: arc("default"),
                 name: arc("grant-1"),
