@@ -428,7 +428,9 @@ fn extract_weights(
     _device: &<Wgpu<f32, i32> as Backend>::Device,
 ) -> ExportedModel {
     // Use the Tier 2 reparameterized effective W1 (adversarial rows = softplus(γ) * W2.T).
-    let w1_tensor = model.effective_w1();
+    // Burn stores Linear weight as [d_input, d_output] row-major, but the gen file
+    // expects [hidden, input] (chunk-per-neuron). Transpose before flattening.
+    let w1_tensor = model.effective_w1().swap_dims(0, 1);
     let b1_tensor = model.linear1.bias.as_ref().expect("linear1 has bias").val();
     let w2_tensor = model.linear2.weight.val();
     let b2_tensor = model.linear2.bias.as_ref().expect("linear2 has bias").val();
