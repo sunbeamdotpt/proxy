@@ -147,7 +147,8 @@ impl<B: Backend> MlpModel<B> {
         let delta = adv_eff - w1_adv_old; // what to add to w1 at adv rows
         let num_adv = self.adv_indices.dims()[0];
         let hidden = w1.dims()[1];
-        let indices_2d = self.adv_indices.clone().unsqueeze::<2>().expand([num_adv, hidden]);
+        // [num_adv] -> [num_adv, 1] -> [num_adv, hidden] so each (i, j) cell holds adv_indices[i].
+        let indices_2d = self.adv_indices.clone().unsqueeze_dim::<2>(1).expand([num_adv, hidden]);
         w1.scatter(0, indices_2d, delta, IndexingUpdateOp::Add)
     }
 
