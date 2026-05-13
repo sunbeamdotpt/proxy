@@ -4,10 +4,16 @@
 //! Pure-Rust Gateway API model layer.
 
 pub mod digest;
+pub mod routing;
 pub mod types;
 pub mod view;
 
 pub use digest::compute_digest;
+pub use routing::{
+    HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, HTTPRouteRule, HTTPRouteState,
+    PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
+    RouteRule, RouteTable, WeightedBackend,
+};
 pub use types::{
     BackendTarget, ListenerKey, RefResolution, ResolvedRoute, RouteTableDigest, StatusPatch,
 };

@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use super::routing::HTTPRouteState;
+
 /// Alias used by the reconcile and translate modules.
 pub type GatewayView = ReconciledView;
 
@@ -17,6 +19,7 @@ pub type GatewayView = ReconciledView;
 pub struct ReconciledView {
     pub gateways: Vec<GatewayState>,
     pub routes: Vec<RouteState>,
+    pub http_routes: Vec<HTTPRouteState>,
     pub reference_grants: Vec<ReferenceGrantState>,
 }
 
