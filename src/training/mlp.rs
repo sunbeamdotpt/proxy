@@ -17,34 +17,26 @@ use burn::train::{ClassificationOutput, InferenceStep, TrainOutput, TrainStep};
 
 /// Two-layer MLP: input -> hidden (ReLU) -> output (sigmoid).
 ///
-/// **Tier 2 hard reparameterization.** For each adversarial input feature `i`
-/// and hidden neuron `j`, the effective first-layer weight is
-/// `softplus(adv_gamma[i, j]) * W2[j]` instead of the free parameter
-/// `linear1.weight[i, j]`. The resulting per-neuron sign product
-/// `W1_eff[i, j] * W2[j] = softplus(adv_gamma[i, j]) * W2[j]² ≥ 0` is
-/// non-negative by construction — making the MLP **provably monotone**
-/// non-decreasing in every adversarial feature, regardless of training
-/// dynamics.
+/// **Tier 2 hard reparameterization.** For each adversarial feature `i`,
+/// the effective row of W1 is `softplus(adv_gamma[i, :]) * W2`, so
+/// `W1_eff[i, j] * W2[j] = softplus(adv_gamma[i, j]) * W2[j]² ≥ 0` by
+/// construction and the MLP is monotone non-decreasing in every adversarial
+/// feature. `linear1.weight` rows at `adv_indices` are unused at forward
+/// time (their gradients cancel); the export path bakes the effective rows
+/// back in so the gen file reflects what the forward pass computes.
 ///
-/// `linear1.weight[adv_indices, :]` is therefore unused for forward
-/// computation (gradients on those rows cancel to zero). The export path
-/// bakes the effective rows back into `linear1.weight` before writing the
-/// gen file, so inference sees the reparameterized model.
-///
-/// `sign_lambda` keeps the legacy soft-penalty hook available but is
-/// redundant when adv_indices is non-empty (the constraint already holds).
+/// `sign_lambda` is the soft-penalty knob retained for ablation; redundant
+/// when `adv_indices` is non-empty.
 #[derive(Module, Debug)]
 pub struct MlpModel<B: Backend> {
-    /// Linear1.
     pub linear1: Linear<B>,
-    /// Linear2.
     pub linear2: Linear<B>,
-    /// Adversarial reparameterization parameter (shape `[max(num_adv, 1), hidden]`).
+    /// Reparameterization parameter, shape `[max(num_adv, 1), hidden]`.
     /// Effective adversarial weight: `softplus(adv_gamma[i, j]) * W2[j]`.
     pub adv_gamma: Param<Tensor<B, 2>>,
     /// Adversarial feature indices (non-trainable).
     pub adv_indices: Tensor<B, 1, Int>,
-    /// Sign-constraint penalty coefficient as a 1-element tensor (non-trainable).
+    /// Soft sign-constraint penalty coefficient (non-trainable).
     pub sign_lambda: Tensor<B, 1>,
 }
 
@@ -194,18 +186,14 @@ impl<B: Backend> MlpModel<B> {
         ClassificationOutput::new(loss, output_2col, batch.labels)
     }
 
-    /// Tier 2 sign-constraint penalty:
+    /// Soft Tier 2 sign-constraint penalty
     /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])`.
+    /// Pushes weights toward `W1[i,j] * W2[j] ≥ 0`. The hard reparameterization
+    /// makes this redundant when `adv_indices` is non-empty; kept for ablation.
     ///
-    /// Pushes weights toward `W1[i,j] * W2[j] ≥ 0` for every adversarial
-    /// feature `i` and hidden neuron `j`, which makes the MLP monotone
-    /// non-decreasing in those features.
-    ///
-    /// Burn's `Linear` stores weight as `[d_input, d_output]` (verified by
-    /// matmul semantics: `output = input @ weight` for input `[batch, in]`).
-    /// So `linear1.weight` has shape `[in, hidden]` — `select(0, ...)` picks
-    /// adversarial input rows. `linear2.weight` has shape `[hidden, 1]` —
-    /// transpose to `[1, hidden]` to broadcast across rows.
+    /// Burn's `Linear` is row-major `[d_input, d_output]`: `linear1.weight` is
+    /// `[in, hidden]` (select rows by input index), `linear2.weight` is
+    /// `[hidden, 1]` (transpose to broadcast across rows).
     pub fn sign_constraint_penalty(&self) -> Tensor<B, 1> {
         let w1 = self.linear1.weight.val(); // [in, hidden]
         let w2 = self.linear2.weight.val(); // [hidden, 1]
@@ -333,31 +321,6 @@ mod tests {
             "expected positive penalty for random MLP, got {}",
             values[0]
         );
-    }
-
-    /// Empirically check burn's `to_data().to_vec()` flat layout for a
-    /// [d_in, d_out] Linear weight. Reveals whether we're reading row-major
-    /// or column-major data when chunking in `extract_*_model`.
-    #[test]
-    fn diagnose_linear_weight_flat_layout() {
-        let device = Default::default();
-        let lin = LinearConfig::new(2, 3).init::<TestBackend>(&device);
-        let w = lin.weight.val();
-        let dims = w.shape().dims::<2>();
-        let flat: Vec<f32> = w.clone().into_data().to_vec().expect("flat");
-        // Use matmul to extract row 0: y = [[1, 0]] @ W = W[0, :] (assuming
-        // burn's forward is x @ W with W shape [in, out]).
-        let x0 = Tensor::<TestBackend, 2>::from_data(
-            TensorData::new(vec![1.0_f32, 0.0], [1, 2]),
-            &device,
-        );
-        let y0 = x0.matmul(w);
-        let row0: Vec<f32> = y0.into_data().to_vec().expect("row0");
-        eprintln!("shape = {dims:?}");
-        eprintln!("flat = {flat:?}");
-        eprintln!("x=[1,0] @ W = {row0:?}");
-        eprintln!("If row0 == flat[0..3] → row-major");
-        eprintln!("If row0 == [flat[0], flat[2], flat[4]] → col-major");
     }
 
     /// Lambda=0 → penalty is zero regardless of weights/indices. (Empty
