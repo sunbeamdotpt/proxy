@@ -3,31 +3,25 @@
 
 //! DDoS ensemble inference: MLP-only.
 //!
-//! The shipped tree was a single-feature classifier in practice (never
-//! deferred to the MLP), so the tree path is no longer wired into the
-//! verdict pipeline. Every request flows through `mlp_predict_32`, which is
-//! the model that carries the CROWN / Interval32 IBP soundness story.
+//! Every request flows through `mlp_predict_32`. `DDoSEnsemblePath` is
+//! retained single-variant for the Prometheus path label.
 
 use crate::ddos::model::DDoSAction;
 use super::gen::ddos_weights;
 use super::mlp::mlp_predict_32;
 
-/// Which path the DDoS ensemble took to reach its verdict.
+/// Path the DDoS ensemble took to reach its verdict (Prometheus label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DDoSEnsemblePath {
     /// MLP forward pass.
     Mlp,
 }
 
-/// Result of the DDoS ensemble inference.
+/// DDoS ensemble result.
 pub struct DDoSEnsembleVerdict {
-    /// Action.
     pub action: DDoSAction,
-    /// Score.
     pub score: f64,
-    /// Reason.
     pub reason: &'static str,
-    /// Path.
     pub path: DDoSEnsemblePath,
 }
 

@@ -3,34 +3,25 @@
 
 //! Scanner ensemble inference: MLP-only.
 //!
-//! The shipped tree was a single-feature classifier in practice (never
-//! deferred to the MLP), so the tree path is no longer wired into the
-//! verdict pipeline. Every request flows through `mlp_predict_32`, which is
-//! the model that carries the CROWN / Interval32 IBP soundness story.
-//!
-//! `EnsemblePath::Mlp` is the only path retained for downstream telemetry
-//! that expected the enum.
+//! Every request flows through `mlp_predict_32`. `EnsemblePath` is retained
+//! single-variant for the Prometheus path label.
 
 use crate::scanner::model::{ScannerAction, ScannerVerdict};
 use super::gen::scanner_weights;
 use super::mlp::mlp_predict_32;
 
-/// Which path the ensemble took to reach its verdict.
+/// Path the ensemble took to reach its verdict (Prometheus label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsemblePath {
     /// MLP forward pass.
     Mlp,
 }
 
-/// Result of the scanner ensemble: action + confidence score + explanation.
+/// Scanner ensemble result.
 pub struct EnsembleVerdict {
-    /// Action.
     pub action: ScannerAction,
-    /// Score.
     pub score: f64,
-    /// Reason.
     pub reason: &'static str,
-    /// Path.
     pub path: EnsemblePath,
 }
 

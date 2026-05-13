@@ -1,20 +1,12 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-//! Empirical companion to the Lean Tier 2 monotonicity proofs, specialized to
-//! the DDoS ensemble at `inputDim = 14`.
-//!
-//! Same structure as [`super::monotonicity_audit`] (scanner audit): the Lean
-//! theorem `Sunbeam.Verify.Monotonicity.ensemble_block_preserved_when_tree_constant`
-//! is conditional on a tree split-feature condition and an MLP sign condition;
-//! this module checks both against the shipped DDoS weights.
+//! DDoS specialization of `super::monotonicity_audit` at `inputDim = 14`.
 //!
 //! The adversarial catalog enumerates DDoS features where *increasing the
-//! feature value should never decrease the Block score* under domain
-//! semantics. Inverted features (e.g. `cookie_ratio`, where *low* values are
-//! adversarial because bots typically don't carry cookies) are out of scope
-//! for this catalog — they require either a separate negative-direction
-//! monotonicity argument or a sign-flip in the feature extractor.
+//! value should never decrease the Block score*. Inverted features (e.g.
+//! `cookie_ratio`, where bots typically *lack* cookies) are out of scope —
+//! they need a negative-direction argument or a sign-flip in the extractor.
 
 use super::gen::ddos_weights::{TREE_NODES, W1, W2};
 
