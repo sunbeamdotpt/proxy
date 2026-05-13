@@ -1,7 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-//! Empirical companion to the Lean Tier 2 monotonicity proofs.
+//! Empirical companion to the Lean monotonicity proofs (see `docs/TIERS.md`).
 //!
 //! For each input feature `i`, computes `min_j (W2[j] * W1[j][i])` against
 //! the shipped scanner weights. A non-negative result discharges the
