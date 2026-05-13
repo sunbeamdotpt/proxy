@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Global Prometheus registry shared across all proxy workers.
-static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
+pub(crate) static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
 
 pub static REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     let c = IntCounterVec::new(
@@ -213,6 +213,15 @@ pub static DDOS_ENSEMBLE_PATH: LazyLock<IntCounterVec> = LazyLock::new(|| {
     ).unwrap();
     REGISTRY.register(Box::new(c.clone())).unwrap();
     c
+});
+
+pub static GATEWAY_STATE_DRIFT_SECONDS: LazyLock<Gauge> = LazyLock::new(|| {
+    let g = Gauge::new(
+        "gateway_state_drift_seconds",
+        "Maximum age of peer gateway state digests observed by this replica",
+    ).unwrap();
+    REGISTRY.register(Box::new(g.clone())).unwrap();
+    g
 });
 
 /// Spawn a lightweight HTTP server on `port` serving `/metrics` and `/health`.
