@@ -3,6 +3,7 @@
 
 /// Bandwidth.
 pub mod bandwidth;
+pub mod gateway_topics;
 /// Messages.
 pub mod messages;
 /// Node.
