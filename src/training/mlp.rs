@@ -17,8 +17,9 @@ use burn::train::{ClassificationOutput, InferenceStep, TrainOutput, TrainStep};
 
 /// Two-layer MLP: input -> hidden (ReLU) -> output (sigmoid).
 ///
-/// **Tier 2 hard reparameterization.** For each adversarial feature `i`,
-/// the effective row of W1 is `softplus(adv_gamma[i, :]) * W2`, so
+/// **Hard reparameterization for monotonicity** (see `docs/TIERS.md`). For
+/// each adversarial feature `i`, the effective row of W1 is
+/// `softplus(adv_gamma[i, :]) * W2`, so
 /// `W1_eff[i, j] * W2[j] = softplus(adv_gamma[i, j]) * W2[j]² ≥ 0` by
 /// construction and the MLP is monotone non-decreasing in every adversarial
 /// feature. `linear1.weight` rows at `adv_indices` are unused at forward
@@ -89,8 +90,8 @@ impl MlpConfig {
 impl<B: Backend> MlpModel<B> {
     /// Forward pass returning raw logits (pre-sigmoid).
     ///
-    /// Applies the Tier 2 hard reparameterization for adversarial input
-    /// features: the effective first-layer weight is
+    /// Applies the hard reparameterization for adversarial input features:
+    /// the effective first-layer weight is
     /// `softplus(adv_gamma[i, j]) * W2[j]` instead of `linear1.weight[i, j]`.
     /// Implementation uses subtract-wrong-add-correct to avoid materializing a
     /// modified W1 tensor (and to keep `linear1.forward` carrying the bias).
@@ -122,7 +123,7 @@ impl<B: Backend> MlpModel<B> {
         normal - wrong + correct
     }
 
-    /// Effective first-layer weight matrix with the Tier 2 reparameterization
+    /// Effective first-layer weight matrix with the reparameterization
     /// baked in: rows corresponding to adversarial features are replaced by
     /// `softplus(adv_gamma[i, :]) * W2`. Used at export time so the gen file
     /// reflects what the forward pass actually computes.
@@ -156,7 +157,7 @@ impl<B: Backend> MlpModel<B> {
     ///
     /// Uses raw logits for BCE (which applies sigmoid internally) and converts
     /// to two-column format `[1-p, p]` for AccuracyMetric (which uses argmax).
-    /// Adds the Tier 2 sign-constraint penalty (see `sign_constraint_penalty`).
+    /// Adds the sign-constraint penalty (see `sign_constraint_penalty`).
     pub fn forward_classification(
         &self,
         batch: TrainingBatch<B>,
@@ -175,7 +176,7 @@ impl<B: Backend> MlpModel<B> {
         let per_sample = relu_logits - logits_1d.clone() * targets_float + log_term;
         let bce = per_sample.mean(); // scalar [1]
 
-        // Tier 2 sign-constraint penalty (zero when adv_indices empty or lambda=0).
+        // Soft sign-constraint penalty (zero when adv_indices empty or lambda=0).
         let penalty = self.sign_constraint_penalty();
         let loss = bce + penalty;
 
@@ -186,7 +187,7 @@ impl<B: Backend> MlpModel<B> {
         ClassificationOutput::new(loss, output_2col, batch.labels)
     }
 
-    /// Soft Tier 2 sign-constraint penalty
+    /// Soft sign-constraint penalty
     /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])`.
     /// Pushes weights toward `W1[i,j] * W2[j] ≥ 0`. The hard reparameterization
     /// makes this redundant when `adv_indices` is non-empty; kept for ablation.

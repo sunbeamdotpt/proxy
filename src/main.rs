@@ -112,7 +112,7 @@ enum Commands {
         /// Default: has_cookies/has_referer/has_accept_language/accept_quality (3,4,5,6).
         #[arg(long, value_delimiter = ',', default_value = "3,4,5,6")]
         tree_excluded_features: Vec<usize>,
-        /// Tier 2 sign-constraint penalty coefficient (0.0 disables).
+        /// Sign-constraint penalty coefficient (0.0 disables).
         #[arg(long, default_value = "0.0")]
         sign_constraint_lambda: f32,
     },
@@ -146,7 +146,7 @@ enum Commands {
         /// Default: cookie/referer/accept-language ratios (10,11,12).
         #[arg(long, value_delimiter = ',', default_value = "10,11,12")]
         tree_excluded_features: Vec<usize>,
-        /// Tier 2 sign-constraint penalty coefficient (0.0 disables).
+        /// Sign-constraint penalty coefficient (0.0 disables).
         #[arg(long, default_value = "0.0")]
         sign_constraint_lambda: f32,
     },
