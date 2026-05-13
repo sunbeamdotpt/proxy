@@ -8,27 +8,41 @@
 
 use crate::training::batch::TrainingBatch;
 
-use burn::module::Module;
+use burn::module::{Module, Param, ParamId};
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::{Int, TensorData};
+use burn::tensor::{Int, IndexingUpdateOp, TensorData};
 use burn::train::{ClassificationOutput, InferenceStep, TrainOutput, TrainStep};
 
 /// Two-layer MLP: input -> hidden (ReLU) -> output (sigmoid).
 ///
-/// `adv_indices` and `sign_lambda` carry the Tier 2 sign-constraint config:
-/// the loss includes a `relu(-W1[i,j] * W2[j])` penalty summed over (i ∈
-/// adv_indices, j ∈ hidden), pushing weights toward `W1[i,j] * W2[j] ≥ 0`
-/// for every adversarial feature `i`. Empty `adv_indices` or zero `lambda`
-/// disables the penalty.
+/// **Tier 2 hard reparameterization.** For each adversarial input feature `i`
+/// and hidden neuron `j`, the effective first-layer weight is
+/// `softplus(adv_gamma[i, j]) * W2[j]` instead of the free parameter
+/// `linear1.weight[i, j]`. The resulting per-neuron sign product
+/// `W1_eff[i, j] * W2[j] = softplus(adv_gamma[i, j]) * W2[j]² ≥ 0` is
+/// non-negative by construction — making the MLP **provably monotone**
+/// non-decreasing in every adversarial feature, regardless of training
+/// dynamics.
+///
+/// `linear1.weight[adv_indices, :]` is therefore unused for forward
+/// computation (gradients on those rows cancel to zero). The export path
+/// bakes the effective rows back into `linear1.weight` before writing the
+/// gen file, so inference sees the reparameterized model.
+///
+/// `sign_lambda` keeps the legacy soft-penalty hook available but is
+/// redundant when adv_indices is non-empty (the constraint already holds).
 #[derive(Module, Debug)]
 pub struct MlpModel<B: Backend> {
     /// Linear1.
     pub linear1: Linear<B>,
     /// Linear2.
     pub linear2: Linear<B>,
-    /// Adversarial feature indices for sign-constraint penalty (non-trainable).
+    /// Adversarial reparameterization parameter (shape `[max(num_adv, 1), hidden]`).
+    /// Effective adversarial weight: `softplus(adv_gamma[i, j]) * W2[j]`.
+    pub adv_gamma: Param<Tensor<B, 2>>,
+    /// Adversarial feature indices (non-trainable).
     pub adv_indices: Tensor<B, 1, Int>,
     /// Sign-constraint penalty coefficient as a 1-element tensor (non-trainable).
     pub sign_lambda: Tensor<B, 1>,
@@ -62,9 +76,18 @@ impl MlpConfig {
             TensorData::new(vec![self.sign_constraint_lambda], [1]),
             device,
         );
+        // adv_gamma initial values: zeros → softplus(0) = ln(2) ≈ 0.693, a
+        // reasonable starting magnitude for the adversarial weights. Shape
+        // [max(num_adv, 1), hidden] — at least 1 row so the Param is non-empty
+        // even when no adversarial features are configured (in which case
+        // adv_gamma is unused by the forward pass).
+        let gamma_rows = self.adversarial_indices.len().max(1);
+        let adv_gamma_tensor = Tensor::<B, 2>::zeros([gamma_rows, self.hidden_dim], device);
+        let adv_gamma = Param::initialized(ParamId::new(), adv_gamma_tensor);
         MlpModel {
             linear1: LinearConfig::new(self.input_dim, self.hidden_dim).init(device),
             linear2: LinearConfig::new(self.hidden_dim, 1).init(device),
+            adv_gamma,
             adv_indices,
             sign_lambda,
         }
@@ -74,12 +97,58 @@ impl MlpConfig {
 impl<B: Backend> MlpModel<B> {
     /// Forward pass returning raw logits (pre-sigmoid).
     ///
+    /// Applies the Tier 2 hard reparameterization for adversarial input
+    /// features: the effective first-layer weight is
+    /// `softplus(adv_gamma[i, j]) * W2[j]` instead of `linear1.weight[i, j]`.
+    /// Implementation uses subtract-wrong-add-correct to avoid materializing a
+    /// modified W1 tensor (and to keep `linear1.forward` carrying the bias).
+    ///
     /// Input shape: `[batch, input_dim]`
     /// Output shape: `[batch, 1]`
     pub fn forward_logits(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let h = self.linear1.forward(x);
-        let h = burn::tensor::activation::relu(h);
+        let z = self.linear1_with_reparam(x);
+        let h = burn::tensor::activation::relu(z);
         self.linear2.forward(h)
+    }
+
+    /// Linear1 forward with the adversarial-feature rows replaced by the
+    /// reparameterized form. Returns the pre-activation `[batch, hidden]`.
+    fn linear1_with_reparam(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        let normal = self.linear1.forward(x.clone());
+        if self.adv_indices.dims()[0] == 0 {
+            return normal;
+        }
+        let w1 = self.linear1.weight.val(); // [in, hidden]
+        let w2 = self.linear2.weight.val(); // [hidden, 1]
+        let x_adv = x.select(1, self.adv_indices.clone()); // [batch, num_adv]
+        let w1_adv = w1.select(0, self.adv_indices.clone()); // [num_adv, hidden]
+        let wrong = x_adv.clone().matmul(w1_adv); // [batch, hidden]
+        let alpha = burn::tensor::activation::softplus(self.adv_gamma.val(), 1.0);
+        let w2_row = w2.swap_dims(0, 1); // [1, hidden]
+        let adv_eff = alpha * w2_row; // [num_adv, hidden]
+        let correct = x_adv.matmul(adv_eff); // [batch, hidden]
+        normal - wrong + correct
+    }
+
+    /// Effective first-layer weight matrix with the Tier 2 reparameterization
+    /// baked in: rows corresponding to adversarial features are replaced by
+    /// `softplus(adv_gamma[i, :]) * W2`. Used at export time so the gen file
+    /// reflects what the forward pass actually computes.
+    pub fn effective_w1(&self) -> Tensor<B, 2> {
+        let w1 = self.linear1.weight.val();
+        if self.adv_indices.dims()[0] == 0 {
+            return w1;
+        }
+        let w2 = self.linear2.weight.val();
+        let alpha = burn::tensor::activation::softplus(self.adv_gamma.val(), 1.0);
+        let w2_row = w2.swap_dims(0, 1); // [1, hidden]
+        let adv_eff = alpha * w2_row; // [num_adv, hidden]
+        let w1_adv_old = w1.clone().select(0, self.adv_indices.clone()); // [num_adv, hidden]
+        let delta = adv_eff - w1_adv_old; // what to add to w1 at adv rows
+        let num_adv = self.adv_indices.dims()[0];
+        let hidden = w1.dims()[1];
+        let indices_2d = self.adv_indices.clone().unsqueeze::<2>().expand([num_adv, hidden]);
+        w1.scatter(0, indices_2d, delta, IndexingUpdateOp::Add)
     }
 
     /// Forward pass with sigmoid activation for inference/export.
