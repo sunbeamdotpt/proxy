@@ -439,10 +439,102 @@ fn default_model_dir() -> String { "/models".to_string() }
 fn default_max_model_size() -> u64 { 52_428_800 } // 50MB
 fn default_chunk_size() -> u32 { 65_536 } // 64KB
 
+/// Structured error emitted when a deprecated TOML section is detected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeprecatedTomlSection {
+    pub section: &'static str,
+    pub migration_target: &'static str,
+}
+
+impl std::fmt::Display for DeprecatedTomlSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "config.toml contains deprecated section `{}`. Migrate to {}.",
+            self.section, self.migration_target
+        )
+    }
+}
+
+impl std::error::Error for DeprecatedTomlSection {}
+
+fn reject_deprecated_tables(raw: &str) -> Result<()> {
+    let doc: toml::Table = raw
+        .parse()
+        .with_context(|| "pre-flight TOML parse for deprecated sections")?;
+    if doc.contains_key("routes") {
+        return Err(anyhow::Error::from(DeprecatedTomlSection {
+            section: "[[routes]]",
+            migration_target: "Gateway API HTTPRoute CRDs",
+        }));
+    }
+    if doc.contains_key("tls_passthrough") {
+        return Err(anyhow::Error::from(DeprecatedTomlSection {
+            section: "[[tls_passthrough]]",
+            migration_target: "Gateway API TLSRoute CRDs",
+        }));
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("reading config from {path}"))?;
+        reject_deprecated_tables(&raw)?;
         toml::from_str(&raw).with_context(|| "parsing config.toml")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_routes_section() {
+        let raw = r#"
+listen = "0.0.0.0:8080"
+[[routes]]
+host_prefix = "example.com"
+backend = "10.0.0.1:80"
+"#;
+        let err = reject_deprecated_tables(raw).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("[[routes]]"), "error should name the section: {msg}");
+        assert!(msg.contains("HTTPRoute"), "error should hint migration target: {msg}");
+    }
+
+    #[test]
+    fn rejects_tls_passthrough_section() {
+        let raw = r#"
+listen = "0.0.0.0:8080"
+[[tls_passthrough]]
+host_prefix = "tls.example.com"
+backend = "10.0.0.1:443"
+"#;
+        let err = reject_deprecated_tables(raw).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("[[tls_passthrough]]"), "error should name the section: {msg}");
+        assert!(msg.contains("TLSRoute"), "error should hint migration target: {msg}");
+    }
+
+    #[test]
+    fn accepts_config_without_deprecated_sections() {
+        let raw = r#"
+listen = "0.0.0.0:8080"
+tls = { cert = "/certs/cert.pem", key = "/certs/key.pem" }
+# [[routes]]   <-- commented out, must be ignored
+"#;
+        assert!(reject_deprecated_tables(raw).is_ok());
+    }
+
+    #[test]
+    fn ignores_commented_deprecated_section() {
+        let raw = r#"
+listen = "0.0.0.0:8080"
+# [[routes]]
+# host_prefix = "example.com"
+"#;
+        assert!(reject_deprecated_tables(raw).is_ok());
     }
 }
