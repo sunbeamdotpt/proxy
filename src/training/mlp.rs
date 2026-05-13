@@ -335,6 +335,31 @@ mod tests {
         );
     }
 
+    /// Empirically check burn's `to_data().to_vec()` flat layout for a
+    /// [d_in, d_out] Linear weight. Reveals whether we're reading row-major
+    /// or column-major data when chunking in `extract_*_model`.
+    #[test]
+    fn diagnose_linear_weight_flat_layout() {
+        let device = Default::default();
+        let lin = LinearConfig::new(2, 3).init::<TestBackend>(&device);
+        let w = lin.weight.val();
+        let dims = w.shape().dims::<2>();
+        let flat: Vec<f32> = w.clone().into_data().to_vec().expect("flat");
+        // Use matmul to extract row 0: y = [[1, 0]] @ W = W[0, :] (assuming
+        // burn's forward is x @ W with W shape [in, out]).
+        let x0 = Tensor::<TestBackend, 2>::from_data(
+            TensorData::new(vec![1.0_f32, 0.0], [1, 2]),
+            &device,
+        );
+        let y0 = x0.matmul(w);
+        let row0: Vec<f32> = y0.into_data().to_vec().expect("row0");
+        eprintln!("shape = {dims:?}");
+        eprintln!("flat = {flat:?}");
+        eprintln!("x=[1,0] @ W = {row0:?}");
+        eprintln!("If row0 == flat[0..3] → row-major");
+        eprintln!("If row0 == [flat[0], flat[2], flat[4]] → col-major");
+    }
+
     /// Lambda=0 → penalty is zero regardless of weights/indices. (Empty
     /// `adversarial_indices` would also disable, but the WGPU backend rejects
     /// the broadcast with a 0-size dim, so the lambda flag is the practical
