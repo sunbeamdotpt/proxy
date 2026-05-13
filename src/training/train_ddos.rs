@@ -57,7 +57,7 @@ pub struct TrainDdosMlpArgs {
     /// header-presence features (cookie/referer/accept-language ratios), forcing
     /// those decisions through the MLP where the certified-radius story applies.
     pub tree_excluded_features: Vec<usize>,
-    /// Tier 2 sign-constraint penalty coefficient. Adds
+    /// Sign-constraint penalty coefficient. Adds
     /// `λ · Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])` to the loss, encouraging
     /// MLP monotonicity in adversarial features. 0.0 disables the penalty.
     pub sign_constraint_lambda: f32,
@@ -427,7 +427,7 @@ fn extract_weights(
     norm_maxs: &[f32],
     _device: &<Wgpu<f32, i32> as Backend>::Device,
 ) -> ExportedModel {
-    // Use the Tier 2 reparameterized effective W1 (adversarial rows = softplus(γ) * W2.T).
+    // Use the reparameterized effective W1 (adversarial rows = softplus(γ) * W2.T).
     // Burn stores Linear weight as [d_input, d_output] row-major, but the gen file
     // expects [hidden, input] (chunk-per-neuron). Transpose before flattening.
     let w1_tensor = model.effective_w1().swap_dims(0, 1);
