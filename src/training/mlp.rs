@@ -125,28 +125,27 @@ impl<B: Backend> MlpModel<B> {
     }
 
     /// Tier 2 sign-constraint penalty:
-    /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[j,i] * W2[j])`.
+    /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])`.
     ///
-    /// Pushes weights toward `W1[j,i] * W2[j] ≥ 0` for every adversarial
+    /// Pushes weights toward `W1[i,j] * W2[j] ≥ 0` for every adversarial
     /// feature `i` and hidden neuron `j`, which makes the MLP monotone
     /// non-decreasing in those features.
     ///
-    /// Burn's `Linear` stores weight as `[d_out, d_in]` (the docstring claims
-    /// `[d_in, d_out]` but the actual math is `y = x @ W^T`). So:
-    /// - `linear1.weight` has shape `[hidden, in]`; select on dim 1 to pick
-    ///   adversarial input features.
-    /// - `linear2.weight` has shape `[1, hidden]`; squeeze to a per-neuron
-    ///   vector for the element-wise product.
+    /// Burn's `Linear` stores weight as `[d_input, d_output]` (verified by
+    /// matmul semantics: `output = input @ weight` for input `[batch, in]`).
+    /// So `linear1.weight` has shape `[in, hidden]` — `select(0, ...)` picks
+    /// adversarial input rows. `linear2.weight` has shape `[hidden, 1]` —
+    /// transpose to `[1, hidden]` to broadcast across rows.
     pub fn sign_constraint_penalty(&self) -> Tensor<B, 1> {
-        let w1 = self.linear1.weight.val(); // [hidden, in]
-        let w2 = self.linear2.weight.val(); // [1, hidden]
-        // Columns of W1 corresponding to adversarial features: [hidden, num_adv].
-        let w1_adv = w1.select(1, self.adv_indices.clone());
-        // Broadcast W2 down rows: [hidden, 1] so each row gets its W2[j].
-        let w2_col = w2.swap_dims(0, 1);
-        // Element-wise product: [hidden, num_adv].
-        let products = w1_adv * w2_col;
-        // Penalty: relu(-products) per (j, i), summed and scaled by lambda.
+        let w1 = self.linear1.weight.val(); // [in, hidden]
+        let w2 = self.linear2.weight.val(); // [hidden, 1]
+        // Rows of W1 corresponding to adversarial features: [num_adv, hidden].
+        let w1_adv = w1.select(0, self.adv_indices.clone());
+        // Broadcast W2 across rows: [1, hidden] so each col gets its W2[j].
+        let w2_row = w2.swap_dims(0, 1);
+        // Element-wise product: [num_adv, hidden].
+        let products = w1_adv * w2_row;
+        // Penalty: relu(-products) per (i, j), summed and scaled by lambda.
         // Empty adv_indices makes products empty, sum=0.
         let penalty_sum = products.neg().clamp_min(0.0).sum();
         penalty_sum * self.sign_lambda.clone()
@@ -240,5 +239,53 @@ mod tests {
         let input = Tensor::<TestBackend, 2>::zeros([4, 14], &device);
         let output = model.forward(input);
         assert_eq!(output.shape().dims[1], 1);
+    }
+
+    /// With adversarial indices set and `lambda > 0`, a randomly-initialised
+    /// MLP should produce a strictly positive sign-constraint penalty (because
+    /// random weights almost surely include some violations).
+    #[test]
+    fn test_sign_constraint_penalty_fires() {
+        let device = Default::default();
+        let config = MlpConfig {
+            input_dim: 14,
+            hidden_dim: 32,
+            adversarial_indices: vec![0, 3, 6, 7, 13],
+            sign_constraint_lambda: 1.0,
+        };
+        let model = config.init::<TestBackend>(&device);
+        let penalty = model.sign_constraint_penalty();
+        let data = penalty.to_data();
+        let values: Vec<f32> = data.to_vec().expect("flat vec");
+        assert_eq!(values.len(), 1);
+        assert!(
+            values[0] > 0.0,
+            "expected positive penalty for random MLP, got {}",
+            values[0]
+        );
+    }
+
+    /// Lambda=0 → penalty is zero regardless of weights/indices. (Empty
+    /// `adversarial_indices` would also disable, but the WGPU backend rejects
+    /// the broadcast with a 0-size dim, so the lambda flag is the practical
+    /// kill switch.)
+    #[test]
+    fn test_sign_constraint_penalty_zero_when_lambda_zero() {
+        let device = Default::default();
+        let config = MlpConfig {
+            input_dim: 14,
+            hidden_dim: 32,
+            adversarial_indices: vec![0, 3, 6, 7, 13],
+            sign_constraint_lambda: 0.0,
+        };
+        let model = config.init::<TestBackend>(&device);
+        let penalty = model.sign_constraint_penalty();
+        let data = penalty.to_data();
+        let values: Vec<f32> = data.to_vec().expect("flat vec");
+        assert!(
+            values[0].abs() < 1e-6,
+            "expected zero penalty for lambda=0, got {}",
+            values[0]
+        );
     }
 }
