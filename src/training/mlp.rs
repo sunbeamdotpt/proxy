@@ -125,21 +125,28 @@ impl<B: Backend> MlpModel<B> {
     }
 
     /// Tier 2 sign-constraint penalty:
-    /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[i,j] * W2[j])`.
+    /// `lambda * Σ_{i ∈ adv} Σ_j relu(-W1[j,i] * W2[j])`.
     ///
-    /// Pushes weights toward `W1[i,j] * W2[j] ≥ 0` for every adversarial
+    /// Pushes weights toward `W1[j,i] * W2[j] ≥ 0` for every adversarial
     /// feature `i` and hidden neuron `j`, which makes the MLP monotone
     /// non-decreasing in those features.
+    ///
+    /// Burn's `Linear` stores weight as `[d_out, d_in]` (the docstring claims
+    /// `[d_in, d_out]` but the actual math is `y = x @ W^T`). So:
+    /// - `linear1.weight` has shape `[hidden, in]`; select on dim 1 to pick
+    ///   adversarial input features.
+    /// - `linear2.weight` has shape `[1, hidden]`; squeeze to a per-neuron
+    ///   vector for the element-wise product.
     pub fn sign_constraint_penalty(&self) -> Tensor<B, 1> {
-        let w1 = self.linear1.weight.val(); // [in, hidden]
-        let w2 = self.linear2.weight.val(); // [hidden, 1]
-        // Rows of W1 corresponding to adversarial features: [num_adv, hidden].
-        let w1_adv = w1.select(0, self.adv_indices.clone());
-        // Broadcast W2 across rows: [1, hidden].
-        let w2_row = w2.swap_dims(0, 1);
-        // Element-wise product: [num_adv, hidden].
-        let products = w1_adv * w2_row;
-        // Penalty: relu(-products) per (i, j), summed and scaled by lambda.
+        let w1 = self.linear1.weight.val(); // [hidden, in]
+        let w2 = self.linear2.weight.val(); // [1, hidden]
+        // Columns of W1 corresponding to adversarial features: [hidden, num_adv].
+        let w1_adv = w1.select(1, self.adv_indices.clone());
+        // Broadcast W2 down rows: [hidden, 1] so each row gets its W2[j].
+        let w2_col = w2.swap_dims(0, 1);
+        // Element-wise product: [hidden, num_adv].
+        let products = w1_adv * w2_col;
+        // Penalty: relu(-products) per (j, i), summed and scaled by lambda.
         // Empty adv_indices makes products empty, sum=0.
         let penalty_sum = products.neg().clamp_min(0.0).sum();
         penalty_sum * self.sign_lambda.clone()
