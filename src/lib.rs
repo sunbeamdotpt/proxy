@@ -28,6 +28,7 @@ pub mod ddos;
 pub mod dual_stack;
 /// Ensemble.
 pub mod ensemble;
+pub mod gateway;
 /// Metrics.
 pub mod metrics;
 /// Proxy.
