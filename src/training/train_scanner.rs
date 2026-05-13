@@ -444,7 +444,8 @@ fn extract_weights(
     norm_maxs: &[f32],
     _device: &<Wgpu<f32, i32> as Backend>::Device,
 ) -> ExportedModel {
-    let w1_tensor = model.linear1.weight.val();
+    // Use the Tier 2 reparameterized effective W1 (adversarial rows = softplus(γ) * W2.T).
+    let w1_tensor = model.effective_w1();
     let b1_tensor = model.linear1.bias.as_ref().expect("linear1 has bias").val();
     let w2_tensor = model.linear2.weight.val();
     let b2_tensor = model.linear2.bias.as_ref().expect("linear2 has bias").val();
