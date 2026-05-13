@@ -3,17 +3,12 @@
 
 //! Empirical companion to the Lean Tier 2 monotonicity proofs.
 //!
-//! The Lean theorem `Sunbeam.Verify.Monotonicity.ensemble_block_preserved_when_tree_constant`
-//! is conditional on two side conditions:
-//!   1. The tree's verdict on `y` equals the tree's verdict on `x` — holds
-//!      automatically when feature `i` is not a tree split feature.
-//!   2. The MLP is monotone non-decreasing in feature `i` — discharged by the
-//!      per-neuron sign constraint `∀ j. W2[j] * W1[j][i] ≥ 0`
-//!      (see `Sunbeam.Verify.Monotonicity.mlp_forward_monotone_in`).
-//!
-//! This module audits the *currently shipped* scanner weights against those
-//! conditions and reports which input feature indices are provably immune to
-//! evasion by increasing that feature alone.
+//! For each input feature `i`, computes `min_j (W2[j] * W1[j][i])` against
+//! the shipped scanner weights. A non-negative result discharges the
+//! per-neuron sign constraint of
+//! `Sunbeam.Verify.Monotonicity.mlp_forward_monotone_in`, so the MLP is
+//! monotone non-decreasing in feature `i`. With the tree no longer wired
+//! into production verdicts, that's the only side condition that matters.
 
 use super::gen::scanner_weights::{TREE_NODES, W1, W2};
 
@@ -82,14 +77,7 @@ impl MonotonicityAudit {
         }
     }
 
-    /// Returns the feature indices for which the ensemble is provably monotone
-    /// non-decreasing under the currently shipped weights.
-    ///
-    /// Two paths to monotonicity:
-    /// - Feature is not a tree split feature AND the tree has no Defer leaves
-    ///   (MLP never runs, its sign is moot).
-    /// - Feature is not a tree split feature AND `per_feature_mlp_min_product[i] ≥ 0`
-    ///   (sign constraint holds, MLP-side proof discharges).
+    /// Feature indices the shipped ensemble is provably monotone in.
     pub fn provably_monotone_features(&self) -> Vec<usize> {
         (0..NUM_FEATURES)
             .filter(|&i| self.is_provably_monotone(i))
@@ -151,11 +139,8 @@ mod tests {
         }
     }
 
-    /// Diagnostic — reports the MLP-side sign-constraint status for each
-    /// adversarial feature. The tree no longer gates production verdicts, so
-    /// monotonicity in adversarial features now reduces to the MLP-side
-    /// constraint `min_j(W2[j] * W1[j][i]) ≥ 0`. Failures are structural
-    /// findings, not test breakage.
+    /// Diagnostic — reports sign-constraint status per adversarial feature.
+    /// Failures are structural findings, not test breakage.
     #[test]
     fn adversarial_sign_constraint_diagnostic() {
         let audit = MonotonicityAudit::for_scanner();
