@@ -76,9 +76,12 @@ reqwest = { workspace = true }
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 
 # K8s watcher for cert/config hot-reload
-kube        = { workspace = true }
-k8s-openapi = { workspace = true }
+kube        = { workspace = true, features = ["derive"] }
+kube-derive = "3.1"
+k8s-openapi = { workspace = true, features = ["schemars"] }
+chrono      = { workspace = true }
 libc        = { workspace = true }
+schemars    = "1"
 
 # Cluster gossip (iroh QUIC + HyParView/PlumTree)
 # Aligned from 0.96 → 0.95 to match workspace pin.
@@ -103,8 +106,10 @@ training = ["burn"]
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
 proptest      = { workspace = true }
+serde_yaml    = { workspace = true }
 tempfile      = { workspace = true }
 tokio-rustls  = { workspace = true }
+tower         = { version = "0.5", default-features = false }
 
 [[bench]]
 name = "scanner_bench"
