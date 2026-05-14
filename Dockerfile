@@ -3,7 +3,7 @@
 #
 # Build from the WORKSPACE ROOT, not from platform/proxy. The proxy crate
 # inherits deps from the root [workspace.dependencies] table and pulls
-# pingora via `[patch.crates-io] pingora-proxy = { path = "3p/pingora/…" }`
+# pingora via `[patch.crates-io] pingora-proxy = { path = "forks/pingora/…" }`
 # in the root Cargo.toml, so a standalone build context can't resolve its
 # manifest.
 #

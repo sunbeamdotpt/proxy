@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 # Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
 # Version pins are NOT workspace = true because pingora is path-patched via
-# [patch.crates-io] in the root Cargo.toml (3p/pingora submodule @ 0.8.0).
+# [patch.crates-io] in the root Cargo.toml (forks/pingora submodule @ 0.8.0).
 pingora       = { version = "0.8", features = ["rustls"] }
 pingora-proxy = { version = "0.8", features = ["rustls"] }
 pingora-core  = { version = "0.8", features = ["rustls"] }
