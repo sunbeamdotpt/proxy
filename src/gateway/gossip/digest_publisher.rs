@@ -57,6 +57,12 @@ pub struct DigestPublisherHandle {
     peers: Arc<RwLock<HashMap<[u8; 32], GatewayStateDigest>>>,
 }
 
+/// Convenience wrapper: feed a reconciled view into the publisher so the
+/// background loop can compute and (eventually) broadcast its digest.
+pub async fn publish_digest(publisher: &DigestPublisher, view: &ReconciledView) {
+    publisher.on_reconcile_done(view).await;
+}
+
 impl DigestPublisher {
     /// Create a new publisher/handle pair.
     ///

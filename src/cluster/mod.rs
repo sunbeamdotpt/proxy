@@ -12,8 +12,9 @@ pub mod node;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
+use crate::cluster::node::ClusterReady;
 use crate::config::ClusterConfig;
 use bandwidth::{
     gbps_to_bytes_per_sec, BandwidthLimiter, BandwidthMeter, BandwidthTracker,
@@ -32,6 +33,10 @@ pub struct ClusterHandle {
     pub limiter: Arc<BandwidthLimiter>,
     /// Endpoint id.
     pub endpoint_id: iroh::PublicKey,
+    /// Sender for `gateway_state` gossip broadcasts (bytes are bincode-encoded [`ClusterMessage`]).
+    pub gateway_state_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// Sender for `gateway_notify` gossip broadcasts (bytes are bincode-encoded [`ClusterMessage`]).
+    pub gateway_notify_tx: Option<mpsc::Sender<Vec<u8>>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -100,7 +105,7 @@ pub fn spawn_cluster(cfg: &ClusterConfig) -> Result<ClusterHandle> {
         })?;
 
     // Wait for the cluster to initialize (or fail).
-    let endpoint_id = ready_rx
+    let ready: ClusterReady = ready_rx
         .blocking_recv()
         .map_err(|_| anyhow::anyhow!("cluster thread exited before initialization"))??;
 
@@ -109,7 +114,9 @@ pub fn spawn_cluster(cfg: &ClusterConfig) -> Result<ClusterHandle> {
         cluster_bandwidth,
         meter,
         limiter,
-        endpoint_id,
+        endpoint_id: ready.endpoint_id,
+        gateway_state_tx: Some(ready.gateway_state_tx),
+        gateway_notify_tx: Some(ready.gateway_notify_tx),
         shutdown_tx,
     })
 }

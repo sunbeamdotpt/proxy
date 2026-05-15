@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cluster::gateway_topics::{GatewayResourceNotify, GatewayStateDigest};
+
 /// Envelope for all cluster gossip messages.
 /// Serialized with bincode before broadcast.
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +52,10 @@ pub enum Payload {
         max_bytes: u64,
         current_bytes: u64,
     },
+    /// Gateway state digest broadcast (Gateway API controller).
+    GatewayStateDigest(GatewayStateDigest),
+    /// Gateway resource change notification (Gateway API controller).
+    GatewayResourceNotify(GatewayResourceNotify),
 }
 
 impl ClusterMessage {
