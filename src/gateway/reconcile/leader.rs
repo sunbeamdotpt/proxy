@@ -11,6 +11,7 @@
 use crate::gateway::election::{Election, LeaderState};
 use crate::gateway::reconcile::gateway::run_gateway_controller;
 use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
+use crate::gateway::reconcile::httproute::run_httproute_controller;
 use kube::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ pub async fn run_reconcile_loop(election: Election, client: Client) {
     // Spawn controllers.  They check `is_leader` before patching status.
     let _gc_handle = run_gatewayclass_controller(client.clone(), is_leader.clone());
     let _gw_handle = run_gateway_controller(client.clone(), is_leader.clone());
+    let _hr_handle = run_httproute_controller(client.clone(), is_leader.clone());
 
     // Hold a LeaderToken for as long as we are leader.  When the token
     // is dropped (or invalidated by the background lease task) we
