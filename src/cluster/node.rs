@@ -12,12 +12,20 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::{api::Event, proto::TopicId, ALPN};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::cluster::bandwidth::{BandwidthMeter, BandwidthTracker, ClusterBandwidthState};
 use crate::cluster::messages::{ClusterMessage, Payload};
 use crate::config::ClusterConfig;
 use crate::metrics;
+
+/// Information sent back to [`super::spawn_cluster`] once the cluster thread
+/// has finished initialization.
+pub struct ClusterReady {
+    pub endpoint_id: iroh::PublicKey,
+    pub gateway_state_tx: mpsc::Sender<Vec<u8>>,
+    pub gateway_notify_tx: mpsc::Sender<Vec<u8>>,
+}
 
 /// Derive a deterministic TopicId from tenant UUID and channel name.
 pub fn derive_topic(tenant: &str, channel: &str) -> TopicId {
@@ -113,7 +121,7 @@ pub async fn run_cluster(
     cluster_bandwidth: Arc<ClusterBandwidthState>,
     meter: Arc<BandwidthMeter>,
     mut shutdown_rx: watch::Receiver<bool>,
-    ready_tx: tokio::sync::oneshot::Sender<Result<iroh::PublicKey>>,
+    ready_tx: tokio::sync::oneshot::Sender<Result<ClusterReady>>,
 ) {
     // Helper macro to send error through ready channel and return early.
     macro_rules! try_init {
@@ -188,13 +196,36 @@ pub async fn run_cluster(
     let (_leader_sender, leader_receiver) = leader_gossip_topic.split();
 
     let license_gossip_topic = try_init!(gossip
-        .subscribe(license_topic, peers)
+        .subscribe(license_topic, peers.clone())
         .await
         .context("subscribing to license topic"));
     let (_license_sender, license_receiver) = license_gossip_topic.split();
 
-    // Initialization complete — signal the caller with our endpoint ID.
-    let _ = ready_tx.send(Ok(my_id));
+    // Gateway API gossip topics.
+    let gateway_state_topic = derive_topic(&cfg.tenant, "gateway_state");
+    let gateway_notify_topic = derive_topic(&cfg.tenant, "gateway_notify");
+
+    let gs_gossip_topic = try_init!(gossip
+        .subscribe(gateway_state_topic, peers.clone())
+        .await
+        .context("subscribing to gateway_state topic"));
+    let (gs_sender, gs_receiver) = gs_gossip_topic.split();
+
+    let gn_gossip_topic = try_init!(gossip
+        .subscribe(gateway_notify_topic, peers)
+        .await
+        .context("subscribing to gateway_notify topic"));
+    let (gn_sender, gn_receiver) = gn_gossip_topic.split();
+
+    let (gateway_state_tx, mut gateway_state_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (gateway_notify_tx, mut gateway_notify_rx) = mpsc::channel::<Vec<u8>>(64);
+
+    // Initialization complete — signal the caller.
+    let _ = ready_tx.send(Ok(ClusterReady {
+        endpoint_id: my_id,
+        gateway_state_tx,
+        gateway_notify_tx,
+    }));
 
     let broadcast_interval = Duration::from_secs(
         cfg.bandwidth
@@ -264,6 +295,37 @@ pub async fn run_cluster(
     // 11. License topic (stub).
     let license_recv_task = tokio::spawn(handle_stub_events(license_receiver, "license"));
 
+    // 11a. Gateway state broadcast loop (driven by leader.rs digest publisher).
+    let my_id_gs = my_id_bytes;
+    let gs_broadcast_task = tokio::spawn(async move {
+        while let Some(data) = gateway_state_rx.recv().await {
+            if let Err(e) = gs_sender.broadcast(data.into()).await {
+                tracing::debug!(error = %e, "gateway_state broadcast failed");
+            }
+            metrics::CLUSTER_GOSSIP_MESSAGES
+                .with_label_values(&["gateway_state"])
+                .inc();
+        }
+    });
+
+    // 11b. Gateway notify broadcast loop (driven by leader.rs resource notifier).
+    let gn_broadcast_task = tokio::spawn(async move {
+        while let Some(data) = gateway_notify_rx.recv().await {
+            if let Err(e) = gn_sender.broadcast(data.into()).await {
+                tracing::debug!(error = %e, "gateway_notify broadcast failed");
+            }
+            metrics::CLUSTER_GOSSIP_MESSAGES
+                .with_label_values(&["gateway_notify"])
+                .inc();
+        }
+    });
+
+    // 11c. Gateway state receive loop (stub — logged for now).
+    let gs_recv_task = tokio::spawn(handle_stub_events(gs_receiver, "gateway_state"));
+
+    // 11d. Gateway notify receive loop (stub — logged for now).
+    let gn_recv_task = tokio::spawn(handle_stub_events(gn_receiver, "gateway_notify"));
+
     // 12. Stale peer eviction loop.
     let cluster_bw_evict = cluster_bandwidth.clone();
     let eviction_task = tokio::spawn(async move {
@@ -312,6 +374,18 @@ pub async fn run_cluster(
         }
         r = metrics_task => {
             tracing::error!(result = ?r, "metrics task exited");
+        }
+        r = gs_broadcast_task => {
+            tracing::error!(result = ?r, "gateway_state broadcast task exited");
+        }
+        r = gn_broadcast_task => {
+            tracing::error!(result = ?r, "gateway_notify broadcast task exited");
+        }
+        r = gs_recv_task => {
+            tracing::error!(result = ?r, "gateway_state receive task exited");
+        }
+        r = gn_recv_task => {
+            tracing::error!(result = ?r, "gateway_notify receive task exited");
         }
     }
 

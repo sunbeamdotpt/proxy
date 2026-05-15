@@ -66,6 +66,11 @@ pub struct ResourceNotifierHandle {
     peer_debounce: Arc<RwLock<HashMap<ResourceKey, Instant>>>,
 }
 
+/// Convenience wrapper: feed a local CRD watch event into the notifier.
+pub async fn handle_notify(notifier: &ResourceNotifier, notify: GatewayResourceNotify) {
+    notifier.on_local_event(notify).await;
+}
+
 impl ResourceNotifier {
     /// Create a new notifier/handle pair.
     pub fn new() -> (Self, ResourceNotifierHandle) {

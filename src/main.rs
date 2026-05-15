@@ -413,7 +413,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
         pipeline_bypass_cidrs: crate::rate_limit::cidr::parse_cidrs(
             &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
         ),
-        cluster: cluster_handle,
+        cluster: cluster_handle.clone(),
         ddos_observe_only: cfg.ddos.as_ref().map(|d| d.observe_only).unwrap_or(false),
         scanner_observe_only: cfg.scanner.as_ref().map(|s| s.observe_only).unwrap_or(false),
     };
@@ -508,6 +508,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
         if gateway_enabled {
             let gateway_ns = k8s_cfg.namespace.clone();
             let routes_tx = routes_tx.clone();
+            let cluster_for_reconcile = cluster_handle.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -531,6 +532,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
                         election,
                         client,
                         routes_tx,
+                        cluster_for_reconcile,
                     ).await;
                 });
             });
