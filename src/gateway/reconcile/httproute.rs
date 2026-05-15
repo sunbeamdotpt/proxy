@@ -8,7 +8,10 @@
 //! `.status.parents[]`, and emits `RouteState` for the reconciled view.
 
 use crate::gateway::api::HTTPRoute;
-use crate::gateway::model::{GatewayState, ParentRef, RouteState};
+use crate::gateway::model::{
+    GatewayState, HTTPRouteRule, HTTPRouteState, HostnameMatch, ParentRef, PathMatch, PathRewrite,
+    RouteFilter, RouteMatch, RouteState, WeightedBackend,
+};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use serde_json::Value;
@@ -248,6 +251,161 @@ fn resolve_parent_ref(
     ];
 
     (Some(parent_ref), conditions)
+}
+
+/// Parse an HTTPRoute CRD into the full `HTTPRouteState` model,
+/// including hostnames and rules extracted from the raw spec.
+pub fn parse_httproute_state(route: &HTTPRoute) -> HTTPRouteState {
+    let ns = Arc::from(route.metadata.namespace.as_deref().unwrap_or("default"));
+    let name = Arc::from(route.metadata.name.as_deref().unwrap_or(""));
+    let generation = route.metadata.generation.unwrap_or(0);
+
+    let hostnames: Vec<HostnameMatch> = route
+        .spec
+        .hostnames
+        .as_ref()
+        .map(|h| {
+            h.iter()
+                .map(|s| {
+                    if s.starts_with("*.") {
+                        HostnameMatch::Wildcard(Arc::from(&s[2..]))
+                    } else {
+                        HostnameMatch::Exact(Arc::from(s.as_str()))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let rules: Vec<HTTPRouteRule> = route
+        .spec
+        .rules
+        .as_ref()
+        .map(|r| r.iter().filter_map(parse_rule).collect())
+        .unwrap_or_default();
+
+    HTTPRouteState {
+        namespace: ns,
+        name,
+        generation,
+        hostnames,
+        rules,
+        parent_refs: vec![], // filled by reconcile_single
+    }
+}
+
+fn parse_rule(value: &Value) -> Option<HTTPRouteRule> {
+    let obj = value.as_object()?;
+
+    let matches: Vec<RouteMatch> = obj
+        .get("matches")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_match).collect())
+        .unwrap_or_default();
+
+    let backends: Vec<WeightedBackend> = obj
+        .get("backendRefs")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_backend_ref).collect())
+        .unwrap_or_default();
+
+    let filters: Vec<RouteFilter> = obj
+        .get("filters")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(parse_filter).collect())
+        .unwrap_or_default();
+
+    Some(HTTPRouteRule {
+        matches,
+        backends,
+        filters,
+    })
+}
+
+fn parse_match(value: &Value) -> Option<RouteMatch> {
+    let obj = value.as_object()?;
+    let path = obj.get("path").and_then(parse_path_match);
+    let method = obj.get("method").and_then(|v| v.as_str()).map(|s| Arc::from(s));
+    // Header and query param matches are parsed but ignored in T1.
+    Some(RouteMatch {
+        path,
+        headers: vec![],
+        query_params: vec![],
+        method,
+    })
+}
+
+fn parse_path_match(value: &Value) -> Option<PathMatch> {
+    let obj = value.as_object()?;
+    let typ = obj.get("type").and_then(|v| v.as_str())?;
+    let val = obj.get("value").and_then(|v| v.as_str())?;
+    Some(match typ {
+        "Exact" => PathMatch::Exact(Arc::from(val)),
+        "PathPrefix" => PathMatch::Prefix(Arc::from(val)),
+        "RegularExpression" => PathMatch::Regex(Arc::from(val)),
+        _ => PathMatch::Prefix(Arc::from(val)),
+    })
+}
+
+fn parse_backend_ref(value: &Value) -> Option<WeightedBackend> {
+    let obj = value.as_object()?;
+    let name = obj.get("name").and_then(|v| v.as_str())?;
+    let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80);
+    let weight = obj.get("weight").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+    // Build a cluster-internal service URL.
+    let backend = format!("{}.svc.cluster.local:{}", name, port);
+    Some(WeightedBackend {
+        backend: Arc::from(backend),
+        weight,
+    })
+}
+
+fn parse_filter(value: &Value) -> Option<RouteFilter> {
+    let obj = value.as_object()?;
+    let typ = obj.get("type").and_then(|v| v.as_str())?;
+    match typ {
+        "URLRewrite" => {
+            let url_rewrite = obj.get("urlRewrite")?;
+            let path = url_rewrite.get("path")?;
+            let path_type = path.get("type").and_then(|v| v.as_str())?;
+            if path_type == "ReplacePrefixMatch" {
+                let prefix = path
+                    .get("replacePrefixMatch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Some(RouteFilter::UrlRewrite {
+                    path: PathRewrite::PrefixReplace {
+                        prefix: Arc::from("/"),
+                        replacement: Arc::from(prefix),
+                    },
+                })
+            } else {
+                None
+            }
+        }
+        "RequestHeaderModifier" => {
+            let set = obj.get("requestHeaderModifier")?.get("set")?.as_array()?;
+            let first = set.first()?;
+            let name = first.get("name").and_then(|v| v.as_str())?;
+            let value = first.get("value").and_then(|v| v.as_str())?;
+            Some(RouteFilter::RequestHeaderAdd {
+                name: Arc::from(name),
+                value: Arc::from(value),
+            })
+        }
+        "ResponseHeaderModifier" => {
+            let set = obj.get("responseHeaderModifier")?.get("set")?.as_array()?;
+            let first = set.first()?;
+            let name = first.get("name").and_then(|v| v.as_str())?;
+            let value = first.get("value").and_then(|v| v.as_str())?;
+            Some(RouteFilter::ResponseHeaderAdd {
+                name: Arc::from(name),
+                value: Arc::from(value),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn resolved_refs_true(observed_generation: i64) -> StatusCondition {

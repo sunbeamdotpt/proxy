@@ -16,12 +16,11 @@ pub mod refgrant;
 pub use leader::run_reconcile_loop;
 
 use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant};
-use crate::gateway::model::{GatewayView, HTTPRouteState, ReferenceGrantState, RouteState};
+use crate::gateway::model::{GatewayView, ReferenceGrantState, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
-use crate::gateway::reconcile::httproute::reconcile_httproutes;
+use crate::gateway::reconcile::httproute::{reconcile_httproutes, parse_httproute_state};
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use kube::api::Api;
-use std::sync::Arc;
 
 /// Single reconcile tick: fetch all Gateway API objects and emit a view.
 pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
@@ -59,17 +58,12 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
 
     let reconciled_routes = reconcile_httproutes(&httproute_list.items, &gateway_states, &grant_index);
 
-    let http_routes: Vec<HTTPRouteState> = reconciled_routes
-        .iter()
-        .map(|r| HTTPRouteState {
-            namespace: r.route_state.namespace.clone(),
-            name: r.route_state.name.clone(),
-            generation: r.route_state.generation,
-            hostnames: vec![], // populated by translate layer
-            rules: vec![],     // populated by translate layer
-            parent_refs: r.route_state.parent_refs.clone(),
-        })
-        .collect();
+    let mut http_routes = Vec::new();
+    for (raw, reconciled) in httproute_list.items.iter().zip(reconciled_routes.iter()) {
+        let mut state = parse_httproute_state(raw);
+        state.parent_refs = reconciled.route_state.parent_refs.clone();
+        http_routes.push(state);
+    }
 
     let routes: Vec<RouteState> = reconciled_routes
         .into_iter()
