@@ -206,6 +206,7 @@ mod tests {
         ReconciledView {
             gateways: vec![],
             routes: vec![],
+            http_routes: vec![],
             reference_grants: vec![],
         }
     }

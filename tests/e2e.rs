@@ -9,6 +9,7 @@
 //! `run_forever()` never returns, which is fine — the OS cleans everything up
 //! when the test binary exits).
 
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -112,7 +113,20 @@ fn start_proxy_once(backend_port: u16) {
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
         let compiled_rewrites = SunbeamProxy::compile_rewrites(&routes);
-        let proxy = SunbeamProxy { routes, acme_routes, ddos_detector: None, scanner_detector: None, bot_allowlist: None, rate_limiter: None, compiled_rewrites, http_client: reqwest::Client::new(), pipeline_bypass_cidrs: vec![], cluster: None, ddos_observe_only: false, scanner_observe_only: false };
+        let proxy = SunbeamProxy {
+            routes: Arc::new(arc_swap::ArcSwap::from_pointee(routes)),
+            acme_routes,
+            ddos_detector: None,
+            scanner_detector: None,
+            bot_allowlist: None,
+            rate_limiter: None,
+            compiled_rewrites: Arc::new(arc_swap::ArcSwap::from_pointee(compiled_rewrites)),
+            http_client: reqwest::Client::new(),
+            pipeline_bypass_cidrs: vec![],
+            cluster: None,
+            ddos_observe_only: false,
+            scanner_observe_only: false,
+        };
 
         let opt = Opt {
             upgrade: false,

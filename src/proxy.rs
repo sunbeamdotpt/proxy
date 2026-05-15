@@ -45,8 +45,8 @@ pub struct CompiledRewrite {
 
 /// Sunbeamproxy.
 pub struct SunbeamProxy {
-    /// Routes.
-    pub routes: Vec<RouteConfig>,
+    /// Routes — atomically swappable at runtime via [`Self::swap_routes`].
+    pub routes: Arc<ArcSwap<Vec<RouteConfig>>>,
     /// Per-challenge route table populated by the Ingress watcher.
     pub acme_routes: AcmeRoutes,
     /// Optional DDoS detector (ensemble: decision tree + MLP).
@@ -57,8 +57,8 @@ pub struct SunbeamProxy {
     pub bot_allowlist: Option<Arc<BotAllowlist>>,
     /// Optional per-identity rate limiter.
     pub rate_limiter: Option<Arc<RateLimiter>>,
-    /// Compiled rewrite rules per route (indexed by host_prefix).
-    pub compiled_rewrites: Vec<(String, Vec<CompiledRewrite>)>,
+    /// Compiled rewrite rules per route (indexed by host_prefix) — swappable with routes.
+    pub compiled_rewrites: Arc<ArcSwap<Vec<(String, Arc<Vec<CompiledRewrite>>)>>>,
     /// Shared reqwest client for auth subrequests.
     pub http_client: reqwest::Client,
     /// Parsed bypass CIDRs — IPs in these ranges skip the detection pipeline.
@@ -100,19 +100,20 @@ pub struct RequestCtx {
 }
 
 impl SunbeamProxy {
-    fn find_route(&self, prefix: &str) -> Option<&RouteConfig> {
-        self.routes.iter().find(|r| r.host_prefix == prefix)
+    fn find_route(&self, prefix: &str) -> Option<RouteConfig> {
+        self.routes.load().iter().find(|r| r.host_prefix == prefix).cloned()
     }
 
-    fn find_rewrites(&self, prefix: &str) -> Option<&[CompiledRewrite]> {
+    fn find_rewrites(&self, prefix: &str) -> Option<Arc<Vec<CompiledRewrite>>> {
         self.compiled_rewrites
+            .load()
             .iter()
             .find(|(p, _)| p == prefix)
-            .map(|(_, rules)| rules.as_slice())
+            .map(|(_, rules)| Arc::clone(rules))
     }
 
     /// Compile all rewrite rules from routes at startup.
-    pub fn compile_rewrites(routes: &[RouteConfig]) -> Vec<(String, Vec<CompiledRewrite>)> {
+    pub fn compile_rewrites(routes: &[RouteConfig]) -> Vec<(String, Arc<Vec<CompiledRewrite>>)> {
         routes
             .iter()
             .filter(|r| !r.rewrites.is_empty())
@@ -138,9 +139,17 @@ impl SunbeamProxy {
                         }
                     })
                     .collect();
-                (r.host_prefix.clone(), compiled)
+                (r.host_prefix.clone(), Arc::new(compiled))
             })
             .collect()
+    }
+
+    /// Atomically replace the route table and compiled rewrites.
+    pub fn swap_routes(&self, new_routes: Vec<RouteConfig>) {
+        let compiled = Self::compile_rewrites(&new_routes);
+        self.compiled_rewrites.store(Arc::new(compiled));
+        self.routes.store(Arc::new(new_routes));
+        tracing::info!("Route table hot-swapped");
     }
 }
 
@@ -564,7 +573,7 @@ impl ProxyHttp for SunbeamProxy {
                 // Apply rewrite rules before static file lookup.
                 let mut serve_path = req_path.clone();
                 if let Some(rewrites) = self.find_rewrites(prefix) {
-                    for rw in rewrites {
+                    for rw in rewrites.iter() {
                         if rw.pattern.is_match(&req_path) {
                             serve_path = rw.target.clone();
                             break;
