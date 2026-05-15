@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
     version = "v1",
     kind = "HTTPRoute",
     plural = "httproutes",
+    namespaced,
     status = "HTTPRouteStatus"
 )]
 #[serde(rename_all = "camelCase")]

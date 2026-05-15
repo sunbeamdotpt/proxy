@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
     group = "gateway.networking.k8s.io",
     version = "v1",
     kind = "ReferenceGrant",
-    plural = "referencegrants"
+    plural = "referencegrants",
+    namespaced
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceGrantSpec {

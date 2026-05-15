@@ -40,7 +40,7 @@ pub fn reconcile_httproutes(
         .collect()
 }
 
-fn reconcile_single(
+pub fn reconcile_single(
     route: &HTTPRoute,
     gateways: &[GatewayState],
     grant_index: &GrantIndex,
@@ -258,6 +258,164 @@ fn resolved_refs_true(observed_generation: i64) -> StatusCondition {
         message: "All references resolved".to_string(),
         observed_generation,
     }
+}
+
+// ---------------------------------------------------------------------------
+// HTTPRoute controller (kube::runtime::Controller)
+// ---------------------------------------------------------------------------
+
+use futures::StreamExt;
+use kube::api::{Api, Patch, PatchParams};
+use kube::runtime::controller::{Action, Controller};
+use kube::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+/// Context shared across HTTPRoute reconcile invocations.
+#[derive(Clone)]
+pub struct HTTPRouteContext {
+    pub client: Client,
+    pub is_leader: Arc<AtomicBool>,
+}
+
+/// Reconcile a single HTTPRoute: resolve parentRefs, compute status,
+/// and patch `.status.parents[]` when leader.
+pub async fn reconcile_httproute(
+    route: Arc<HTTPRoute>,
+    ctx: Arc<HTTPRouteContext>,
+) -> Result<Action, kube::Error> {
+    let ns = route.metadata.namespace.clone().unwrap_or_default();
+    let name = route.metadata.name.clone().unwrap_or_default();
+    let observed_generation = route.metadata.generation.unwrap_or(0);
+
+    // Fetch all Gateways and ReferenceGrants for parentRef resolution.
+    // In T1 we do a fresh list per reconcile; a shared cache can be added later.
+    let gateways: Api<crate::gateway::api::Gateway> = Api::all(ctx.client.clone());
+    let grants: Api<crate::gateway::api::ReferenceGrant> = Api::all(ctx.client.clone());
+
+    let gateway_list = match gateways.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list Gateways for HTTPRoute reconcile");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    };
+    let grant_list = match grants.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list ReferenceGrants for HTTPRoute reconcile");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    };
+
+    let gateway_states: Vec<GatewayState> = gateway_list
+        .iter()
+        .map(|gw| crate::gateway::reconcile::gateway::build_gateway_state(gw))
+        .collect();
+
+    let grant_states = crate::gateway::reconcile::refgrant::reconcile_reference_grants(&grant_list.items);
+    let grant_index = GrantIndex::new(grant_states);
+
+    let reconciled = reconcile_single(&route, &gateway_states, &grant_index);
+
+    if ctx.is_leader.load(Ordering::Relaxed) {
+        let parents: Vec<serde_json::Value> = reconciled
+            .parent_statuses
+            .iter()
+            .map(|ps| {
+                let conditions: Vec<serde_json::Value> = ps
+                    .conditions
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "type": match c.condition_type {
+                                ConditionType::Accepted => "Accepted",
+                                ConditionType::Programmed => "Programmed",
+                                ConditionType::ResolvedRefs => "ResolvedRefs",
+                                ConditionType::Conflicted => "Conflicted",
+                                ConditionType::Poison => "Poison",
+                                ConditionType::NoMatchingParent => "NoMatchingParent",
+                                ConditionType::RefNotPermitted => "RefNotPermitted",
+                                ConditionType::UnsupportedFeature => "UnsupportedFeature",
+                            },
+                            "status": match c.status {
+                                ConditionStatus::True => "True",
+                                ConditionStatus::False => "False",
+                                ConditionStatus::Unknown => "Unknown",
+                            },
+                            "reason": c.reason,
+                            "message": c.message,
+                            "observedGeneration": c.observed_generation,
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "parentRef": {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "Gateway",
+                        "name": ps.parent_ref.name.as_ref(),
+                        "namespace": ps.parent_ref.namespace.as_deref(),
+                        "sectionName": ps.parent_ref.section_name.as_deref(),
+                    },
+                    "conditions": conditions,
+                })
+            })
+            .collect();
+
+        let patch_body = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+            },
+            "status": {
+                "parents": parents,
+            }
+        });
+
+        let api: Api<HTTPRoute> = Api::namespaced(ctx.client.clone(), &ns);
+        let pp = PatchParams::apply("sunbeam-proxy");
+        if let Err(e) = api.patch_status(&name, &pp, &Patch::Apply(&patch_body)).await {
+            tracing::warn!(error = %e, name, namespace = ns, "HTTPRoute status patch failed");
+        } else {
+            tracing::debug!(name, namespace = ns, "HTTPRoute status patched");
+        }
+    }
+
+    Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+fn error_policy_httproute(
+    _route: Arc<HTTPRoute>,
+    _error: &kube::Error,
+    _ctx: Arc<HTTPRouteContext>,
+) -> Action {
+    Action::requeue(Duration::from_secs(5))
+}
+
+/// Start the HTTPRoute controller.
+pub fn run_httproute_controller(
+    client: Client,
+    is_leader: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let ctx = Arc::new(HTTPRouteContext {
+        client: client.clone(),
+        is_leader,
+    });
+    let httproutes = Api::<HTTPRoute>::all(client);
+    tokio::spawn(async move {
+        Controller::new(httproutes, kube::runtime::watcher::Config::default())
+            .run(reconcile_httproute, error_policy_httproute, ctx)
+            .for_each(|res| async move {
+                match res {
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("HTTPRoute controller error: {e}"),
+                }
+            })
+            .await;
+    })
 }
 
 #[cfg(test)]
