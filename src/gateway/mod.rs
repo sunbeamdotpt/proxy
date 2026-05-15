@@ -19,8 +19,11 @@ pub mod translate;
 pub mod watchdog;
 
 /// Gateway-specific runtime configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct GatewayConfig {
     /// Enable the Gateway API reconciler.
+    #[serde(default = "default_gateway_enabled")]
     pub enabled: bool,
 }
+
+fn default_gateway_enabled() -> bool { true }

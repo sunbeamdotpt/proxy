@@ -6,6 +6,7 @@ mod telemetry;
 mod watcher;
 
 use sunbeam_proxy::{acme, config};
+use sunbeam_proxy::config::RouteConfig;
 use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
@@ -382,6 +383,24 @@ fn run_serve(upgrade: bool) -> Result<()> {
     let routes = Arc::new(ArcSwap::from_pointee(cfg.routes.clone()));
     let compiled_rewrites = Arc::new(ArcSwap::from_pointee(compiled_rewrites));
 
+    // Gateway API route update channel.
+    let (routes_tx, routes_rx) = std::sync::mpsc::channel::<Vec<RouteConfig>>();
+    let routes_for_watcher = routes.clone();
+    let compiled_for_watcher = compiled_rewrites.clone();
+    std::thread::spawn(move || {
+        while let Ok(new_routes) = routes_rx.recv() {
+            // Drain pending updates, keep only the latest.
+            let mut latest = new_routes;
+            while let Ok(r) = routes_rx.try_recv() {
+                latest = r;
+            }
+            let compiled = SunbeamProxy::compile_rewrites(&latest);
+            compiled_for_watcher.store(Arc::new(compiled));
+            routes_for_watcher.store(Arc::new(latest));
+            tracing::info!("Gateway API route table hot-swapped");
+        }
+    });
+
     let proxy = SunbeamProxy {
         routes: routes.clone(),
         acme_routes: acme_routes.clone(),
@@ -484,6 +503,39 @@ fn run_serve(upgrade: bool) -> Result<()> {
         let k8s_cfg = cfg.kubernetes.clone();
         let cert_path = cfg.tls.cert_path.clone();
         let key_path = cfg.tls.key_path.clone();
+        let gateway_enabled = cfg.gateway.enabled;
+
+        if gateway_enabled {
+            let gateway_ns = k8s_cfg.namespace.clone();
+            let routes_tx = routes_tx.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("gateway reconcile runtime");
+                rt.block_on(async move {
+                    let client = match Client::try_default().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(error = %e, "gateway: failed to create K8s client; reconciler disabled");
+                            return;
+                        }
+                    };
+                    let election = sunbeam_proxy::gateway::election::Election::new(
+                        client.clone(),
+                        gateway_ns,
+                        "sunbeam-proxy-gateway".to_string(),
+                        std::env::var("HOSTNAME").unwrap_or_else(|_| "sunbeam-proxy".to_string()),
+                    );
+                    sunbeam_proxy::gateway::reconcile::run_reconcile_loop(
+                        election,
+                        client,
+                        routes_tx,
+                    ).await;
+                });
+            });
+        }
+
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -497,6 +549,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
                         return;
                     }
                 };
+
                 tokio::join!(
                     acme::watch_ingresses(
                         client.clone(),
