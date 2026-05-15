@@ -1,6 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::gateway::GatewayConfig;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -44,6 +45,9 @@ pub struct Config {
     /// connections are forwarded to Pingora's internal TLS listener.
     #[serde(default)]
     pub tls_passthrough: Option<Vec<TlsPassthroughRoute>>,
+    /// Gateway API control plane configuration.
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
