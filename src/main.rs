@@ -13,6 +13,7 @@ use sunbeam_proxy::scanner;
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use kube::Client;
 use pingora::server::{configuration::Opt, Server};
@@ -378,14 +379,17 @@ fn run_serve(upgrade: bool) -> Result<()> {
     let compiled_rewrites = SunbeamProxy::compile_rewrites(&cfg.routes);
     let http_client = reqwest::Client::new();
 
+    let routes = Arc::new(ArcSwap::from_pointee(cfg.routes.clone()));
+    let compiled_rewrites = Arc::new(ArcSwap::from_pointee(compiled_rewrites));
+
     let proxy = SunbeamProxy {
-        routes: cfg.routes.clone(),
+        routes: routes.clone(),
         acme_routes: acme_routes.clone(),
         ddos_detector,
         scanner_detector,
         bot_allowlist,
         rate_limiter,
-        compiled_rewrites,
+        compiled_rewrites: compiled_rewrites.clone(),
         http_client,
         pipeline_bypass_cidrs: crate::rate_limit::cidr::parse_cidrs(
             &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
