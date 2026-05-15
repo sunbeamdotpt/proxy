@@ -1,0 +1,83 @@
+# Copyright Sunbeam Studios 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# sunbeam-proxy Deployment + Service.
+# Expects the Gateway API CRDs to be installed separately
+# (infra/gateway-api/standard-install.yaml).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sunbeam-proxy
+  namespace: sunbeam-proxy
+  labels:
+    app: sunbeam-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sunbeam-proxy
+  template:
+    metadata:
+      labels:
+        app: sunbeam-proxy
+    spec:
+      serviceAccountName: sunbeam-proxy
+      containers:
+        - name: proxy
+          image: src.sunbeam.pt/studio/proxy:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+            - name: gossip
+              containerPort: 8746
+          env:
+            - name: RUST_LOG
+              value: "info,sunbeam_proxy=debug"
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pingora
+              readOnly: true
+            - name: tls
+              mountPath: /etc/sunbeam/tls
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+      volumes:
+        - name: config
+          configMap:
+            name: sunbeam-proxy-config
+        - name: tls
+          secret:
+            secretName: sunbeam-proxy-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sunbeam-proxy
+  namespace: sunbeam-proxy
+  labels:
+    app: sunbeam-proxy
+spec:
+  selector:
+    app: sunbeam-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+  type: LoadBalancer

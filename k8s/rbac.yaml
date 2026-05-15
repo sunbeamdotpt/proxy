@@ -1,0 +1,47 @@
+# Copyright Sunbeam Studios 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# RBAC for the sunbeam-proxy Gateway API controller.
+# The proxy needs cluster-scoped read access to Gateway API CRDs and
+# namespace-scoped write access to patch Gateway / HTTPRoute status.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sunbeam-proxy
+  namespace: sunbeam-proxy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sunbeam-proxy-gateway
+rules:
+  # Gateway API resources (cluster-scoped read).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes", "referencegrants", "gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  # Status writeback (leader only).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status", "httproutes/status", "gatewayclasses/status"]
+    verbs: ["patch", "update"]
+  # Lease API for leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Core resources for cert/config reload.
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sunbeam-proxy-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sunbeam-proxy-gateway
+subjects:
+  - kind: ServiceAccount
+    name: sunbeam-proxy
+    namespace: sunbeam-proxy

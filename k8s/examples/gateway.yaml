@@ -1,0 +1,25 @@
+# Copyright Sunbeam Studios 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example Gateway that the sunbeam-proxy controller will program routes from.
+# The GatewayClass "sunbeam" is created automatically by the proxy on startup.
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: sunbeam-example
+  namespace: default
+spec:
+  gatewayClassName: sunbeam
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: sunbeam-example-tls
