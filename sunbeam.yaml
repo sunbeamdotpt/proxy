@@ -17,7 +17,14 @@ targets:
   doc:
     exec: "cargo doc --no-deps"
   package:
-    exec: "docker buildx build --push -t src.${SUNBEAM_REGISTRY}/studio/proxy:latest ."
+    exec: |
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        -t ghcr.io/sunbeamdotpt/sunbeam-proxy:latest \
+        -t ghcr.io/sunbeamdotpt/sunbeam-proxy:${PROXY_TAG:-latest} \
+        -f platform/proxy/Dockerfile \
+        .
 tenant:
   namespace: sunbeam-proxy
 outputs:
