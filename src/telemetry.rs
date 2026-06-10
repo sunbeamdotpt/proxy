@@ -36,7 +36,7 @@ pub fn init(_otlp_endpoint: &str) {
         {
             Ok(exporter) => {
                 let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-                    .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                    .with_simple_exporter(exporter)
                     .build();
 
                 opentelemetry::global::set_tracer_provider(provider.clone());
