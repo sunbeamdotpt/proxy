@@ -108,8 +108,16 @@ fn start_proxy_once(backend_port: u16) {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            response_headers_add: vec![],
+            response_headers_remove: vec![],
+            request_headers: vec![],
+            request_headers_add: vec![],
+            request_headers_remove: vec![],
             cache: None,
+            cors: None,
             timeout_secs: None,
+            listener_hostname: None,
+            gateway_api: false,
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
         let compiled_rewrites = SunbeamProxy::compile_rewrites(&routes);

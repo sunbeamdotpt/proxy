@@ -1,0 +1,19 @@
+[listen]
+http = "0.0.0.0:18080"
+https = "0.0.0.0:18443"
+
+[tls]
+cert_path = "/tmp/sunbeam-test-cert.pem"
+key_path = "/tmp/sunbeam-test-key.pem"
+
+[telemetry]
+otlp_endpoint = ""
+metrics_port = 0
+
+[kubernetes]
+namespace = "default"
+tls_secret = "pingora-tls"
+config_configmap = "pingora-config"
+
+[gateway]
+enabled = true
