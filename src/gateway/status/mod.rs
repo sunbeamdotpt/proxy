@@ -54,3 +54,20 @@ pub async fn write_gateway_status(
 ) {
     tracing::trace!("status writeback stub — use StatusWriter");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_gateway_status_stub_is_callable() {
+        let cond = StatusCondition {
+            condition_type: ConditionType::Accepted,
+            status: ConditionStatus::True,
+            reason: "Accepted".to_string(),
+            message: "ok".to_string(),
+            observed_generation: 1,
+        };
+        write_gateway_status("gw", "default", &[cond]).await;
+    }
+}

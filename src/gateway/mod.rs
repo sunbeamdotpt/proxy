@@ -7,6 +7,7 @@
 //! as an in-process reconciler within the Sunbeam proxy.
 
 pub mod api;
+pub mod cert;
 pub mod cluster_join;
 pub mod dataplane;
 pub mod election;
@@ -27,3 +28,14 @@ pub struct GatewayConfig {
 }
 
 fn default_gateway_enabled() -> bool { true }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_config_deserializes_to_enabled() {
+        let cfg: GatewayConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(cfg.enabled);
+    }
+}

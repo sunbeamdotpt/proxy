@@ -24,7 +24,6 @@ use crate::cluster::gateway_topics::GatewayResourceNotify;
 use crate::cluster::messages::{ClusterMessage, Payload};
 use crate::cluster::ClusterHandle;
 use crate::config::RouteConfig;
-use crate::gateway::api::Gateway;
 use crate::gateway::election::{Election, LeaderState};
 use crate::gateway::gossip::digest_publisher::{DigestEvent, DigestPublisher, publish_digest};
 use crate::gateway::gossip::resource_notify::{NotifyEvent, ResourceNotifier, handle_notify};
@@ -34,7 +33,6 @@ use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
 use crate::gateway::reconcile::httproute::run_httproute_controller;
 use crate::gateway::reconcile::reconcile_tick;
 use crate::gateway::translate::translate_view;
-use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -53,6 +51,8 @@ pub async fn run_reconcile_loop(
     client: Client,
     routes_tx: Sender<Vec<RouteConfig>>,
     cluster_handle: Option<Arc<ClusterHandle>>,
+    cert_path: String,
+    key_path: String,
 ) {
     let is_leader = Arc::new(AtomicBool::new(election.state() == LeaderState::Leader));
 
@@ -195,35 +195,26 @@ pub async fn run_reconcile_loop(
             }
             prev_view = Some(view.clone());
 
-            // Update Gateway Programmed status when leader.
-            if is_leader.load(Ordering::Relaxed) {
-                for gw in &view.gateways {
-                    let programmed = serde_json::json!({
-                        "apiVersion": "gateway.networking.k8s.io/v1",
-                        "kind": "Gateway",
-                        "metadata": {
-                            "name": gw.name.as_ref(),
-                            "namespace": gw.namespace.as_ref(),
-                        },
-                        "status": {
-                            "conditions": [
-                                {
-                                    "type": "Programmed",
-                                    "status": "True",
-                                    "reason": "Programmed",
-                                    "message": "Routes programmed into proxy",
-                                    "observedGeneration": gw.generation,
-                                }
-                            ]
-                        }
-                    });
-                    let api: Api<Gateway> = Api::namespaced(client.clone(), gw.namespace.as_ref());
-                    let pp = PatchParams::apply("sunbeam-proxy");
-                    if let Err(e) = api.patch_status(gw.name.as_ref(), &pp, &Patch::Apply(&programmed)).await {
-                        tracing::warn!(error = %e, name = %gw.name, "Gateway Programmed status patch failed");
-                    }
+            // If any Gateway declares an HTTPS listener with valid
+            // certificateRefs, fetch the Secret and write the cert so that
+            // Pingora can serve TLS on the next graceful upgrade.
+            match crate::gateway::cert::maybe_write_gateway_certs(
+                &client, &view, &cert_path, &key_path,
+            ).await
+            {
+                Ok(true) => {
+                    tracing::info!("Gateway TLS certs changed — triggering graceful upgrade");
+                    crate::upgrade::trigger_upgrade();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "Gateway TLS cert fetch failed");
                 }
             }
+
+            // Gateway status (including Programmed=True) is written by the
+            // dedicated Gateway controller; the main loop only computes the
+            // translated route table here.
         }
     }
 }
@@ -299,4 +290,138 @@ fn diff_view(
     }
 
     notifies
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::model::{GatewayState, HTTPRouteState, ListenerState, ReferenceGrantState, RouteState};
+
+    fn gw(ns: &str, name: &str, generation: i64) -> GatewayState {
+        GatewayState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        }
+    }
+
+    fn route(ns: &str, name: &str, generation: i64) -> HTTPRouteState {
+        HTTPRouteState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            hostnames: vec![],
+            rules: vec![],
+            parent_refs: vec![],
+        }
+    }
+
+    fn grant(ns: &str, name: &str, generation: i64) -> ReferenceGrantState {
+        ReferenceGrantState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            from: vec![],
+            to: vec![],
+        }
+    }
+
+    fn view(gateways: Vec<GatewayState>, routes: Vec<HTTPRouteState>, grants: Vec<ReferenceGrantState>) -> ReconciledView {
+        ReconciledView {
+            gateways,
+            routes: vec![],
+            http_routes: routes,
+            reference_grants: grants,
+        }
+    }
+
+    #[test]
+    fn diff_view_emits_all_when_old_is_none() {
+        let new = view(
+            vec![gw("default", "gw-1", 1)],
+            vec![route("default", "route-1", 1)],
+            vec![grant("default", "grant-1", 1)],
+        );
+        let notifies = diff_view(&None, &new);
+        assert_eq!(notifies.len(), 3);
+        assert!(notifies.iter().any(|n| n.kind == "Gateway" && n.name == "gw-1"));
+        assert!(notifies.iter().any(|n| n.kind == "HTTPRoute" && n.name == "route-1"));
+        assert!(notifies.iter().any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+    }
+
+    #[test]
+    fn diff_view_skips_unchanged_resources() {
+        let old = view(
+            vec![gw("default", "gw-1", 1)],
+            vec![route("default", "route-1", 1)],
+            vec![grant("default", "grant-1", 1)],
+        );
+        let new = view(
+            vec![gw("default", "gw-1", 1)],
+            vec![route("default", "route-1", 1)],
+            vec![grant("default", "grant-1", 1)],
+        );
+        let notifies = diff_view(&Some(old), &new);
+        assert!(notifies.is_empty());
+    }
+
+    #[test]
+    fn diff_view_emits_changed_generation() {
+        let old = view(
+            vec![gw("default", "gw-1", 1)],
+            vec![],
+            vec![],
+        );
+        let new = view(
+            vec![gw("default", "gw-1", 2)],
+            vec![],
+            vec![],
+        );
+        let notifies = diff_view(&Some(old), &new);
+        assert_eq!(notifies.len(), 1);
+        assert_eq!(notifies[0].kind, "Gateway");
+        assert_eq!(notifies[0].generation, 2);
+    }
+
+    #[test]
+    fn diff_view_emits_new_resources_only() {
+        let old = view(
+            vec![gw("default", "gw-1", 1)],
+            vec![route("default", "route-1", 1)],
+            vec![],
+        );
+        let new = view(
+            vec![gw("default", "gw-1", 1), gw("default", "gw-2", 1)],
+            vec![route("default", "route-1", 1), route("default", "route-2", 1)],
+            vec![grant("default", "grant-1", 1)],
+        );
+        let notifies = diff_view(&Some(old), &new);
+        assert_eq!(notifies.len(), 3);
+        assert!(notifies.iter().any(|n| n.kind == "Gateway" && n.name == "gw-2"));
+        assert!(notifies.iter().any(|n| n.kind == "HTTPRoute" && n.name == "route-2"));
+        assert!(notifies.iter().any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+    }
+
+    #[test]
+    fn diff_view_differentiates_by_namespace_and_name() {
+        let old = view(
+            vec![gw("ns-a", "gw", 1)],
+            vec![],
+            vec![],
+        );
+        let new = view(
+            vec![gw("ns-a", "gw", 1), gw("ns-b", "gw", 1)],
+            vec![],
+            vec![],
+        );
+        let notifies = diff_view(&Some(old), &new);
+        assert_eq!(notifies.len(), 1);
+        assert_eq!(notifies[0].namespace, "ns-b");
+    }
 }

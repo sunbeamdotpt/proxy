@@ -20,6 +20,35 @@ use std::time::Duration;
 /// Name of the controller as advertised in GatewayClass `controllerName`.
 pub const CONTROLLER_NAME: &str = "sunbeam.io/gateway-controller";
 
+/// Core and extended features supported by this controller.
+///
+/// The set is advertised in `GatewayClass.status.supportedFeatures` and is
+/// consumed by the upstream Gateway API conformance test suite to discover
+/// which tests should be run.
+pub fn supported_features() -> Vec<String> {
+    vec![
+        // Core
+        "Gateway".to_string(),
+        "HTTPRoute".to_string(),
+        // Gateway extended
+        "GatewayPort8080".to_string(),
+        "GatewayHTTPListenerIsolation".to_string(),
+        // HTTPRoute extended
+        "HTTPRouteMethodMatching".to_string(),
+        "HTTPRouteHeaderMatching".to_string(),
+        "HTTPRoutePortRedirect".to_string(),
+        "HTTPRouteSchemeRedirect".to_string(),
+        "HTTPRoutePathRedirect".to_string(),
+        "HTTPRoutePathRewrite".to_string(),
+        "HTTPRouteResponseHeaderModification".to_string(),
+        "HTTPRouteBackendRequestHeaderModification".to_string(),
+        "HTTPRouteParentRefPort".to_string(),
+        "HTTPRoute303RedirectStatusCode".to_string(),
+        "HTTPRoute307RedirectStatusCode".to_string(),
+        "HTTPRoute308RedirectStatusCode".to_string(),
+    ]
+}
+
 /// Compute the `Accepted` condition for a GatewayClass.
 ///
 /// Returns `True` when the GatewayClass's `controllerName` matches
@@ -95,30 +124,46 @@ pub async fn reconcile_gatewayclass(
 
     if ctx.is_leader.load(Ordering::Relaxed) {
         let conditions = vec![to_k8s_condition(&condition)];
-        let status = serde_json::json!({
-            "status": {
-                "conditions": conditions,
-            }
+        let features: Vec<serde_json::Value> = supported_features()
+            .into_iter()
+            .map(|name| serde_json::json!({"name": name}))
+            .collect();
+        let new_status = serde_json::json!({
+            "conditions": conditions,
+            "supportedFeatures": features,
         });
-        let api: Api<GatewayClass> = Api::all(ctx.client.clone());
+
+        let old_status_json = gc.status.as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
+        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
+
         let name = gc.metadata.name.as_deref().unwrap_or("");
-        api.patch_status(
-            name,
-            &PatchParams::apply("sunbeam-proxy"),
-            &Patch::Merge(&status),
-        )
-        .await?;
-        tracing::info!(name, "patched GatewayClass status");
+        if old_stripped == new_stripped {
+            tracing::debug!(name, "GatewayClass status unchanged, skipping patch");
+        } else {
+            let patch = serde_json::json!({ "status": new_status });
+            let api: Api<GatewayClass> = Api::all(ctx.client.clone());
+            api.patch_status(
+                name,
+                &PatchParams::apply("sunbeam-proxy"),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+            tracing::info!(name, "patched GatewayClass status");
+        }
     }
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
 fn error_policy(
-    _gc: Arc<GatewayClass>,
-    _error: &kube::Error,
+    gc: Arc<GatewayClass>,
+    error: &kube::Error,
     _ctx: Arc<GatewayClassContext>,
 ) -> Action {
+    tracing::error!(name = gc.metadata.name.as_deref().unwrap_or(""), %error, "GatewayClass reconcile failed");
     Action::requeue(Duration::from_secs(5))
 }
 
@@ -175,6 +220,15 @@ mod tests {
         assert_eq!(cond.status, ConditionStatus::True);
         assert_eq!(cond.reason, "Accepted");
         assert_eq!(cond.observed_generation, 1);
+    }
+
+    #[test]
+    fn supported_features_lists_core_capabilities() {
+        let features = supported_features();
+        assert!(features.contains(&"HTTPRoute".to_string()));
+        assert!(features.contains(&"HTTPRouteMethodMatching".to_string()));
+        assert!(features.contains(&"HTTPRoutePathRedirect".to_string()));
+        assert!(!features.is_empty());
     }
 
     #[test]

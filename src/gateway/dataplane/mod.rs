@@ -11,3 +11,13 @@
 pub fn apply_gamma_rules() {
     tracing::trace!("GAMMA dataplane stub");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_gamma_rules_is_callable() {
+        apply_gamma_rules();
+    }
+}
