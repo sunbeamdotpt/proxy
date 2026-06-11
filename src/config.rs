@@ -25,6 +25,7 @@ pub struct Config {
     /// Telemetry.
     pub telemetry: TelemetryConfig,
     /// Routes.
+    #[serde(default)]
     pub routes: Vec<RouteConfig>,
     /// Optional SSH TCP passthrough (port 22 → Gitea SSH).
     pub ssh: Option<SshConfig>,
@@ -203,6 +204,10 @@ pub struct ListenConfig {
     pub http: String,
     /// HTTPS listener address, e.g., "0.0.0.0:443" or "[::]:443".
     pub https: String,
+    /// Additional HTTP listener addresses for Gateway API conformance tests
+    /// that create Gateways on non-default ports (e.g. 8080, 8082).
+    #[serde(default)]
+    pub extra_http: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -251,13 +256,104 @@ pub struct PathRoute {
     /// Prefix to prepend to the upstream path after stripping.
     #[serde(default)]
     pub upstream_path_prefix: Option<String>,
+    /// Full path to replace the request path with (Gateway API ReplaceFullPath).
+    #[serde(default)]
+    pub path_rewrite_full: Option<String>,
+    /// Hostname to replace the Host header with during forwarding.
+    #[serde(default)]
+    pub hostname_rewrite: Option<String>,
     /// Upstream read/write timeout in seconds (default: inherits from parent route, then 60).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional mirror backend addresses for request mirroring (fire-and-forget).
+    #[serde(default)]
+    pub mirror_backends: Vec<String>,
+    /// Optional CORS configuration for this path route.
+    #[serde(default)]
+    pub cors: Option<CorsConfig>,
     /// When true, return 403 Forbidden for any request matching this path prefix.
     /// Takes precedence over auth_request and backend forwarding.
     #[serde(default)]
     pub deny: bool,
+    /// Optional HTTP methods this path route matches. When empty, all methods match.
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// Optional weighted backends for traffic splitting. When empty, `backend` is used.
+    #[serde(default)]
+    pub weighted_backends: Vec<WeightedBackendConfig>,
+    /// Optional redirect to return instead of forwarding.
+    #[serde(default)]
+    pub redirect: Option<RedirectRule>,
+    /// Optional header-based matches for this path route. All must match (AND).
+    #[serde(default)]
+    pub header_matches: Vec<HeaderMatchConfig>,
+    /// Optional query parameter-based matches for this path route. All must match (AND).
+    #[serde(default)]
+    pub query_param_matches: Vec<QueryParamMatchConfig>,
+    /// Order of the rule within its HTTPRoute; used for Gateway API precedence
+    /// tie-breaking when multiple path routes share the same prefix length.
+    #[serde(default)]
+    pub rule_order: usize,
+    /// When true, match the path exactly instead of as a prefix.
+    #[serde(default)]
+    pub path_match_exact: bool,
+    /// Request headers to set (replace) on upstream requests for this path.
+    #[serde(default)]
+    pub request_headers: Vec<HeaderRule>,
+    /// Request headers to add (append) on upstream requests for this path.
+    #[serde(default)]
+    pub request_headers_add: Vec<HeaderRule>,
+    /// Request headers to remove from upstream requests for this path.
+    #[serde(default)]
+    pub request_headers_remove: Vec<String>,
+    /// Response headers to set (replace) for this path.
+    #[serde(default)]
+    pub response_headers: Vec<HeaderRule>,
+    /// Response headers to add (append) for this path.
+    #[serde(default)]
+    pub response_headers_add: Vec<HeaderRule>,
+    /// Response headers to remove for this path.
+    #[serde(default)]
+    pub response_headers_remove: Vec<String>,
+}
+
+/// A weighted backend entry used for traffic splitting.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WeightedBackendConfig {
+    /// Backend address.
+    pub backend: String,
+    /// Relative weight.
+    pub weight: u32,
+}
+
+/// A redirect rule returned directly to the client.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RedirectRule {
+    /// HTTP status code (e.g. 301, 302).
+    pub status_code: u16,
+    /// Target scheme to redirect to.
+    pub scheme: Option<String>,
+    /// Target hostname.
+    pub hostname: Option<String>,
+    /// Target port.
+    pub port: Option<u16>,
+    /// Replacement path. When `path_prefix` is `Some`, this replaces the
+    /// matched prefix; otherwise it replaces the entire path.
+    pub path: Option<String>,
+    /// Matched prefix to replace. `None` means `path` is a full replacement.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+}
+
+/// CORS configuration for a path route.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CorsConfig {
+    pub allow_origins: Vec<String>,
+    pub allow_methods: Vec<String>,
+    pub allow_headers: Vec<String>,
+    pub expose_headers: Vec<String>,
+    pub max_age: Option<i32>,
+    pub allow_credentials: bool,
 }
 
 /// A URL rewrite rule: requests matching `pattern` are served the file at `target`.
@@ -288,6 +384,46 @@ pub struct HeaderRule {
     pub name: String,
     /// Value.
     pub value: String,
+}
+
+/// A header match condition for path routes.
+#[derive(Debug, Deserialize, Clone)]
+pub struct HeaderMatchConfig {
+    /// Header name (case-insensitive).
+    pub name: String,
+    /// Match value.
+    pub value: HeaderMatchValueConfig,
+}
+
+/// Possible header match values.
+#[derive(Debug, Deserialize, Clone)]
+pub enum HeaderMatchValueConfig {
+    /// Exact string match.
+    Exact(String),
+    /// Regular expression match.
+    Regex(String),
+    /// Header must be present (any value).
+    Present,
+    /// Header must be absent.
+    Absent,
+}
+
+/// A query parameter match condition for path routes.
+#[derive(Debug, Deserialize, Clone)]
+pub struct QueryParamMatchConfig {
+    /// Query parameter name.
+    pub name: String,
+    /// Match value.
+    pub value: QueryParamMatchValueConfig,
+}
+
+/// Possible query parameter match values.
+#[derive(Debug, Deserialize, Clone)]
+pub enum QueryParamMatchValueConfig {
+    /// Exact string match.
+    Exact(String),
+    /// Regular expression match.
+    Regex(String),
 }
 
 /// Per-route HTTP response cache configuration.
@@ -344,12 +480,40 @@ pub struct RouteConfig {
     /// Extra response headers added to every response for this route.
     #[serde(default)]
     pub response_headers: Vec<HeaderRule>,
+    /// Extra response headers to add (append) to every response.
+    #[serde(default)]
+    pub response_headers_add: Vec<HeaderRule>,
+    /// Response headers to remove from every response.
+    #[serde(default)]
+    pub response_headers_remove: Vec<String>,
+    /// Extra request headers added before forwarding to the upstream.
+    #[serde(default)]
+    pub request_headers: Vec<HeaderRule>,
+    /// Request headers to add (append) before forwarding.
+    #[serde(default)]
+    pub request_headers_add: Vec<HeaderRule>,
+    /// Request headers to remove before forwarding.
+    #[serde(default)]
+    pub request_headers_remove: Vec<String>,
     /// HTTP response cache configuration for this route.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    /// Optional CORS configuration for this route.
+    #[serde(default)]
+    pub cors: Option<CorsConfig>,
     /// Upstream read/write timeout in seconds (default: 60).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional Gateway API listener hostname this route belongs to.
+    /// Used for listener isolation: when multiple routes match a request,
+    /// the one with the most specific listener hostname wins.
+    #[serde(default)]
+    pub listener_hostname: Option<String>,
+    /// When true, this route was created from a Gateway API HTTPRoute.
+    /// Missing path matches should return 404 instead of falling through
+    /// to a host-level default backend.
+    #[serde(default)]
+    pub gateway_api: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -446,7 +610,9 @@ fn default_chunk_size() -> u32 { 65_536 } // 64KB
 /// Structured error emitted when a deprecated TOML section is detected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeprecatedTomlSection {
+    /// Name of the deprecated section.
     pub section: &'static str,
+    /// Recommended replacement for the deprecated section.
     pub migration_target: &'static str,
 }
 
@@ -482,6 +648,7 @@ fn reject_deprecated_tables(raw: &str) -> Result<()> {
 }
 
 impl Config {
+    /// Load and parse `config.toml` from disk, rejecting deprecated sections.
     pub fn load(path: &str) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("reading config from {path}"))?;
