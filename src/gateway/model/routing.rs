@@ -102,18 +102,33 @@ pub struct WeightedBackend {
 /// A filter applied to a request or response.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RouteFilter {
-    /// Add a request header.
+    /// Set (replace) a request header.
+    RequestHeaderSet { name: Arc<str>, value: Arc<str> },
+    /// Add (append) a request header.
     RequestHeaderAdd { name: Arc<str>, value: Arc<str> },
     /// Remove a request header.
     RequestHeaderRemove { name: Arc<str> },
-    /// Add a response header.
+    /// Set (replace) a response header.
+    ResponseHeaderSet { name: Arc<str>, value: Arc<str> },
+    /// Add (append) a response header.
     ResponseHeaderAdd { name: Arc<str>, value: Arc<str> },
     /// Remove a response header.
     ResponseHeaderRemove { name: Arc<str> },
-    /// Rewrite the URL path.
-    UrlRewrite { path: PathRewrite },
+    /// Rewrite the URL path and/or hostname.
+    UrlRewrite { hostname: Option<Arc<str>>, path: PathRewrite },
     /// Redirect the request.
     RequestRedirect { scheme: Option<Arc<str>>, hostname: Option<Arc<str>>, path: Option<PathRewrite>, port: Option<u16>, status_code: u16 },
+    /// Mirror requests to a backend (fire-and-forget).
+    RequestMirror { backend: Arc<str> },
+    /// CORS response header configuration.
+    Cors {
+        allow_origins: Vec<Arc<str>>,
+        allow_methods: Vec<Arc<str>>,
+        allow_headers: Vec<Arc<str>>,
+        expose_headers: Vec<Arc<str>>,
+        max_age: Option<i32>,
+        allow_credentials: bool,
+    },
 }
 
 /// Path rewrite action.
@@ -141,4 +156,6 @@ pub struct HTTPRouteRule {
     pub matches: Vec<RouteMatch>,
     pub backends: Vec<WeightedBackend>,
     pub filters: Vec<RouteFilter>,
+    /// Upstream backend request timeout in seconds (from `rules.timeouts.backendRequest`).
+    pub timeout_secs: Option<u64>,
 }

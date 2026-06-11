@@ -35,6 +35,18 @@ pub struct GatewayClassStatus {
     /// GatewayClass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// SupportedFeatures lists the features the GatewayClass supports.
+    /// Required by Gateway API v1.5.1 conformance tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_features: Vec<SupportedFeature>,
+}
+
+/// A feature supported by this GatewayClass, as reported in status.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportedFeature {
+    /// Name of the supported feature.
+    pub name: String,
 }
 
 #[cfg(test)]

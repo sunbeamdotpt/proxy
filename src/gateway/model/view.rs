@@ -41,6 +41,10 @@ pub struct ListenerState {
     pub name: Arc<str>,
     pub protocol: Arc<str>,
     pub port: u16,
+    /// Hostname configured on the listener (e.g. `example.org` or
+    /// `*.example.org`).  When a route has no hostnames of its own this
+    /// value becomes the effective hostname.
+    pub hostname: Option<Arc<str>>,
 }
 
 /// Stub for the reconciled state of a single HTTPRoute / TLSRoute /

@@ -161,6 +161,257 @@ fn encode_http_route(buf: &mut Vec<u8>, r: &HTTPRouteState) {
     for p in &refs {
         encode_parent_ref(buf, p);
     }
+
+    let mut rules = r.rules.clone();
+    rules.sort_by(|a, b| a.matches.len().cmp(&b.matches.len()).then_with(|| a.backends.len().cmp(&b.backends.len())));
+    encode_u32(buf, rules.len() as u32);
+    for rule in &rules {
+        encode_http_route_rule(buf, rule);
+    }
+}
+
+fn encode_http_route_rule(buf: &mut Vec<u8>, rule: &super::routing::HTTPRouteRule) {
+    let mut matches = rule.matches.clone();
+    matches.sort_by(|a, b| {
+        use super::routing::PathMatch;
+        let path_ord = match (a.path.as_ref(), b.path.as_ref()) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(PathMatch::Exact(a)), Some(PathMatch::Exact(b))) => a.cmp(b),
+            (Some(PathMatch::Exact(_)), _) => std::cmp::Ordering::Less,
+            (Some(PathMatch::Prefix(a)), Some(PathMatch::Prefix(b))) => a.cmp(b),
+            (Some(PathMatch::Prefix(_)), Some(PathMatch::Exact(_))) => std::cmp::Ordering::Greater,
+            (Some(PathMatch::Prefix(_)), _) => std::cmp::Ordering::Less,
+            (Some(PathMatch::Regex(a)), Some(PathMatch::Regex(b))) => a.cmp(b),
+            (Some(PathMatch::Regex(_)), _) => std::cmp::Ordering::Greater,
+        };
+        path_ord
+            .then_with(|| a.method.cmp(&b.method))
+            .then_with(|| a.headers.len().cmp(&b.headers.len()))
+            .then_with(|| a.query_params.len().cmp(&b.query_params.len()))
+    });
+    encode_u32(buf, matches.len() as u32);
+    for m in &matches {
+        encode_route_match(buf, m);
+    }
+
+    let mut backends = rule.backends.clone();
+    backends.sort_by(|a, b| a.backend.cmp(&b.backend).then_with(|| a.weight.cmp(&b.weight)));
+    encode_u32(buf, backends.len() as u32);
+    for b in &backends {
+        encode_weighted_backend(buf, b);
+    }
+
+    let mut filters = rule.filters.clone();
+    filters.sort_by(|a, b| route_filter_ord(a).cmp(&route_filter_ord(b)));
+    encode_u32(buf, filters.len() as u32);
+    for f in &filters {
+        encode_route_filter(buf, f);
+    }
+}
+
+fn route_filter_ord(f: &super::routing::RouteFilter) -> u8 {
+    use super::routing::RouteFilter;
+    match f {
+        RouteFilter::RequestHeaderSet { .. } => 0,
+        RouteFilter::RequestHeaderAdd { .. } => 1,
+        RouteFilter::RequestHeaderRemove { .. } => 2,
+        RouteFilter::ResponseHeaderSet { .. } => 3,
+        RouteFilter::ResponseHeaderAdd { .. } => 4,
+        RouteFilter::ResponseHeaderRemove { .. } => 5,
+        RouteFilter::UrlRewrite { .. } => 6,
+        RouteFilter::RequestRedirect { .. } => 7,
+        RouteFilter::RequestMirror { .. } => 8,
+        RouteFilter::Cors { .. } => 9,
+    }
+}
+
+fn encode_route_match(buf: &mut Vec<u8>, m: &super::routing::RouteMatch) {
+    encode_option_path_match(buf, &m.path);
+    encode_option_str(buf, &m.method);
+
+    let mut headers = m.headers.clone();
+    headers.sort_by(|a, b| a.name.cmp(&b.name));
+    encode_u32(buf, headers.len() as u32);
+    for h in &headers {
+        encode_header_match(buf, h);
+    }
+
+    let mut query_params = m.query_params.clone();
+    query_params.sort_by(|a, b| a.name.cmp(&b.name));
+    encode_u32(buf, query_params.len() as u32);
+    for q in &query_params {
+        encode_query_param_match(buf, q);
+    }
+}
+
+fn encode_option_path_match(buf: &mut Vec<u8>, opt: &Option<super::routing::PathMatch>) {
+    use super::routing::PathMatch;
+    match opt {
+        None => buf.push(0x00),
+        Some(PathMatch::Exact(s)) => {
+            buf.push(0x01);
+            buf.push(0x00);
+            encode_str(buf, s);
+        }
+        Some(PathMatch::Prefix(s)) => {
+            buf.push(0x01);
+            buf.push(0x01);
+            encode_str(buf, s);
+        }
+        Some(PathMatch::Regex(s)) => {
+            buf.push(0x01);
+            buf.push(0x02);
+            encode_str(buf, s);
+        }
+    }
+}
+
+fn encode_header_match(buf: &mut Vec<u8>, h: &super::routing::HeaderMatch) {
+    encode_str(buf, &h.name);
+    use super::routing::HeaderMatchValue;
+    match &h.value {
+        HeaderMatchValue::Exact(s) => {
+            buf.push(0x00);
+            encode_str(buf, s);
+        }
+        HeaderMatchValue::Regex(s) => {
+            buf.push(0x01);
+            encode_str(buf, s);
+        }
+        HeaderMatchValue::Present => buf.push(0x02),
+        HeaderMatchValue::Absent => buf.push(0x03),
+    }
+}
+
+fn encode_query_param_match(buf: &mut Vec<u8>, q: &super::routing::QueryParamMatch) {
+    encode_str(buf, &q.name);
+    use super::routing::QueryParamMatchValue;
+    match &q.value {
+        QueryParamMatchValue::Exact(s) => {
+            buf.push(0x00);
+            encode_str(buf, s);
+        }
+        QueryParamMatchValue::Regex(s) => {
+            buf.push(0x01);
+            encode_str(buf, s);
+        }
+    }
+}
+
+fn encode_weighted_backend(buf: &mut Vec<u8>, b: &super::routing::WeightedBackend) {
+    encode_str(buf, &b.backend);
+    encode_u32(buf, b.weight);
+}
+
+fn encode_route_filter(buf: &mut Vec<u8>, f: &super::routing::RouteFilter) {
+    use super::routing::RouteFilter;
+    match f {
+        RouteFilter::RequestHeaderSet { name, value } => {
+            buf.push(0x00);
+            encode_str(buf, name);
+            encode_str(buf, value);
+        }
+        RouteFilter::RequestHeaderAdd { name, value } => {
+            buf.push(0x01);
+            encode_str(buf, name);
+            encode_str(buf, value);
+        }
+        RouteFilter::RequestHeaderRemove { name } => {
+            buf.push(0x02);
+            encode_str(buf, name);
+        }
+        RouteFilter::ResponseHeaderSet { name, value } => {
+            buf.push(0x03);
+            encode_str(buf, name);
+            encode_str(buf, value);
+        }
+        RouteFilter::ResponseHeaderAdd { name, value } => {
+            buf.push(0x04);
+            encode_str(buf, name);
+            encode_str(buf, value);
+        }
+        RouteFilter::ResponseHeaderRemove { name } => {
+            buf.push(0x05);
+            encode_str(buf, name);
+        }
+        RouteFilter::UrlRewrite { hostname, path } => {
+            buf.push(0x06);
+            encode_option_str(buf, hostname);
+            encode_path_rewrite(buf, path);
+        }
+        RouteFilter::RequestRedirect { scheme, hostname, path, port, status_code } => {
+            buf.push(0x07);
+            encode_option_str(buf, scheme);
+            encode_option_str(buf, hostname);
+            encode_option_path_rewrite(buf, path);
+            encode_option_u16(buf, port);
+            encode_u16(buf, *status_code);
+        }
+        RouteFilter::RequestMirror { backend } => {
+            buf.push(0x08);
+            encode_str(buf, backend);
+        }
+        RouteFilter::Cors { allow_origins, allow_methods, allow_headers, expose_headers, max_age, allow_credentials } => {
+            buf.push(0x09);
+            encode_u32(buf, allow_origins.len() as u32);
+            for o in allow_origins { encode_str(buf, o); }
+            encode_u32(buf, allow_methods.len() as u32);
+            for m in allow_methods { encode_str(buf, m); }
+            encode_u32(buf, allow_headers.len() as u32);
+            for h in allow_headers { encode_str(buf, h); }
+            encode_u32(buf, expose_headers.len() as u32);
+            for h in expose_headers { encode_str(buf, h); }
+            encode_option_i32(buf, max_age);
+            buf.push(if *allow_credentials { 1 } else { 0 });
+        }
+    }
+}
+
+fn encode_path_rewrite(buf: &mut Vec<u8>, p: &super::routing::PathRewrite) {
+    use super::routing::PathRewrite;
+    match p {
+        PathRewrite::FullReplace(s) => {
+            buf.push(0x00);
+            encode_str(buf, s);
+        }
+        PathRewrite::PrefixReplace { prefix, replacement } => {
+            buf.push(0x01);
+            encode_str(buf, prefix);
+            encode_str(buf, replacement);
+        }
+    }
+}
+
+fn encode_option_path_rewrite(buf: &mut Vec<u8>, opt: &Option<super::routing::PathRewrite>) {
+    match opt {
+        None => buf.push(0x00),
+        Some(p) => {
+            buf.push(0x01);
+            encode_path_rewrite(buf, p);
+        }
+    }
+}
+
+fn encode_option_u16(buf: &mut Vec<u8>, opt: &Option<u16>) {
+    match opt {
+        None => buf.push(0x00),
+        Some(v) => {
+            buf.push(0x01);
+            encode_u16(buf, *v);
+        }
+    }
+}
+
+fn encode_option_i32(buf: &mut Vec<u8>, opt: &Option<i32>) {
+    match opt {
+        None => buf.push(0x00),
+        Some(v) => {
+            buf.push(0x01);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
 }
 
 fn encode_parent_ref(buf: &mut Vec<u8>, p: &ParentRef) {
@@ -264,11 +515,13 @@ mod tests {
                         name: arc("http"),
                         protocol: arc("HTTP"),
                         port: 80,
+                        hostname: None,
                     },
                     ListenerState {
                         name: arc("https"),
                         protocol: arc("HTTPS"),
                         port: 443,
+                        hostname: None,
                     },
                 ],
             }],
@@ -382,5 +635,338 @@ mod tests {
         b.gateways[0].name = arc("gw-2");
 
         assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    use crate::gateway::model::routing::{HostnameMatch, HTTPRouteRule, PathMatch, RouteMatch, WeightedBackend};
+
+    fn view_with_http_routes(routes: Vec<HTTPRouteState>) -> ReconciledView {
+        ReconciledView {
+            gateways: vec![],
+            routes: vec![],
+            http_routes: routes,
+            reference_grants: vec![],
+        }
+    }
+
+    fn http_route(name: &str, hostnames: Vec<HostnameMatch>, generation: i64) -> HTTPRouteState {
+        HTTPRouteState {
+            namespace: arc("default"),
+            name: arc(name),
+            generation,
+            hostnames,
+            rules: vec![],
+            parent_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn http_route_hostname_changes_digest() {
+        let a = view_with_http_routes(vec![http_route(
+            "r1",
+            vec![HostnameMatch::Exact(arc("a.example.com"))],
+            1,
+        )]);
+        let b = view_with_http_routes(vec![http_route(
+            "r1",
+            vec![HostnameMatch::Exact(arc("b.example.com"))],
+            1,
+        )]);
+        assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_wildcard_and_exact_differ() {
+        let a = view_with_http_routes(vec![http_route(
+            "r1",
+            vec![HostnameMatch::Exact(arc("example.com"))],
+            1,
+        )]);
+        let b = view_with_http_routes(vec![http_route(
+            "r1",
+            vec![HostnameMatch::Wildcard(arc("example.com"))],
+            1,
+        )]);
+        assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_hostname_reordering_stable() {
+        let mut a = view_with_http_routes(vec![http_route(
+            "r1",
+            vec![
+                HostnameMatch::Exact(arc("z.example.com")),
+                HostnameMatch::Exact(arc("a.example.com")),
+                HostnameMatch::Wildcard(arc("w.example.com")),
+            ],
+            1,
+        )]);
+        let mut b = a.clone();
+        a.http_routes[0].hostnames.swap(0, 1);
+        assert_eq!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_generation_changes_digest() {
+        let a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
+        let b = view_with_http_routes(vec![http_route("r1", vec![], 2)]);
+        assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_parent_ref_changes_digest() {
+        let mut a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
+        a.http_routes[0].parent_refs.push(ParentRef {
+            namespace: None,
+            name: arc("gw-1"),
+            section_name: None,
+        });
+        let mut b = a.clone();
+        b.http_routes[0].parent_refs[0].name = arc("gw-2");
+        assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_rules_change_digest() {
+        let mut a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
+        a.http_routes[0].rules.push(HTTPRouteRule {
+                timeout_secs: None,
+            matches: vec![RouteMatch {
+                path: Some(PathMatch::Prefix(arc("/api"))),
+                headers: vec![],
+                query_params: vec![],
+                method: Some(arc("GET")),
+            }],
+            backends: vec![WeightedBackend {
+                backend: arc("svc:80"),
+                weight: 1,
+            }],
+            filters: vec![],
+        });
+        let b = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
+        assert_ne!(compute_digest(&a), compute_digest(&b));
+    }
+
+    use crate::gateway::model::routing::{
+        HeaderMatch, HeaderMatchValue, PathRewrite, QueryParamMatch, QueryParamMatchValue,
+        RouteFilter,
+    };
+
+    #[test]
+    fn http_route_all_path_match_types() {
+        let exact = HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("exact"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Exact(arc("/e"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+        };
+        let prefix = HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("prefix"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(arc("/p"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+        };
+        let regex = HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("regex"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Regex(arc("^/r$"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+        };
+        let a = compute_digest(&view_with_http_routes(vec![exact]));
+        let b = compute_digest(&view_with_http_routes(vec![prefix]));
+        let c = compute_digest(&view_with_http_routes(vec![regex]));
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn http_route_header_and_query_matches_affect_digest() {
+        let base = HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: None,
+                    headers: vec![HeaderMatch {
+                        name: arc("x-version"),
+                        value: HeaderMatchValue::Exact(arc("v1")),
+                    }],
+                    query_params: vec![QueryParamMatch {
+                        name: arc("debug"),
+                        value: QueryParamMatchValue::Exact(arc("1")),
+                    }],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+        };
+        let mut changed = base.clone();
+        changed.rules[0].matches[0].headers[0].value = HeaderMatchValue::Present;
+        assert_ne!(
+            compute_digest(&view_with_http_routes(vec![base])),
+            compute_digest(&view_with_http_routes(vec![changed]))
+        );
+    }
+
+    #[test]
+    fn http_route_all_filter_types_change_digest() {
+        fn route_with_filter(filter: RouteFilter) -> ReconciledView {
+            view_with_http_routes(vec![HTTPRouteState {
+                namespace: arc("default"),
+                name: arc("r1"),
+                generation: 1,
+                hostnames: vec![],
+                rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                    matches: vec![],
+                    backends: vec![],
+                    filters: vec![filter],
+                }],
+                parent_refs: vec![],
+            }])
+        }
+
+        let filters = vec![
+            RouteFilter::RequestHeaderSet {
+                name: arc("X-In"),
+                value: arc("in"),
+            },
+            RouteFilter::RequestHeaderAdd {
+                name: arc("X-In-Add"),
+                value: arc("in-add"),
+            },
+            RouteFilter::RequestHeaderRemove { name: arc("X-Old") },
+            RouteFilter::ResponseHeaderSet {
+                name: arc("X-Out"),
+                value: arc("out"),
+            },
+            RouteFilter::ResponseHeaderAdd {
+                name: arc("X-Out-Add"),
+                value: arc("out-add"),
+            },
+            RouteFilter::ResponseHeaderRemove { name: arc("X-Old") },
+            RouteFilter::UrlRewrite {
+                hostname: None,
+                path: PathRewrite::PrefixReplace {
+                    prefix: arc("/api"),
+                    replacement: arc("/v2"),
+                },
+            },
+            RouteFilter::UrlRewrite {
+                hostname: Some(arc("rewrite.example.com")),
+                path: PathRewrite::FullReplace(arc("/new")),
+            },
+            RouteFilter::RequestRedirect {
+                scheme: Some(arc("https")),
+                hostname: Some(arc("example.com")),
+                path: Some(PathRewrite::FullReplace(arc("/redirected"))),
+                port: Some(8443),
+                status_code: 308,
+            },
+        ];
+
+        let base = compute_digest(&route_with_filter(filters[0].clone()));
+        for f in filters.into_iter().skip(1) {
+            let h = compute_digest(&route_with_filter(f));
+            assert_ne!(base, h);
+        }
+    }
+
+    #[test]
+    fn http_route_weighted_backend_ordering_stable() {
+        let mut a = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![
+                    WeightedBackend {
+                        backend: arc("b:80"),
+                        weight: 2,
+                    },
+                    WeightedBackend {
+                        backend: arc("a:80"),
+                        weight: 1,
+                    },
+                ],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+        }]);
+        let mut b = a.clone();
+        b.http_routes[0].rules[0].backends.swap(0, 1);
+        assert_eq!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn reference_grant_subjects_affect_digest() {
+        let base = ReconciledView {
+            gateways: vec![],
+            routes: vec![],
+            http_routes: vec![],
+            reference_grants: vec![ReferenceGrantState {
+                namespace: arc("default"),
+                name: arc("g1"),
+                generation: 1,
+                from: vec![GrantSubject {
+                    group: arc("gateway.networking.k8s.io"),
+                    kind: arc("HTTPRoute"),
+                    namespace: Some(arc("default")),
+                    name: None,
+                }],
+                to: vec![GrantSubject {
+                    group: arc(""),
+                    kind: arc("Service"),
+                    namespace: None,
+                    name: Some(arc("svc")),
+                }],
+            }],
+        };
+        let mut changed = base.clone();
+        changed.reference_grants[0].from[0].name = Some(arc("specific"));
+        assert_ne!(compute_digest(&base), compute_digest(&changed));
     }
 }
