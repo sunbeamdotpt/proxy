@@ -114,8 +114,16 @@ mod tests {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            response_headers_add: vec![],
+            response_headers_remove: vec![],
+            request_headers: vec![],
+            request_headers_add: vec![],
+            request_headers_remove: vec![],
             cache: None,
+            cors: None,
             timeout_secs: None,
+            listener_hostname: None,
+            gateway_api: false,
         }]
     }
 
