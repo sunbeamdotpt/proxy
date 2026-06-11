@@ -43,8 +43,12 @@ pub mod sni;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
+/// Cert.
+pub mod cert;
 /// Tls passthrough.
 pub mod tls_passthrough;
+/// Upgrade.
+pub mod upgrade;
 #[cfg(feature = "training")]
 /// Training.
 pub mod training;

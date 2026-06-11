@@ -60,7 +60,7 @@ async fn watch_secret(
             }
             Ok(watcher::Event::Apply(secret)) if initialized => {
                 tracing::info!(%secret_name, "TLS secret changed — writing new cert");
-                match crate::cert::write_from_secret(&secret, &cert_path, &key_path) {
+                match sunbeam_proxy::cert::write_from_secret(&secret, &cert_path, &key_path) {
                     Ok(()) => {
                         let _ = tx.send(()).await;
                     }
@@ -103,29 +103,6 @@ async fn watch_configmap(api: Api<ConfigMap>, configmap_name: String, tx: mpsc::
     }
 }
 
-/// Spawn a new process with `--upgrade`, then send SIGQUIT to self.
-///
-/// Pingora's SIGQUIT handler transfers all listening socket FDs to the new
-/// process via a Unix socket and begins draining existing connections.  The
-/// new process calls `Server::new(Some(Opt { upgrade: true }))` in
-/// `bootstrap()`, inherits the FDs, and takes over without dropping connections.
 fn trigger_upgrade() {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "cannot resolve current exe; upgrade aborted");
-            return;
-        }
-    };
-
-    match std::process::Command::new(&exe).arg("--upgrade").spawn() {
-        Ok(child) => tracing::info!(pid = child.id(), "upgrade process spawned"),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to spawn upgrade process; upgrade aborted");
-            return;
-        }
-    }
-
-    // SAFETY: kill(getpid(), SIGQUIT) is always safe; we're only signalling ourselves.
-    unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
+    sunbeam_proxy::upgrade::trigger_upgrade();
 }

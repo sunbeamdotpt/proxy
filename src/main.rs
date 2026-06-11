@@ -1,7 +1,6 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-mod cert;
 mod telemetry;
 mod watcher;
 
@@ -313,7 +312,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 Ok(c) => {
                     if !upgrade {
                         if let Err(e) =
-                            cert::fetch_and_write(
+                            sunbeam_proxy::cert::fetch_and_write(
                                 &c,
                                 &cfg.kubernetes.namespace,
                                 &cfg.kubernetes.tls_secret,
@@ -422,6 +421,13 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // Port 80: always serve plain HTTP (ACME challenges + redirect to HTTPS).
     svc.add_tcp(&cfg.listen.http);
 
+    // Optional extra HTTP listeners used by Gateway API conformance tests
+    // that create Gateways on non-default ports.
+    for addr in &cfg.listen.extra_http {
+        svc.add_tcp(addr);
+        tracing::info!(%addr, "extra HTTP listener added");
+    }
+
     // Port 443: only add the TLS listener if the cert files exist.
     // When tls_passthrough routes are configured, Pingora binds to an internal
     // loopback address and a dedicated SNI router takes the real HTTPS port.
@@ -509,6 +515,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
             let gateway_ns = k8s_cfg.namespace.clone();
             let routes_tx = routes_tx.clone();
             let cluster_for_reconcile = cluster_handle.clone();
+            let gw_cert_path = cert_path.clone();
+            let gw_key_path = key_path.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -533,6 +541,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
                         client,
                         routes_tx,
                         cluster_for_reconcile,
+                        gw_cert_path,
+                        gw_key_path,
                     ).await;
                 });
             });
