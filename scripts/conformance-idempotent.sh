@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER="${SCRIPT_DIR}/run.sh"
+RUNNER="${SCRIPT_DIR}/conformance-run.sh"
 
 # Focus on a small, representative set of tests so this check finishes quickly.
 FOCUS='TestConformance/HTTPRouteCrossNamespace|TestConformance/HTTPRouteHostnameIntersection'

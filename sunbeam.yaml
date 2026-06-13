@@ -17,7 +17,7 @@ targets:
   doc:
     exec: "cargo doc --no-deps"
   package:
-    exec: "docker buildx build --push -t src.${SUNBEAM_REGISTRY}/studio/proxy:latest ."
+    exec: "./scripts/container-package.sh src.${SUNBEAM_REGISTRY}/studio/proxy:latest"
 tenant:
   namespace: sunbeam-proxy
 outputs:

@@ -119,6 +119,14 @@ cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
 
+## Container Runtime
+
+Image builds use the native macOS `container` CLI on Darwin and fall back to Docker on Linux:
+
+- `scripts/container-runtime.sh` selects the runtime (`container` on macOS, `docker` elsewhere; override with `CONTAINER_RUNTIME=...`).
+- `scripts/container-package.sh` replaces `docker buildx build --push` for the `package` target.
+- `scripts/conformance-run.sh` uses the selected runtime to build and save the conformance image.
+
 **Always run `cargo check` after making changes.** If it doesn't compile, fix it before proceeding. Do not submit code that doesn't compile.
 
 **Run `cargo test` after any behavioral change.** The e2e test in `tests/e2e.rs` spins up a real proxy and echo backend — it catches real regressions.

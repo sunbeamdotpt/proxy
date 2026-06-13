@@ -6,26 +6,28 @@ conformance VM, and executes the upstream Gateway API conformance suite.
 ## Usage
 
 ```sh
-KUBECONFIG=/tmp/k3s.yaml ./tests/conformance/run.sh
+KUBECONFIG=/tmp/k3s.yaml ./scripts/conformance-run.sh
 ```
 
 Run a focused subset:
 
 ```sh
-./tests/conformance/run.sh -run 'TestConformance/HTTPRouteCrossNamespace'
+./scripts/conformance-run.sh -run 'TestConformance/HTTPRouteCrossNamespace'
 ```
 
 Reuse an already-built image:
 
 ```sh
-SKIP_BUILD=1 ./tests/conformance/run.sh
+SKIP_BUILD=1 ./scripts/conformance-run.sh
 ```
 
 Build and run with a debug binary for faster iteration:
 
 ```sh
-DEBUG_BUILD=1 ./tests/conformance/run.sh
+DEBUG_BUILD=1 ./scripts/conformance-run.sh
 ```
+
+
 
 ## Idempotency and Repeatability
 
@@ -43,7 +45,7 @@ The runner is designed to be safe to run repeatedly against the same cluster:
 To verify repeatability locally:
 
 ```sh
-./tests/conformance/idempotent.sh
+./scripts/conformance-idempotent.sh
 ```
 
 This runs the focused conformance suite twice in a row and fails if either run

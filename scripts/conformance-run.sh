@@ -5,7 +5,7 @@
 # Idempotent Gateway API v1.5.1 conformance runner for sunbeam-proxy.
 #
 # Usage:
-#   KUBECONFIG=/tmp/k3s.yaml ./tests/conformance/run.sh
+#   KUBECONFIG=/tmp/k3s.yaml ./scripts/conformance-run.sh
 #
 # Environment:
 #   KUBECONFIG              path to kubeconfig (default: /tmp/k3s.yaml)
@@ -13,13 +13,19 @@
 #   MULTIPASS_VM            multipass VM name (default: sunbeam-proxy-dev)
 #   DOCKER_TAG              local image tag (default: sunbeam-proxy:conformance)
 #   GATEWAY_API_VERSION     upstream tag (default: v1.5.1)
-#   SKIP_BUILD              set to skip cargo build + docker image build
+#   SKIP_BUILD              set to skip cargo build + container image build
 #   SUPPORTED_FEATURES      comma-separated feature names advertised to the suite
+#   DEBUG_BUILD             set to 1 to build a debug binary instead of release
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=container-runtime.sh
+source "${SCRIPT_DIR}/container-runtime.sh"
+
+MANIFESTS_DIR="${PROJECT_ROOT}/tests/conformance/manifests"
+FIXTURES_DIR="${PROJECT_ROOT}/tests/fixtures/gateway-integration"
 
 KUBECONFIG="${KUBECONFIG:-/tmp/k3s.yaml}"
 GATEWAY_ADDR="${GATEWAY_ADDR:-192.168.252.19}"
@@ -29,9 +35,22 @@ GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,ReferenceGrant,GatewayPort8080,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 
+STABLE_TAG="sunbeam-proxy:conformance"
+
 if [[ -z "${DOCKER_TAG}" ]]; then
-    COMMIT_SHORT="$(cd "${PROJECT_ROOT}" && git rev-parse --short HEAD)"
-    DOCKER_TAG="sunbeam-proxy:conformance-${COMMIT_SHORT}"
+    if [[ "${SKIP_BUILD:-}" == "1" ]]; then
+        # When reusing an existing image, avoid generating a new timestamped tag
+        # that does not exist in the cluster.
+        DOCKER_TAG="${STABLE_TAG}"
+    else
+        COMMIT_SHORT="$(cd "${PROJECT_ROOT}" && git rev-parse --short HEAD)"
+        if [[ -n "$(cd "${PROJECT_ROOT}" && git status --porcelain)" ]]; then
+            DIRTY_ID="$(date +%s)"
+            DOCKER_TAG="sunbeam-proxy:conformance-${COMMIT_SHORT}-dirty-${DIRTY_ID}"
+        else
+            DOCKER_TAG="sunbeam-proxy:conformance-${COMMIT_SHORT}"
+        fi
+    fi
 fi
 
 TAR_FILE="/tmp/sunbeam-proxy-conformance.tar"
@@ -53,31 +72,41 @@ mp() {
 }
 
 build_image() {
+    log "using container runtime: ${CONTAINER_CMD}"
     if [[ "${DEBUG_BUILD}" == "1" ]]; then
         log "building debug binary"
         cargo build --target aarch64-unknown-linux-musl
         cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/debug/sunbeam-proxy" \
-            "${PROJECT_ROOT}/tests/fixtures/gateway-integration/sunbeam-proxy"
+            "${FIXTURES_DIR}/sunbeam-proxy"
     else
         log "building release binary"
         cargo build --release --target aarch64-unknown-linux-musl
         cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/release/sunbeam-proxy" \
-            "${PROJECT_ROOT}/tests/fixtures/gateway-integration/sunbeam-proxy"
+            "${FIXTURES_DIR}/sunbeam-proxy"
     fi
 
-    log "building Docker image ${DOCKER_TAG}"
-    docker build -t "${DOCKER_TAG}" \
-        -f "${PROJECT_ROOT}/tests/fixtures/gateway-integration/Dockerfile" \
-        "${PROJECT_ROOT}/tests/fixtures/gateway-integration"
+    log "building container image ${DOCKER_TAG}"
+    container_build -t "${DOCKER_TAG}" -t "${STABLE_TAG}" \
+        -f "${FIXTURES_DIR}/Dockerfile" \
+        "${FIXTURES_DIR}"
 
     log "saving image"
-    docker save "${DOCKER_TAG}" -o "${TAR_FILE}"
+    container_image_save "${DOCKER_TAG}" -o "${TAR_FILE}"
 
     log "transferring image to ${MULTIPASS_VM}"
     multipass transfer "${TAR_FILE}" "${MULTIPASS_VM}:${REMOTE_TAR}"
 
     log "importing image into k3s"
     mp sudo k3s ctr images import "${REMOTE_TAR}"
+    # k3s normalizes short image names to docker.io/library/... when resolving
+    # pod specs, so make sure the imported tag is also available under that full
+    # reference; otherwise the kubelet tries to pull from Docker Hub and fails.
+    log "tagging imported image with docker.io/library prefix"
+    mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${DOCKER_TAG}" || true
+
+    log "tagging imported image with stable tag ${STABLE_TAG}"
+    mp sudo k3s ctr images tag "${DOCKER_TAG}" "${STABLE_TAG}" || true
+    mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${STABLE_TAG}" || true
 }
 
 install_crds() {
@@ -116,7 +145,7 @@ ensure_no_hostpath_binary() {
 
 deploy_proxy() {
     log "applying sunbeam-proxy conformance manifests"
-    kubectl_cmd apply -f "${SCRIPT_DIR}/manifests/"
+    kubectl_cmd apply -f "${MANIFESTS_DIR}/"
 
     ensure_no_hostpath_binary
 
