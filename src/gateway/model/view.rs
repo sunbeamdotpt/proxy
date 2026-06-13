@@ -3,6 +3,7 @@
 
 //! Canonical reconciled view of the Gateway API object graph.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::routing::HTTPRouteState;
@@ -64,6 +65,36 @@ pub struct ParentRef {
     pub namespace: Option<Arc<str>>,
     pub name: Arc<str>,
     pub section_name: Option<Arc<str>>,
+}
+
+/// Allowed route kinds and namespaces for a Gateway listener.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct AllowedRoutes {
+    pub kinds: Vec<RouteGroupKind>,
+    pub namespaces: RouteNamespaces,
+}
+
+/// A route kind allowed by a listener's `allowedRoutes.kinds` list.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RouteGroupKind {
+    pub group: Arc<str>,
+    pub kind: Arc<str>,
+}
+
+/// Namespace scope from a listener's `allowedRoutes.namespaces` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum NamespaceFrom {
+    #[default]
+    Same,
+    All,
+    Selector,
+}
+
+/// Namespace selector from a listener's `allowedRoutes.namespaces` field.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct RouteNamespaces {
+    pub from: NamespaceFrom,
+    pub selector: Option<BTreeMap<String, String>>,
 }
 
 /// Stub for the reconciled state of a single ReferenceGrant resource.

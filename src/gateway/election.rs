@@ -7,8 +7,8 @@
 //! Only the leader runs the full reconcile loop; followers stay in
 //! data-plane mode and apply digests received via gossip.
 
-use kube::api::{Api, Patch, PatchParams};
 use k8s_openapi::api::coordination::v1::Lease;
+use kube::api::{Api, Patch, PatchParams};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -71,7 +71,9 @@ fn build_lease(
         spec: Some(k8s_openapi::api::coordination::v1::LeaseSpec {
             holder_identity: Some(identity.to_string()),
             lease_duration_seconds: Some(15),
-            renew_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now)),
+            renew_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(
+                now,
+            )),
             ..Default::default()
         }),
     }
@@ -115,7 +117,11 @@ impl Election {
                 let now = k8s_openapi::jiff::Timestamp::now();
                 let lease = build_lease(&name, &namespace, &identity, now);
                 let result = leases
-                    .patch(&name, &PatchParams::apply("sunbeam-proxy"), &Patch::Apply(lease))
+                    .patch(
+                        &name,
+                        &PatchParams::apply("sunbeam-proxy"),
+                        &Patch::Apply(lease),
+                    )
                     .await;
                 handle_patch_result(result, &mut is_leader, &tv, &state_tx);
             }
@@ -238,7 +244,8 @@ mod tests {
         let tv = AtomicBool::new(true);
         let mut is_leader = true;
 
-        let err = kube::Error::Service(std::io::Error::new(std::io::ErrorKind::Other, "mock").into());
+        let err =
+            kube::Error::Service(std::io::Error::new(std::io::ErrorKind::Other, "mock").into());
         handle_patch_result(Err(err), &mut is_leader, &tv, &tx);
 
         assert!(!is_leader);
@@ -279,7 +286,8 @@ mod tests {
         let tv = AtomicBool::new(false);
         let mut is_leader = false;
 
-        let err = kube::Error::Service(std::io::Error::new(std::io::ErrorKind::Other, "mock").into());
+        let err =
+            kube::Error::Service(std::io::Error::new(std::io::ErrorKind::Other, "mock").into());
         handle_patch_result(Err(err), &mut is_leader, &tv, &tx);
 
         assert!(!is_leader);

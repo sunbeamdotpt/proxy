@@ -1,20 +1,25 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Route / listener translation layer.
 //!
 //! Converts a `GatewayView` into Pingora-native configuration.
+
+mod from_model;
 
 use crate::config::{
     HeaderMatchConfig, HeaderMatchValueConfig, HeaderRule, PathRoute, QueryParamMatchConfig,
     QueryParamMatchValueConfig, RedirectRule, RewriteRule, RouteConfig, WeightedBackendConfig,
 };
 use crate::gateway::model::{
-    GatewayState, GatewayView, HeaderMatch, HeaderMatchValue, HostnameMatch, HTTPRouteRule, ListenerState, PathMatch,
-    PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
+    GatewayState, GatewayView, HTTPRouteRule, HeaderMatch, HeaderMatchValue, HostnameMatch,
+    ListenerState, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
+    RouteMatch,
 };
+use crate::ir;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Check if `child` hostname is a subset of `parent` hostname.
 pub fn is_hostname_subset(child: &HostnameMatch, parent: &HostnameMatch) -> bool {
@@ -26,12 +31,31 @@ pub fn is_hostname_subset(child: &HostnameMatch, parent: &HostnameMatch) -> bool
         (HostnameMatch::Exact(c), HostnameMatch::Wildcard(p)) => c
             .strip_suffix(p.as_ref())
             .and_then(|rest| rest.strip_suffix('.'))
-            .map_or(false, |rest| !rest.is_empty()),
+            .is_some_and(|rest| !rest.is_empty()),
         (HostnameMatch::Wildcard(c), HostnameMatch::Wildcard(p)) => {
-            c == p || c.strip_suffix(p.as_ref()).map_or(false, |rest| rest.ends_with('.'))
+            c == p
+                || c.strip_suffix(p.as_ref())
+                    .is_some_and(|rest| rest.ends_with('.'))
         }
         (HostnameMatch::Any, _) => false,
         _ => false,
+    }
+}
+
+/// Check whether two hostname patterns have a non-empty intersection.
+pub fn hostname_intersects(a: &HostnameMatch, b: &HostnameMatch) -> bool {
+    is_hostname_subset(a, b) || is_hostname_subset(b, a)
+}
+
+/// Return the most specific hostname pattern that represents the intersection
+/// of `a` and `b`, or `None` if they do not intersect.
+pub fn intersect_hostname_pair(a: &HostnameMatch, b: &HostnameMatch) -> Option<HostnameMatch> {
+    if is_hostname_subset(a, b) {
+        Some(a.clone())
+    } else if is_hostname_subset(b, a) {
+        Some(b.clone())
+    } else {
+        None
     }
 }
 
@@ -46,15 +70,19 @@ pub fn intersect_hostnames(
     let listener_match = parse_listener_hostname(lh_str);
     route_hostnames
         .iter()
-        .filter(|rh| is_hostname_subset(rh, &listener_match))
-        .cloned()
+        .filter_map(|rh| intersect_hostname_pair(rh, &listener_match))
         .collect()
 }
 
-/// An effective hostname for a route, paired with its originating listener hostname.
+/// An effective hostname pair: the route's own hostname match and the listener
+/// hostname it is attached to. Keeping these separate is required for listener
+/// isolation, where the listener hostname determines which listener wins for a
+/// request while the route hostname determines whether a given route matches.
 struct EffectiveHostname {
-    host_prefix: String,
-    listener_hostname: Option<String>,
+    /// Effective hostname match for the route itself.
+    route_hostname: HostnameMatch,
+    /// Hostname match of the listener this route is attached to.
+    listener_hostname: HostnameMatch,
 }
 
 /// Compute effective hostnames for an HTTPRoute, considering listener hostname intersection.
@@ -65,18 +93,23 @@ fn compute_effective_hostnames(
     let mut result = Vec::new();
 
     for parent in &route.parent_refs {
-        let gw_ns = parent.namespace.as_deref().unwrap_or(route.namespace.as_ref());
+        let gw_ns = parent
+            .namespace
+            .as_deref()
+            .unwrap_or(route.namespace.as_ref());
         let gw_name = parent.name.as_ref();
         let gateway = gateways
             .iter()
             .find(|g| g.namespace.as_ref() == gw_ns && g.name.as_ref() == gw_name);
 
         if route.hostnames.is_empty() {
-            // Route has no hostnames: inherit from listener
+            // Route has no hostnames: inherit the listener's hostname as both the
+            // route hostname and the listener hostname. A listener with no hostname
+            // matches any request host but is the least specific listener.
             let Some(gateway) = gateway else {
                 result.push(EffectiveHostname {
-                    host_prefix: "*".to_string(),
-                    listener_hostname: None,
+                    route_hostname: HostnameMatch::Any,
+                    listener_hostname: HostnameMatch::Any,
                 });
                 continue;
             };
@@ -93,23 +126,23 @@ fn compute_effective_hostnames(
                 };
 
             for listener in listeners {
-                // Use Some("") for listeners with no hostname so we can distinguish
-                // Gateway API routes from legacy TOML routes in the proxy hot path.
-                let listener_hostname_str = Some(listener.hostname.as_ref().map(|h| h.to_string()).unwrap_or_default());
-                let hostnames = if let Some(ref h) = listener.hostname {
-                    vec![parse_listener_hostname(h)]
+                let listener_match = listener
+                    .hostname
+                    .as_deref()
+                    .map(parse_listener_hostname)
+                    .unwrap_or_else(|| HostnameMatch::Exact(Arc::from("")));
+                let route_match = if listener.hostname.is_some() {
+                    listener_match.clone()
                 } else {
-                    vec![HostnameMatch::Any]
+                    HostnameMatch::Any
                 };
-                for hostname in hostnames {
-                    result.push(EffectiveHostname {
-                        host_prefix: hostname_to_prefix(&hostname),
-                        listener_hostname: listener_hostname_str.clone(),
-                    });
-                }
+                result.push(EffectiveHostname {
+                    route_hostname: route_match,
+                    listener_hostname: listener_match,
+                });
             }
         } else {
-            // Route has hostnames: intersect with listener hostname if gateway found
+            // Route has hostnames: intersect with listener hostname if gateway found.
             if let Some(gateway) = gateway {
                 let listeners: Vec<&ListenerState> =
                     if let Some(section) = parent.section_name.as_deref() {
@@ -123,21 +156,26 @@ fn compute_effective_hostnames(
                     };
 
                 for listener in listeners {
-                    let listener_hostname_str = Some(listener.hostname.as_ref().map(|h| h.to_string()).unwrap_or_default());
-                    let hostnames = intersect_hostnames(&route.hostnames, listener.hostname.as_deref());
-                    for hostname in hostnames {
+                    let listener_match = listener
+                        .hostname
+                        .as_deref()
+                        .map(parse_listener_hostname)
+                        .unwrap_or_else(|| HostnameMatch::Exact(Arc::from("")));
+                    let route_hostnames =
+                        intersect_hostnames(&route.hostnames, listener.hostname.as_deref());
+                    for hostname in route_hostnames {
                         result.push(EffectiveHostname {
-                            host_prefix: hostname_to_prefix(&hostname),
-                            listener_hostname: listener_hostname_str.clone(),
+                            route_hostname: hostname,
+                            listener_hostname: listener_match.clone(),
                         });
                     }
                 }
             } else {
-                // Gateway not found — use route hostnames directly
+                // Gateway not found — use route hostnames directly with no listener.
                 for hostname in &route.hostnames {
                     result.push(EffectiveHostname {
-                        host_prefix: hostname_to_prefix(hostname),
-                        listener_hostname: None,
+                        route_hostname: hostname.clone(),
+                        listener_hostname: HostnameMatch::Any,
                     });
                 }
             }
@@ -147,7 +185,7 @@ fn compute_effective_hostnames(
     result
 }
 
-fn parse_listener_hostname(hostname: &str) -> HostnameMatch {
+pub(crate) fn parse_listener_hostname(hostname: &str) -> HostnameMatch {
     if let Some(rest) = hostname.strip_prefix("*.") {
         HostnameMatch::Wildcard(Arc::from(rest))
     } else {
@@ -165,33 +203,39 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
     let mut groups: HashMap<(Option<String>, String), RouteConfig> = HashMap::new();
 
     for http_route in &view.http_routes {
-        // If the route has no accepted parent refs, skip it.
-        if http_route.parent_refs.is_empty() {
-            continue;
-        }
+        // Routes that were accepted by a parent but whose backend references could
+        // not be resolved must still be present in the dataplane so that matching
+        // requests receive HTTP 500 rather than falling through to another route.
+        let unprogrammed = !http_route.programmed && !http_route.parent_refs.is_empty();
 
         let effective = compute_effective_hostnames(http_route, &view.gateways);
 
         for eff in effective {
-            let key = (eff.listener_hostname.clone(), eff.host_prefix.clone());
+            let host_prefix = hostname_to_prefix(&eff.route_hostname);
+            let listener_hostname_str = match &eff.listener_hostname {
+                HostnameMatch::Any => None,
+                HostnameMatch::Exact(s) if s.is_empty() => Some("".to_string()),
+                _ => Some(hostname_to_prefix(&eff.listener_hostname)),
+            };
+            let key = (listener_hostname_str.clone(), host_prefix.clone());
 
             let mut paths = Vec::new();
             let mut rewrites = Vec::new();
 
             for (rule_idx, rule) in http_route.rules.iter().enumerate() {
-                let rule_paths = translate_rule_paths(rule, &http_route.namespace, rule_idx);
+                let rule_paths =
+                    translate_rule_paths(rule, &http_route.namespace, rule_idx, unprogrammed);
                 paths.extend(rule_paths);
 
                 for filter in &rule.filters {
-                    match filter {
-                        RouteFilter::UrlRewrite { hostname, path } => {
+                    if let RouteFilter::UrlRewrite { hostname, path } = filter {
+                        if let Some(path) = path {
                             if let Some(rw) = translate_rewrite(path) {
                                 rewrites.push(rw);
                             }
-                            // hostname rewrite is handled per-path-route below
-                            let _ = hostname;
                         }
-                        _ => {}
+                        // hostname rewrite is handled per-path-route below
+                        let _ = hostname;
                     }
                 }
             }
@@ -213,6 +257,7 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
                         timeout_secs: None,
                         mirror_backends: vec![],
                         deny: false,
+                        gateway_api_unprogrammed: unprogrammed,
                         methods: vec![],
                         weighted_backends: vec![],
                         redirect: None,
@@ -232,7 +277,7 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
             }
 
             let group = groups.entry(key).or_insert_with(|| RouteConfig {
-                host_prefix: eff.host_prefix.clone(),
+                host_prefix: host_prefix.clone(),
                 backend: paths.first().map(|p| p.backend.clone()).unwrap_or_default(),
                 websocket: false,
                 disable_secure_redirection: true,
@@ -248,9 +293,9 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
                 request_headers_add: vec![],
                 request_headers_remove: vec![],
                 cache: None,
-            cors: None,
+                cors: None,
                 timeout_secs: None,
-                listener_hostname: eff.listener_hostname.clone(),
+                listener_hostname: listener_hostname_str,
                 gateway_api: true,
             });
 
@@ -275,7 +320,20 @@ fn hostname_to_prefix(hostname: &HostnameMatch) -> String {
     }
 }
 
-fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize) -> Vec<PathRoute> {
+fn to_ir_hostname(h: &HostnameMatch) -> ir::HostnameMatch {
+    match h {
+        HostnameMatch::Exact(s) => ir::HostnameMatch::Exact(Arc::clone(s)),
+        HostnameMatch::Wildcard(s) => ir::HostnameMatch::Wildcard(Arc::clone(s)),
+        HostnameMatch::Any => ir::HostnameMatch::Any,
+    }
+}
+
+fn translate_rule_paths(
+    rule: &HTTPRouteRule,
+    _namespace: &str,
+    rule_idx: usize,
+    unprogrammed: bool,
+) -> Vec<PathRoute> {
     let weighted_backends: Vec<WeightedBackendConfig> = rule
         .backends
         .iter()
@@ -288,49 +346,68 @@ fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize)
     let dummy_backend = crate::gateway::model::WeightedBackend {
         backend: Arc::from("127.0.0.1:1"),
         weight: 1,
+        filters: vec![],
     };
     let backend = rule.backends.first().unwrap_or(&dummy_backend);
 
-    let strip_prefix = rule
-        .filters
-        .iter()
-        .any(|f| matches!(f, RouteFilter::UrlRewrite { path: PathRewrite::PrefixReplace { .. }, .. }));
+    let strip_prefix = rule.filters.iter().any(|f| {
+        matches!(
+            f,
+            RouteFilter::UrlRewrite {
+                path: Some(PathRewrite::PrefixReplace { .. }),
+                ..
+            }
+        )
+    });
 
     let upstream_path_prefix = rule.filters.iter().find_map(|f| match f {
         RouteFilter::UrlRewrite {
-            path: PathRewrite::PrefixReplace { replacement, .. }, ..
+            path: Some(PathRewrite::PrefixReplace { replacement, .. }),
+            ..
         } => Some(replacement.to_string()),
         _ => None,
     });
 
     let path_rewrite_full = rule.filters.iter().find_map(|f| match f {
         RouteFilter::UrlRewrite {
-            path: PathRewrite::FullReplace(s), ..
+            path: Some(PathRewrite::FullReplace(s)),
+            ..
         } => Some(s.to_string()),
         _ => None,
     });
 
     let hostname_rewrite = rule.filters.iter().find_map(|f| match f {
-        RouteFilter::UrlRewrite { hostname: Some(h), .. } => Some(h.to_string()),
+        RouteFilter::UrlRewrite {
+            hostname: Some(h), ..
+        } => Some(h.to_string()),
         _ => None,
     });
 
-    let mirror_backends: Vec<String> = rule.filters.iter().filter_map(|f| match f {
-        RouteFilter::RequestMirror { backend } => Some(backend.to_string()),
-        _ => None,
-    }).collect();
+    let mirror_backends: Vec<String> = rule
+        .filters
+        .iter()
+        .filter_map(|f| match f {
+            RouteFilter::RequestMirror { backend } => Some(backend.to_string()),
+            _ => None,
+        })
+        .collect();
 
     let cors_config = rule.filters.iter().find_map(|f| match f {
-        RouteFilter::Cors { allow_origins, allow_methods, allow_headers, expose_headers, max_age, allow_credentials } => {
-            Some(crate::config::CorsConfig {
-                allow_origins: allow_origins.iter().map(|s| s.to_string()).collect(),
-                allow_methods: allow_methods.iter().map(|s| s.to_string()).collect(),
-                allow_headers: allow_headers.iter().map(|s| s.to_string()).collect(),
-                expose_headers: expose_headers.iter().map(|s| s.to_string()).collect(),
-                max_age: *max_age,
-                allow_credentials: *allow_credentials,
-            })
-        }
+        RouteFilter::Cors {
+            allow_origins,
+            allow_methods,
+            allow_headers,
+            expose_headers,
+            max_age,
+            allow_credentials,
+        } => Some(crate::config::CorsConfig {
+            allow_origins: allow_origins.iter().map(|s| s.to_string()).collect(),
+            allow_methods: allow_methods.iter().map(|s| s.to_string()).collect(),
+            allow_headers: allow_headers.iter().map(|s| s.to_string()).collect(),
+            expose_headers: expose_headers.iter().map(|s| s.to_string()).collect(),
+            max_age: *max_age,
+            allow_credentials: *allow_credentials,
+        }),
         _ => None,
     });
 
@@ -381,7 +458,13 @@ fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize)
                 port,
                 status_code,
             } => {
-                redirect = Some(translate_redirect(scheme, hostname, path, *port, *status_code));
+                redirect = Some(translate_redirect(
+                    scheme,
+                    hostname,
+                    path,
+                    *port,
+                    *status_code,
+                ));
             }
             _ => {}
         }
@@ -417,6 +500,7 @@ fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize)
             &response_headers_add,
             &response_headers_remove,
             rule_idx,
+            unprogrammed,
         ) {
             result.push(pr);
         }
@@ -441,6 +525,7 @@ fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize)
                 &response_headers_add,
                 &response_headers_remove,
                 rule_idx,
+                unprogrammed,
             ) {
                 result.push(pr);
             }
@@ -450,6 +535,7 @@ fn translate_rule_paths(rule: &HTTPRouteRule, _namespace: &str, rule_idx: usize)
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_path_route(
     m: &RouteMatch,
     backend: &crate::gateway::model::WeightedBackend,
@@ -469,6 +555,7 @@ fn build_path_route(
     response_headers_add: &[HeaderRule],
     response_headers_remove: &[String],
     rule_idx: usize,
+    gateway_api_unprogrammed: bool,
 ) -> Option<PathRoute> {
     let (prefix, path_match_exact) = match m.path.as_ref() {
         Some(PathMatch::Prefix(p)) => (p.to_string(), false),
@@ -479,11 +566,18 @@ fn build_path_route(
         }
         None => ("/".to_string(), false),
     };
-    let methods: Vec<String> = m.method.as_ref().map(|s| vec![s.to_string()]).unwrap_or_default();
+    let methods: Vec<String> = m
+        .method
+        .as_ref()
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default();
     let header_matches: Vec<HeaderMatchConfig> =
         m.headers.iter().map(translate_header_match).collect();
-    let query_param_matches: Vec<QueryParamMatchConfig> =
-        m.query_params.iter().map(translate_query_param_match).collect();
+    let query_param_matches: Vec<QueryParamMatchConfig> = m
+        .query_params
+        .iter()
+        .map(translate_query_param_match)
+        .collect();
 
     // For RequestRedirect ReplacePrefixMatch, the matched path prefix must be
     // captured so the proxy can compute the correct Location header.
@@ -508,6 +602,7 @@ fn build_path_route(
         mirror_backends,
         cors: cors_config,
         deny: false,
+        gateway_api_unprogrammed,
         methods,
         weighted_backends: weighted_backends.to_vec(),
         redirect,
@@ -566,7 +661,11 @@ fn translate_redirect(
         hostname: hostname.as_ref().map(|h| h.to_string()),
         port,
         path,
-        path_prefix: if is_prefix_replace { Some(String::new()) } else { None },
+        path_prefix: if is_prefix_replace {
+            Some(String::new())
+        } else {
+            None
+        },
     }
 }
 
@@ -576,10 +675,275 @@ fn translate_rewrite(path: &PathRewrite) -> Option<RewriteRule> {
             pattern: "^/.*$".to_string(),
             target: target.to_string(),
         }),
-        PathRewrite::PrefixReplace { prefix, replacement } => Some(RewriteRule {
+        PathRewrite::PrefixReplace {
+            prefix,
+            replacement,
+        } => Some(RewriteRule {
             pattern: format!("^{}", regex::escape(prefix)),
             target: replacement.to_string(),
         }),
+    }
+}
+
+// ============================================================================
+// IR translator (new canonical path)
+// ============================================================================
+
+/// Translate a reconciled view into the canonical IR.
+pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
+    // Key: (listener_hostname_prefix, route_hostname_prefix) — merge rules from
+    // multiple HTTPRoutes attached to the same listener with the same hostname.
+    let mut groups: std::collections::HashMap<(String, String), ir::HostRoute> =
+        std::collections::HashMap::new();
+
+    for http_route in &view.http_routes {
+        if http_route.parent_refs.is_empty() {
+            continue;
+        }
+
+        let effective = compute_effective_hostnames(http_route, &view.gateways);
+
+        for eff in effective {
+            let mut rules: Vec<ir::Rule> = Vec::new();
+
+            for (rule_idx, rule) in http_route.rules.iter().enumerate() {
+                let ir_rules = translate_rule_to_ir(rule, rule_idx, rule.programmed);
+                rules.extend(ir_rules);
+            }
+
+            // If no rules produced any matches, create a default catch-all.
+            if rules.is_empty() && !http_route.rules.is_empty() {
+                if http_route.programmed {
+                    if let Some(first_backend) = http_route.rules[0].backends.first() {
+                        rules.push(ir::Rule {
+                            matches: vec![ir::RequestMatch::default()],
+                            action: ir::Action::Route(ir::RouteAction {
+                                backends: vec![ir::WeightedBackend::from(first_backend)],
+                                timeout: http_route.rules[0].timeout_secs.map(Duration::from_secs),
+                                request_filters: vec![],
+                                response_filters: vec![],
+                                mirror_backends: vec![],
+                                cache: None,
+                                body_rewrites: vec![],
+                                auth: None,
+                                websocket: false,
+                                disable_https_redirect: true,
+                            }),
+                            rule_order: 0,
+                        });
+                    }
+                } else {
+                    rules.push(ir::Rule {
+                        matches: vec![ir::RequestMatch::default()],
+                        action: unprogrammed_action(),
+                        rule_order: 0,
+                    });
+                }
+            }
+
+            let hostname = to_ir_hostname(&eff.route_hostname);
+            let listener_id = hostname_to_prefix(&eff.listener_hostname);
+            let listener_hostname = match &eff.listener_hostname {
+                HostnameMatch::Any => None,
+                HostnameMatch::Exact(s) if s.is_empty() => {
+                    Some(ir::HostnameMatch::Exact(Arc::clone(s)))
+                }
+                _ => Some(to_ir_hostname(&eff.listener_hostname)),
+            };
+
+            let key = (
+                hostname_to_prefix(&eff.listener_hostname),
+                hostname_to_prefix(&eff.route_hostname),
+            );
+            match groups.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    e.get_mut().rules.extend(rules);
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(ir::HostRoute {
+                        hostname,
+                        listener_ids: if listener_id.is_empty() {
+                            vec![]
+                        } else {
+                            vec![Arc::from(listener_id)]
+                        },
+                        listener_hostname,
+                        gateway_api: true,
+                        disable_secure_redirection: true,
+                        rules,
+                    });
+                }
+            }
+        }
+    }
+
+    ir::RouteTable {
+        listeners: vec![],
+        hosts: groups.into_values().collect(),
+        acme_routes: std::collections::HashMap::new(),
+    }
+}
+
+fn unprogrammed_action() -> ir::Action {
+    ir::Action::FixedResponse(ir::FixedResponseAction {
+        status: 500,
+        headers: vec![],
+        body: None,
+    })
+}
+
+fn translate_rule_to_ir(rule: &HTTPRouteRule, rule_idx: usize, programmed: bool) -> Vec<ir::Rule> {
+    let mut result: Vec<ir::Rule> = Vec::new();
+
+    if !programmed {
+        let matches = if rule.matches.is_empty() {
+            vec![ir::RequestMatch::default()]
+        } else {
+            rule.matches.iter().map(ir::RequestMatch::from).collect()
+        };
+        for m in matches {
+            result.push(ir::Rule {
+                matches: vec![m],
+                action: unprogrammed_action(),
+                rule_order: rule_idx,
+            });
+        }
+        return result;
+    }
+
+    if rule.matches.is_empty() {
+        result.push(build_ir_rule(rule, ir::RequestMatch::default(), rule_idx));
+        return result;
+    }
+
+    for m in &rule.matches {
+        result.push(build_ir_rule(rule, ir::RequestMatch::from(m), rule_idx));
+    }
+
+    result
+}
+
+fn build_ir_rule(rule: &HTTPRouteRule, req_match: ir::RequestMatch, rule_idx: usize) -> ir::Rule {
+    let mut request_filters: Vec<ir::RequestFilter> = Vec::new();
+    let mut response_filters: Vec<ir::ResponseFilter> = Vec::new();
+    let mut mirror_backends: Vec<Arc<str>> = Vec::new();
+    let mut redirect: Option<ir::RedirectAction> = None;
+
+    // Gateway API ReplacePrefixMatch uses the matched PathPrefix as the prefix
+    // to replace. The reconciler hardcodes "/" because it lacks access to the
+    // route match at parse time; fix it here using the request match path.
+    let matched_prefix = req_match.path.as_ref().and_then(|p| match p {
+        ir::PathMatch::Prefix(s) => Some(Arc::clone(s)),
+        _ => None,
+    });
+
+    for filter in &rule.filters {
+        match filter {
+            RouteFilter::UrlRewrite { hostname, path } => {
+                if let Some(h) = hostname {
+                    request_filters.push(ir::RequestFilter::RewriteHostname(Arc::clone(h)));
+                }
+                if let Some(path) = path {
+                    request_filters.push(ir::RequestFilter::RewritePath(
+                        ir::PathRewrite::from(path).with_matched_prefix(matched_prefix.as_ref()),
+                    ));
+                }
+            }
+            RouteFilter::RequestHeaderSet { name, value } => {
+                request_filters.push(ir::RequestFilter::SetHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::RequestHeaderAdd { name, value } => {
+                request_filters.push(ir::RequestFilter::AddHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::RequestHeaderRemove { name } => {
+                request_filters.push(ir::RequestFilter::RemoveHeader(Arc::clone(name)));
+            }
+            RouteFilter::ResponseHeaderSet { name, value } => {
+                response_filters.push(ir::ResponseFilter::SetHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::ResponseHeaderAdd { name, value } => {
+                response_filters.push(ir::ResponseFilter::AddHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::ResponseHeaderRemove { name } => {
+                response_filters.push(ir::ResponseFilter::RemoveHeader(Arc::clone(name)));
+            }
+            RouteFilter::RequestRedirect {
+                scheme,
+                hostname,
+                path,
+                port,
+                status_code,
+            } => {
+                redirect = Some(ir::RedirectAction {
+                    status_code: *status_code,
+                    scheme: scheme.as_ref().map(Arc::clone),
+                    hostname: hostname.as_ref().map(Arc::clone),
+                    port: *port,
+                    path: path.as_ref().map(|p| {
+                        ir::PathRewrite::from(p).with_matched_prefix(matched_prefix.as_ref())
+                    }),
+                });
+            }
+            RouteFilter::RequestMirror { backend } => {
+                mirror_backends.push(Arc::clone(backend));
+            }
+            RouteFilter::Cors {
+                allow_origins,
+                allow_methods,
+                allow_headers,
+                expose_headers,
+                max_age,
+                allow_credentials,
+            } => {
+                response_filters.push(ir::ResponseFilter::Cors(ir::CorsConfig {
+                    allow_origins: allow_origins.iter().map(Arc::clone).collect(),
+                    allow_methods: allow_methods.iter().map(Arc::clone).collect(),
+                    allow_headers: allow_headers.iter().map(Arc::clone).collect(),
+                    expose_headers: expose_headers.iter().map(Arc::clone).collect(),
+                    max_age: *max_age,
+                    allow_credentials: *allow_credentials,
+                }));
+            }
+        }
+    }
+
+    let action = if let Some(r) = redirect {
+        ir::Action::Redirect(r)
+    } else {
+        ir::Action::Route(ir::RouteAction {
+            backends: rule
+                .backends
+                .iter()
+                .map(ir::WeightedBackend::from)
+                .collect(),
+            timeout: rule.timeout_secs.map(Duration::from_secs),
+            request_filters,
+            response_filters,
+            mirror_backends,
+            cache: None,
+            body_rewrites: vec![],
+            auth: None,
+            websocket: false,
+            disable_https_redirect: true,
+        })
+    };
+
+    ir::Rule {
+        matches: vec![req_match],
+        action,
+        rule_order: rule_idx,
     }
 }
 
@@ -587,10 +951,10 @@ fn translate_rewrite(path: &PathRewrite) -> Option<RewriteRule> {
 mod tests {
     use super::*;
     use crate::gateway::model::{
-        BackendTarget, HeaderMatch, HostnameMatch, HTTPRouteState, ListenerKey, ParentRef,
-        PathMatch, PathRewrite, QueryParamMatch, RouteFilter, RouteMatch, RouteRule,
-        WeightedBackend,
+        HTTPRouteState, HeaderMatch, HostnameMatch, ParentRef, PathMatch, PathRewrite, RouteFilter,
+        RouteMatch, WeightedBackend,
     };
+    use crate::ir::compile::CompiledRouteTable;
     use std::sync::Arc;
 
     fn make_view(routes: Vec<HTTPRouteState>) -> GatewayView {
@@ -612,6 +976,7 @@ mod tests {
                 .map(|h| HostnameMatch::Exact(Arc::from(h)))
                 .collect(),
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/"))),
@@ -622,6 +987,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from(backend),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![],
             }],
@@ -630,6 +997,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         }
     }
 
@@ -663,6 +1031,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("api.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/v1"))),
@@ -673,6 +1042,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("api-svc:8080"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![],
             }],
@@ -681,6 +1052,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -696,6 +1068,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("app.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/api"))),
@@ -706,13 +1079,15 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("backend:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![RouteFilter::UrlRewrite {
                     hostname: None,
-                    path: PathRewrite::PrefixReplace {
+                    path: Some(PathRewrite::PrefixReplace {
                         prefix: Arc::from("/api"),
                         replacement: Arc::from("/v2"),
-                    },
+                    }),
                 }],
             }],
             parent_refs: vec![ParentRef {
@@ -720,6 +1095,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -737,11 +1113,14 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("hdr.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![],
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![RouteFilter::ResponseHeaderAdd {
                     name: Arc::from("X-Custom"),
@@ -753,6 +1132,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -778,11 +1158,14 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Wildcard(Arc::from("example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![],
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![],
             }],
@@ -791,6 +1174,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -805,6 +1189,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("m.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/"))),
@@ -815,6 +1200,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![],
             }],
@@ -823,6 +1210,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -837,16 +1225,21 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("split.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![],
                 backends: vec![
                     WeightedBackend {
                         backend: Arc::from("svc-a:80"),
                         weight: 3,
+
+                        filters: vec![],
                     },
                     WeightedBackend {
                         backend: Arc::from("svc-b:80"),
                         weight: 7,
+
+                        filters: vec![],
                     },
                 ],
                 filters: vec![],
@@ -856,6 +1249,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -874,11 +1268,14 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("req-hdr.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![],
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![RouteFilter::RequestHeaderAdd {
                     name: Arc::from("X-In"),
@@ -890,6 +1287,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -906,6 +1304,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("redirect.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/old"))),
@@ -916,6 +1315,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![RouteFilter::RequestRedirect {
                     scheme: Some(Arc::from("https")),
@@ -930,6 +1331,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -950,6 +1352,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("redirect.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(Arc::from("/original-prefix"))),
@@ -960,6 +1363,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![RouteFilter::RequestRedirect {
                     scheme: None,
@@ -977,6 +1382,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -1054,6 +1460,7 @@ mod tests {
             generation: 1,
             hostnames: vec![HostnameMatch::Exact(Arc::from("or.example.com"))],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![
                     RouteMatch {
@@ -1075,6 +1482,8 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: Arc::from("svc:80"),
                     weight: 1,
+
+                    filters: vec![],
                 }],
                 filters: vec![],
             }],
@@ -1083,6 +1492,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
@@ -1104,7 +1514,8 @@ mod tests {
             hostnames: vec![HostnameMatch::Exact(Arc::from("order.example.com"))],
             rules: vec![
                 HTTPRouteRule {
-                timeout_secs: None,
+                    programmed: true,
+                    timeout_secs: None,
                     matches: vec![RouteMatch {
                         path: Some(PathMatch::Prefix(Arc::from("/"))),
                         headers: vec![],
@@ -1114,11 +1525,14 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: Arc::from("v2:80"),
                         weight: 1,
+
+                        filters: vec![],
                     }],
                     filters: vec![],
                 },
                 HTTPRouteRule {
-                timeout_secs: None,
+                    programmed: true,
+                    timeout_secs: None,
                     matches: vec![RouteMatch {
                         path: Some(PathMatch::Prefix(Arc::from("/"))),
                         headers: vec![HeaderMatch {
@@ -1131,6 +1545,8 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: Arc::from("v3:80"),
                         weight: 1,
+
+                        filters: vec![],
                     }],
                     filters: vec![],
                 },
@@ -1140,10 +1556,1601 @@ mod tests {
                 name: Arc::from("gw-1"),
                 section_name: None,
             }],
+            programmed: true,
         };
         let view = make_view(vec![route]);
         let configs = translate_view(&view);
         assert_eq!(configs[0].paths[0].rule_order, 0);
         assert_eq!(configs[0].paths[1].rule_order, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // IR translator tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn translate_view_to_ir_any_hostname_for_empty_listener_and_route() {
+        let gateway = crate::gateway::model::GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![crate::gateway::model::ListenerState {
+                name: Arc::from("http"),
+                hostname: None,
+                port: 80,
+                protocol: Arc::from("HTTP"),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("test-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        assert_eq!(table.hosts.len(), 1);
+        assert_eq!(table.hosts[0].hostname, crate::ir::HostnameMatch::Any);
+        assert_eq!(
+            table.hosts[0].listener_hostname,
+            Some(crate::ir::HostnameMatch::Exact(Arc::from("")))
+        );
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        assert!(compiled.lookup("", "/", "GET", &headers, None).is_some());
+        assert!(compiled
+            .lookup("example.com", "/", "GET", &headers, None)
+            .is_some());
+    }
+
+    #[test]
+    fn translate_view_to_ir_route_hostnames_with_empty_listener() {
+        let gateway = crate::gateway::model::GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![crate::gateway::model::ListenerState {
+                name: Arc::from("http"),
+                hostname: None,
+                port: 80,
+                protocol: Arc::from("HTTP"),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("test-route"),
+            generation: 1,
+            hostnames: vec![
+                HostnameMatch::Exact(Arc::from("first.com")),
+                HostnameMatch::Exact(Arc::from("sub.first.com")),
+                HostnameMatch::Exact(Arc::from("second.com")),
+                HostnameMatch::Exact(Arc::from("sub.second.com")),
+            ],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        assert_eq!(table.hosts.len(), 4);
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        assert!(compiled
+            .lookup("first.com", "/", "GET", &headers, None)
+            .is_some());
+        assert!(compiled
+            .lookup("third.com", "/", "GET", &headers, None)
+            .is_none());
+        assert!(compiled
+            .lookup("sub.third.com", "/", "GET", &headers, None)
+            .is_none());
+    }
+
+    #[test]
+    fn translate_view_to_ir_unprogrammed_route_returns_500() {
+        let gateway = crate::gateway::model::GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![crate::gateway::model::ListenerState {
+                name: Arc::from("http"),
+                hostname: None,
+                port: 80,
+                protocol: Arc::from("HTTP"),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("unprogrammed-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: false,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: false,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        assert_eq!(table.hosts.len(), 1);
+        let rule = &table.hosts[0].rules[0];
+        assert_eq!(rule.matches.len(), 1);
+        assert!(
+            matches!(&rule.action, crate::ir::Action::FixedResponse(resp) if resp.status == 500),
+            "unprogrammed route should return 500, got {:?}",
+            rule.action
+        );
+    }
+
+    #[test]
+    fn translate_view_to_ir_fixes_redirect_prefix_replace() {
+        let gateway = crate::gateway::model::GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![crate::gateway::model::ListenerState {
+                name: Arc::from("http"),
+                hostname: None,
+                port: 80,
+                protocol: Arc::from("HTTP"),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("redirect-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/api"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![RouteFilter::RequestRedirect {
+                    scheme: None,
+                    hostname: None,
+                    path: Some(PathRewrite::PrefixReplace {
+                        prefix: Arc::from("/"),
+                        replacement: Arc::from("/v2"),
+                    }),
+                    port: None,
+                    status_code: 302,
+                }],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        assert_eq!(table.hosts.len(), 1);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Redirect(redirect) = &rule.action {
+            if let Some(crate::ir::PathRewrite::PrefixReplace {
+                prefix,
+                replacement,
+            }) = &redirect.path
+            {
+                assert_eq!(prefix.as_ref(), "/api");
+                assert_eq!(replacement.as_ref(), "/v2");
+            } else {
+                panic!("expected PrefixReplace");
+            }
+        } else {
+            panic!("expected Redirect action");
+        }
+    }
+
+    #[test]
+    fn debug_both_routes_lookup_wildcard() {
+        let gateway = GatewayState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("gw"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("empty-hostname"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: None,
+                },
+                ListenerState {
+                    name: Arc::from("wildcard-example-com"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.example.com")),
+                },
+            ],
+        };
+        let empty_route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("empty-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/empty-hostname"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("empty-backend.infra.svc.cluster.local.:8080"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("empty-hostname")),
+            }],
+            programmed: true,
+        };
+        let wildcard_route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("wildcard-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/wildcard-example-com"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("wildcard-backend.infra.svc.cluster.local.:8080"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("wildcard-example-com")),
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![empty_route, wildcard_route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        let plan = compiled.lookup(
+            "bar.example.com",
+            "/wildcard-example-com",
+            "GET",
+            &headers,
+            None,
+        );
+        assert!(plan.is_some(), "expected wildcard plan");
+        let plan = plan.unwrap();
+        assert!(plan.upstream.is_some(), "expected upstream");
+        assert_eq!(
+            plan.upstream.as_ref().unwrap().backends[0].backend.as_ref(),
+            "wildcard-backend.infra.svc.cluster.local.:8080"
+        );
+    }
+
+    #[test]
+    fn listener_isolation_empty_listener_loses_to_wildcard_listener() {
+        // A route on an empty-hostname listener is a catch-all but must not
+        // receive traffic for hosts that match a more specific listener.
+        let gateway = GatewayState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("gw"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("empty-hostname"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: None,
+                },
+                ListenerState {
+                    name: Arc::from("wildcard-example-com"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.example.com")),
+                },
+            ],
+        };
+        let empty_route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("empty-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/empty-hostname"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("empty-hostname")),
+            }],
+            programmed: true,
+        };
+        let wildcard_route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("wildcard-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/wildcard-example-com"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("wildcard-example-com")),
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![empty_route, wildcard_route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        // Empty-listener route is used when no more specific listener matches.
+        assert!(compiled
+            .lookup("bar.com", "/empty-hostname", "GET", &headers, None)
+            .is_some());
+        assert!(compiled
+            .lookup("bar.example.com", "/empty-hostname", "GET", &headers, None)
+            .is_none());
+        // Wildcard-listener route is used for matching hosts.
+        assert!(compiled
+            .lookup(
+                "bar.example.com",
+                "/wildcard-example-com",
+                "GET",
+                &headers,
+                None
+            )
+            .is_some());
+        assert!(compiled
+            .lookup("bar.com", "/wildcard-example-com", "GET", &headers, None)
+            .is_none());
+    }
+
+    #[test]
+    fn debug_wildcard_route_has_upstream() {
+        let gateway = GatewayState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("gw"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("wildcard-example-com"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: Some(Arc::from("*.example.com")),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("wildcard-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/wildcard-example-com"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("infra-backend-v1.infra.svc.cluster.local.:8080"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("wildcard-example-com")),
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        let plan = compiled.lookup(
+            "bar.example.com",
+            "/wildcard-example-com",
+            "GET",
+            &headers,
+            None,
+        );
+        assert!(plan.is_some(), "expected plan for wildcard route");
+        assert!(
+            plan.unwrap().upstream.is_some(),
+            "expected upstream action in plan"
+        );
+    }
+
+    #[test]
+    fn listener_isolation_wildcard_listener_matches_subdomain() {
+        // Gateway listener *.example.com + route with no hostnames should match
+        // bar.example.com for the listener's path.
+        let gateway = GatewayState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("gw"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("wildcard-example-com"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: Some(Arc::from("*.example.com")),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("wildcard-route"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/wildcard-example-com"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("gw"),
+                section_name: Some(Arc::from("wildcard-example-com")),
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        assert!(compiled
+            .lookup(
+                "bar.example.com",
+                "/wildcard-example-com",
+                "GET",
+                &headers,
+                None
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn translate_rewrite_full_replace() {
+        let rewrite = translate_rewrite(&PathRewrite::FullReplace(Arc::from("/new")));
+        assert_eq!(rewrite.as_ref().unwrap().pattern, "^/.*$");
+        assert_eq!(rewrite.as_ref().unwrap().target, "/new");
+    }
+
+    #[test]
+    fn translate_rewrite_prefix_replace() {
+        let rewrite = translate_rewrite(&PathRewrite::PrefixReplace {
+            prefix: Arc::from("/api"),
+            replacement: Arc::from("/v2"),
+        });
+        assert_eq!(rewrite.as_ref().unwrap().pattern, "^/api");
+        assert_eq!(rewrite.as_ref().unwrap().target, "/v2");
+    }
+
+    #[test]
+    fn translate_redirect_full_replace_no_prefix() {
+        let rule = translate_redirect(
+            &Some(Arc::from("https")),
+            &Some(Arc::from("new.example.com")),
+            &Some(PathRewrite::FullReplace(Arc::from("/redirected"))),
+            Some(8443),
+            307,
+        );
+        assert_eq!(rule.status_code, 307);
+        assert_eq!(rule.scheme.as_deref(), Some("https"));
+        assert_eq!(rule.hostname.as_deref(), Some("new.example.com"));
+        assert_eq!(rule.port, Some(8443));
+        assert_eq!(rule.path.as_deref(), Some("/redirected"));
+        assert_eq!(rule.path_prefix.as_deref(), None);
+    }
+
+    #[test]
+    fn translate_redirect_prefix_replace_has_prefix() {
+        let rule = translate_redirect(
+            &None,
+            &None,
+            &Some(PathRewrite::PrefixReplace {
+                prefix: Arc::from("/"),
+                replacement: Arc::from("/v2"),
+            }),
+            None,
+            302,
+        );
+        assert_eq!(rule.path.as_deref(), Some("/v2"));
+        assert_eq!(rule.path_prefix.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn build_path_route_skips_regex_path_match() {
+        let rule = HTTPRouteRule {
+            programmed: true,
+            timeout_secs: None,
+            matches: vec![RouteMatch {
+                path: Some(PathMatch::Regex(Arc::from("^/api/.*$"))),
+                headers: vec![],
+                query_params: vec![],
+                method: None,
+            }],
+            backends: vec![WeightedBackend {
+                backend: Arc::from("svc:80"),
+                weight: 1,
+
+                filters: vec![],
+            }],
+            filters: vec![],
+        };
+        let paths = translate_rule_paths(&rule, "default", 0, false);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn compute_effective_hostnames_intersects_with_listener_hostname() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: Some(Arc::from("*.example.com")),
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("route"),
+            generation: 1,
+            hostnames: vec![
+                HostnameMatch::Exact(Arc::from("foo.example.com")),
+                HostnameMatch::Exact(Arc::from("bar.other.com")),
+            ],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let configs = translate_view(&view);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].host_prefix, "foo.example.com");
+    }
+
+    #[test]
+    fn translate_view_to_ir_request_response_filters() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("filter-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("filter.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![
+                    RouteFilter::RequestHeaderSet {
+                        name: Arc::from("X-In"),
+                        value: Arc::from("in"),
+                    },
+                    RouteFilter::ResponseHeaderSet {
+                        name: Arc::from("X-Out"),
+                        value: Arc::from("out"),
+                    },
+                    RouteFilter::RequestHeaderRemove {
+                        name: Arc::from("X-Old"),
+                    },
+                ],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Route(action) = &rule.action {
+            assert_eq!(action.request_filters.len(), 2);
+            assert_eq!(action.response_filters.len(), 1);
+        } else {
+            panic!("expected Route action");
+        }
+    }
+
+    #[test]
+    fn translate_view_to_ir_hostname_rewrite() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("host-rewrite"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("host.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![RouteFilter::UrlRewrite {
+                    hostname: Some(Arc::from("upstream.example.com")),
+                    path: None,
+                }],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Route(action) = &rule.action {
+            assert!(action
+                .request_filters
+                .iter()
+                .any(|f| matches!(f, crate::ir::RequestFilter::RewriteHostname(h) if h.as_ref() == "upstream.example.com")));
+        } else {
+            panic!("expected Route action");
+        }
+    }
+
+    #[test]
+    fn translate_view_to_ir_cors_filter() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("cors-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("cors.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![RouteFilter::Cors {
+                    allow_origins: vec![Arc::from("*")],
+                    allow_methods: vec![Arc::from("GET")],
+                    allow_headers: vec![Arc::from("X-Custom")],
+                    expose_headers: vec![],
+                    max_age: Some(600),
+                    allow_credentials: false,
+                }],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Route(action) = &rule.action {
+            assert!(action
+                .response_filters
+                .iter()
+                .any(|f| matches!(f, crate::ir::ResponseFilter::Cors(_))));
+        } else {
+            panic!("expected Route action");
+        }
+    }
+
+    #[test]
+    fn translate_view_to_ir_request_mirror() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("mirror-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("mirror.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![RouteFilter::RequestMirror {
+                    backend: Arc::from("mirror-svc:80"),
+                }],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Route(action) = &rule.action {
+            assert_eq!(action.mirror_backends.len(), 1);
+            assert_eq!(action.mirror_backends[0].as_ref(), "mirror-svc:80");
+        } else {
+            panic!("expected Route action");
+        }
+    }
+
+    #[test]
+    fn translate_unprogrammed_route_keeps_path_and_marks_unprogrammed() {
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("unprogrammed-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("invalid.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: false,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("nonexistent-svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: false,
+        };
+        let view = make_view(vec![route]);
+        let configs = translate_view(&view);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].paths.len(), 1);
+        assert!(configs[0].paths[0].gateway_api_unprogrammed);
+    }
+
+    #[test]
+    fn listener_hostname_isolation_matches_conformance_scenario() {
+        // Reproduces the HTTPRouteListenerHostnameMatching conformance Gateway:
+        // four HTTP listeners with distinct hostnames, three HTTPRoutes attached
+        // by sectionName and with no route hostnames.
+        let gateway = GatewayState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("httproute-listener-hostname-matching"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("listener-1"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-2"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("foo.bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-3"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-4"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.foo.com")),
+                },
+            ],
+        };
+
+        fn route_for_listener(name: &str, listener: &str, backend: &str) -> HTTPRouteState {
+            HTTPRouteState {
+                namespace: Arc::from("gateway-conformance-infra"),
+                name: Arc::from(name),
+                generation: 1,
+                hostnames: vec![],
+                rules: vec![HTTPRouteRule {
+                    programmed: true,
+                    timeout_secs: None,
+                    matches: vec![],
+                    backends: vec![WeightedBackend {
+                        backend: Arc::from(backend),
+                        weight: 1,
+
+                        filters: vec![],
+                    }],
+                    filters: vec![],
+                }],
+                parent_refs: vec![ParentRef {
+                    namespace: Some(Arc::from("gateway-conformance-infra")),
+                    name: Arc::from("httproute-listener-hostname-matching"),
+                    section_name: Some(Arc::from(listener)),
+                }],
+                programmed: true,
+            }
+        }
+
+        let routes = vec![
+            route_for_listener("backend-v1", "listener-1", "infra-backend-v1:8080"),
+            route_for_listener("backend-v2", "listener-2", "infra-backend-v2:8080"),
+            route_for_listener("backend-v3", "listener-3", "infra-backend-v3:8080"),
+            route_for_listener("backend-v3", "listener-4", "infra-backend-v3:8080"),
+        ];
+
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: routes,
+            reference_grants: vec![],
+        };
+
+        let ir = translate_view_to_ir(&view);
+        let compiled = CompiledRouteTable::compile(ir).unwrap();
+
+        fn backend_for(compiled: &CompiledRouteTable, host: &str) -> Option<Arc<str>> {
+            let plan = compiled.lookup(host, "/", "GET", &Default::default(), None)?;
+            plan.upstream
+                .as_ref()
+                .map(|u| Arc::clone(&u.backends[0].backend))
+        }
+
+        assert_eq!(
+            backend_for(&compiled, "bar.com").as_deref(),
+            Some("infra-backend-v1:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "foo.bar.com").as_deref(),
+            Some("infra-backend-v2:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "multiple.prefixes.bar.com").as_deref(),
+            Some("infra-backend-v3:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "one.foo.com").as_deref(),
+            Some("infra-backend-v3:8080")
+        );
+    }
+
+    #[test]
+    fn single_route_with_multiple_parent_refs_matches_conformance_scenario() {
+        // Same scenario as above, but backend-v3 is a single HTTPRoute with two
+        // parentRefs (listener-3 and listener-4) just like the real conformance
+        // manifest, instead of two separate route states.
+        let gateway = GatewayState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("httproute-listener-hostname-matching"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("listener-1"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-2"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("foo.bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-3"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.bar.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-4"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.foo.com")),
+                },
+            ],
+        };
+
+        fn route(name: &str, listeners: &[&str], backend: &str) -> HTTPRouteState {
+            HTTPRouteState {
+                namespace: Arc::from("gateway-conformance-infra"),
+                name: Arc::from(name),
+                generation: 1,
+                hostnames: vec![],
+                rules: vec![HTTPRouteRule {
+                    programmed: true,
+                    timeout_secs: None,
+                    matches: vec![],
+                    backends: vec![WeightedBackend {
+                        backend: Arc::from(backend),
+                        weight: 1,
+
+                        filters: vec![],
+                    }],
+                    filters: vec![],
+                }],
+                parent_refs: listeners
+                    .iter()
+                    .map(|l| ParentRef {
+                        namespace: Some(Arc::from("gateway-conformance-infra")),
+                        name: Arc::from("httproute-listener-hostname-matching"),
+                        section_name: Some(Arc::from(*l)),
+                    })
+                    .collect(),
+                programmed: true,
+            }
+        }
+
+        let routes = vec![
+            route("backend-v1", &["listener-1"], "infra-backend-v1:8080"),
+            route("backend-v2", &["listener-2"], "infra-backend-v2:8080"),
+            route(
+                "backend-v3",
+                &["listener-3", "listener-4"],
+                "infra-backend-v3:8080",
+            ),
+        ];
+
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: routes,
+            reference_grants: vec![],
+        };
+
+        let ir = translate_view_to_ir(&view);
+        let compiled = CompiledRouteTable::compile(ir).unwrap();
+
+        fn backend_for(compiled: &CompiledRouteTable, host: &str) -> Option<Arc<str>> {
+            let plan = compiled.lookup(host, "/", "GET", &Default::default(), None)?;
+            plan.upstream
+                .as_ref()
+                .map(|u| Arc::clone(&u.backends[0].backend))
+        }
+
+        assert_eq!(
+            backend_for(&compiled, "bar.com").as_deref(),
+            Some("infra-backend-v1:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "foo.bar.com").as_deref(),
+            Some("infra-backend-v2:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "multiple.prefixes.bar.com").as_deref(),
+            Some("infra-backend-v3:8080")
+        );
+        assert_eq!(
+            backend_for(&compiled, "one.foo.com").as_deref(),
+            Some("infra-backend-v3:8080")
+        );
+    }
+
+    #[test]
+    fn hostname_intersection_yields_only_intersected_hosts() {
+        // Reproduces the HTTPRouteHostnameIntersection conformance manifest.
+        let specific_gateway = GatewayState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("httproute-hostname-intersection"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("listener-1"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("very.specific.com")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-2"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.wildcard.io")),
+                },
+                ListenerState {
+                    name: Arc::from("listener-3"),
+                    protocol: Arc::from("HTTP"),
+                    port: 80,
+                    hostname: Some(Arc::from("*.anotherwildcard.io")),
+                },
+            ],
+        };
+        let all_gateway = GatewayState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("httproute-hostname-intersection-all"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("listener-1"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+
+        fn route(
+            name: &str,
+            gw: &str,
+            hostnames: &[&str],
+            path: &str,
+            backend: &str,
+        ) -> HTTPRouteState {
+            HTTPRouteState {
+                namespace: Arc::from("gateway-conformance-infra"),
+                name: Arc::from(name),
+                generation: 1,
+                hostnames: hostnames
+                    .iter()
+                    .map(|h| {
+                        if let Some(rest) = h.strip_prefix("*.") {
+                            HostnameMatch::Wildcard(Arc::from(rest))
+                        } else {
+                            HostnameMatch::Exact(Arc::from(*h))
+                        }
+                    })
+                    .collect(),
+                rules: vec![HTTPRouteRule {
+                    programmed: true,
+                    timeout_secs: None,
+                    matches: vec![RouteMatch {
+                        path: Some(PathMatch::Prefix(Arc::from(path))),
+                        headers: vec![],
+                        query_params: vec![],
+                        method: None,
+                    }],
+                    backends: vec![WeightedBackend {
+                        backend: Arc::from(backend),
+                        weight: 1,
+
+                        filters: vec![],
+                    }],
+                    filters: vec![],
+                }],
+                parent_refs: vec![ParentRef {
+                    namespace: Some(Arc::from("gateway-conformance-infra")),
+                    name: Arc::from(gw),
+                    section_name: None,
+                }],
+                programmed: true,
+            }
+        }
+
+        let routes = vec![
+            route(
+                "specific-host-matches-listener-specific-host",
+                "httproute-hostname-intersection",
+                &[
+                    "non.matching.com",
+                    "*.nonmatchingwildcard.io",
+                    "very.specific.com",
+                ],
+                "/s1",
+                "infra-backend-v1:8080",
+            ),
+            route(
+                "specific-host-matches-listener-wildcard-host",
+                "httproute-hostname-intersection",
+                &[
+                    "non.matching.com",
+                    "wildcard.io",
+                    "foo.wildcard.io",
+                    "bar.wildcard.io",
+                    "foo.bar.wildcard.io",
+                ],
+                "/s2",
+                "infra-backend-v2:8080",
+            ),
+            route(
+                "wildcard-host-matches-listener-specific-host",
+                "httproute-hostname-intersection",
+                &["non.matching.com", "*.specific.com"],
+                "/s3",
+                "infra-backend-v3:8080",
+            ),
+            route(
+                "wildcard-host-matches-listener-wildcard-host",
+                "httproute-hostname-intersection",
+                &["*.anotherwildcard.io"],
+                "/s4",
+                "infra-backend-v1:8080",
+            ),
+            route(
+                "no-intersecting-hosts",
+                "httproute-hostname-intersection",
+                &["specific.but.wrong.com", "wildcard.io"],
+                "/s5",
+                "infra-backend-v2:8080",
+            ),
+            route(
+                "httproute-hostname-intersection-all",
+                "httproute-hostname-intersection-all",
+                &["first.com", "sub.first.com", "second.com", "sub.second.com"],
+                "/",
+                "infra-backend-v2:8080",
+            ),
+        ];
+
+        let view = GatewayView {
+            gateways: vec![specific_gateway, all_gateway],
+            routes: vec![],
+            http_routes: routes,
+            reference_grants: vec![],
+        };
+
+        let ir = translate_view_to_ir(&view);
+        let compiled = CompiledRouteTable::compile(ir).unwrap();
+
+        fn backend_for(compiled: &CompiledRouteTable, host: &str, path: &str) -> Option<Arc<str>> {
+            let plan = compiled.lookup(host, path, "GET", &Default::default(), None)?;
+            plan.upstream
+                .as_ref()
+                .map(|u| Arc::clone(&u.backends[0].backend))
+        }
+
+        // Intersecting hostnames should route to the expected backend.
+        assert_eq!(
+            backend_for(&compiled, "very.specific.com", "/s1").as_deref(),
+            Some("infra-backend-v1:8080"),
+            "very.specific.com/s1 should route"
+        );
+        assert_eq!(
+            backend_for(&compiled, "foo.wildcard.io", "/s2").as_deref(),
+            Some("infra-backend-v2:8080"),
+            "foo.wildcard.io/s2 should route"
+        );
+        assert_eq!(
+            backend_for(&compiled, "bar.wildcard.io", "/s2").as_deref(),
+            Some("infra-backend-v2:8080"),
+            "bar.wildcard.io/s2 should route"
+        );
+        assert_eq!(
+            backend_for(&compiled, "foo.bar.wildcard.io", "/s2").as_deref(),
+            Some("infra-backend-v2:8080"),
+            "foo.bar.wildcard.io/s2 should route"
+        );
+        assert_eq!(
+            backend_for(&compiled, "very.specific.com", "/s3").as_deref(),
+            Some("infra-backend-v3:8080"),
+            "very.specific.com/s3 should route"
+        );
+        assert_eq!(
+            backend_for(&compiled, "sub.anotherwildcard.io", "/s4").as_deref(),
+            Some("infra-backend-v1:8080"),
+            "sub.anotherwildcard.io/s4 should route"
+        );
+        assert!(
+            backend_for(&compiled, "foo.specific.com", "/s3").is_none(),
+            "foo.specific.com/s3 should not match; intersection is very.specific.com"
+        );
+        assert_eq!(
+            backend_for(&compiled, "first.com", "/").as_deref(),
+            Some("infra-backend-v2:8080"),
+            "first.com/ should route"
+        );
+
+        // Non-intersecting hostnames should not match any route.
+        assert!(
+            backend_for(&compiled, "non.matching.com", "/s1").is_none(),
+            "non.matching.com/s1 should not match"
+        );
+        assert!(
+            backend_for(&compiled, "foo.nonmatchingwildcard.io", "/s1").is_none(),
+            "foo.nonmatchingwildcard.io/s1 should not match"
+        );
+        assert!(
+            backend_for(&compiled, "wildcard.io", "/s2").is_none(),
+            "wildcard.io/s2 should not match *.wildcard.io"
+        );
+        assert!(
+            backend_for(&compiled, "non.matching.com", "/s2").is_none(),
+            "non.matching.com/s2 should not match"
+        );
+        assert!(
+            backend_for(&compiled, "non.matching.com", "/s3").is_none(),
+            "non.matching.com/s3 should not match"
+        );
+        assert!(
+            backend_for(&compiled, "anotherwildcard.io", "/s4").is_none(),
+            "anotherwildcard.io/s4 should not match *.anotherwildcard.io"
+        );
+        assert!(
+            backend_for(&compiled, "specific.but.wrong.com", "/s5").is_none(),
+            "specific.but.wrong.com/s5 should not match"
+        );
+        assert!(
+            backend_for(&compiled, "wildcard.io", "/s5").is_none(),
+            "wildcard.io/s5 should not match *.wildcard.io"
+        );
+        assert!(
+            backend_for(&compiled, "third.com", "/").is_none(),
+            "third.com/ should not match"
+        );
+    }
+
+    #[test]
+    fn unprogrammed_invalid_backend_route_returns_500() {
+        let gateway = GatewayState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("same-namespace"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("gateway-conformance-infra"),
+            name: Arc::from("invalid-backend-ref-unknown-kind"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: false,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from(
+                        "infra-backend-v1.gateway-conformance-infra.svc.cluster.local.:8080",
+                    ),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("gateway-conformance-infra")),
+                name: Arc::from("same-namespace"),
+                section_name: None,
+            }],
+            programmed: false,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let compiled = CompiledRouteTable::compile(table).unwrap();
+        let plan = compiled.lookup("", "/", "GET", &Default::default(), None);
+        assert!(
+            plan.is_some(),
+            "unprogrammed route should still match so it can return 500"
+        );
+        let plan = plan.unwrap();
+        assert!(
+            plan.upstream.is_none(),
+            "unprogrammed route must not have an upstream, got {:?}",
+            plan.upstream
+        );
+    }
+
+    #[test]
+    fn translate_view_to_ir_307_redirect_no_hostname_lookup() {
+        let gateway = GatewayState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("same-namespace"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("infra"),
+            name: Arc::from("307-redirect"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/temporary"))),
+                    headers: vec![],
+                    query_params: vec![],
+                    method: None,
+                }],
+                backends: vec![],
+                filters: vec![RouteFilter::RequestRedirect {
+                    scheme: None,
+                    hostname: None,
+                    path: None,
+                    port: None,
+                    status_code: 307,
+                }],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: Some(Arc::from("infra")),
+                name: Arc::from("same-namespace"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        eprintln!("hosts: {:?}", table.hosts);
+        let compiled = CompiledRouteTable::compile(table).unwrap();
+        let headers = http::header::HeaderMap::new();
+        let plan = compiled.lookup("192.168.252.19", "/temporary", "GET", &headers, None);
+        eprintln!("plan: {:?}", plan);
+        assert!(plan.is_some(), "expected 307 redirect plan");
+        let plan = plan.unwrap();
+        assert_eq!(plan.request_stages.len(), 1);
+        assert!(matches!(
+            plan.request_stages[0],
+            crate::ir::compile::RequestStage::Terminal(
+                crate::ir::compile::TerminalAction::Redirect(_)
+            )
+        ));
     }
 }

@@ -262,7 +262,11 @@ mod tests {
                 .as_secs()
                 - 35,
         };
-        handle.peers().write().await.insert(stale_peer.node_id, stale_peer);
+        handle
+            .peers()
+            .write()
+            .await
+            .insert(stale_peer.node_id, stale_peer);
 
         let j = tokio::spawn(async move { handle.run(tx).await });
 

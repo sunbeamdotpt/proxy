@@ -47,11 +47,7 @@ pub struct StatusCondition {
 ///
 /// This is a convenience wrapper around [`StatusWriter::write_gateway_status`].
 /// It will be removed once all call-sites are migrated to the struct.
-pub async fn write_gateway_status(
-    _name: &str,
-    _namespace: &str,
-    _conditions: &[StatusCondition],
-) {
+pub async fn write_gateway_status(_name: &str, _namespace: &str, _conditions: &[StatusCondition]) {
     tracing::trace!("status writeback stub — use StatusWriter");
 }
 

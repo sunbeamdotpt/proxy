@@ -9,20 +9,23 @@
 
 use crate::gateway::api::HTTPRoute;
 use crate::gateway::model::{
-    GatewayState, HeaderMatch, HeaderMatchValue, HTTPRouteRule, HTTPRouteState, HostnameMatch, ListenerState,
-    ParentRef, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch, RouteState,
+    AllowedRoutes, GatewayState, HTTPRouteRule, HTTPRouteState, HeaderMatch, HeaderMatchValue,
+    HostnameMatch, ListenerState, NamespaceFrom, ParentRef, PathMatch, PathRewrite,
+    QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch, RouteNamespaces, RouteState,
     WeightedBackend,
 };
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use gateway_api::httproutes::{
-    HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs, HttpRouteRulesFilters,
+    HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs,
+    HttpRouteRulesBackendRefsFilters, HttpRouteRulesBackendRefsFiltersType, HttpRouteRulesFilters,
     HttpRouteRulesFiltersRequestRedirectPathType, HttpRouteRulesFiltersRequestRedirectScheme,
-    HttpRouteRulesFiltersType, HttpRouteRulesFiltersUrlRewritePathType,
-    HttpRouteRulesMatches, HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath,
+    HttpRouteRulesFiltersType, HttpRouteRulesFiltersUrlRewritePathType, HttpRouteRulesMatches,
+    HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath,
     HttpRouteRulesMatchesPathType, HttpRouteRulesMatchesQueryParams,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Result of reconciling a single HTTPRoute.
@@ -30,6 +33,8 @@ use std::sync::Arc;
 pub struct ReconciledHTTPRoute {
     pub route_state: RouteState,
     pub parent_statuses: Vec<HTTPRouteParentStatus>,
+    /// True only when the route is accepted and all backend references resolve.
+    pub programmed: bool,
 }
 
 /// Status conditions for a single parentRef entry.
@@ -40,9 +45,31 @@ pub struct HTTPRouteParentStatus {
 }
 
 /// Reconcile a slice of HTTPRoute CRDs against the current Gateway set.
+///
+/// This is the test-friendly entry point that uses default listener
+/// permissions (same-namespace, HTTPRoute allowed) and no namespace labels.
 pub fn reconcile_httproutes(
     routes: &[HTTPRoute],
     gateways: &[GatewayState],
+    grant_index: &GrantIndex,
+) -> Vec<ReconciledHTTPRoute> {
+    let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+    let listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+    reconcile_httproutes_with_context(
+        routes,
+        gateways,
+        &namespace_labels,
+        &listener_allowed,
+        grant_index,
+    )
+}
+
+/// Reconcile HTTPRoutes with full listener permission context.
+pub fn reconcile_httproutes_with_context(
+    routes: &[HTTPRoute],
+    gateways: &[GatewayState],
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
     grant_index: &GrantIndex,
 ) -> Vec<ReconciledHTTPRoute> {
     routes
@@ -50,7 +77,13 @@ pub fn reconcile_httproutes(
         .map(|route| {
             let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
             let backend_resolution = resolve_backend_refs(route, route_ns, grant_index);
-            reconcile_single(route, gateways, grant_index, backend_resolution)
+            reconcile_single(
+                route,
+                gateways,
+                namespace_labels,
+                listener_allowed,
+                backend_resolution,
+            )
         })
         .collect()
 }
@@ -58,7 +91,8 @@ pub fn reconcile_httproutes(
 pub fn reconcile_single(
     route: &HTTPRoute,
     gateways: &[GatewayState],
-    grant_index: &GrantIndex,
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
     backend_resolution: BackendResolution,
 ) -> ReconciledHTTPRoute {
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
@@ -77,12 +111,11 @@ pub fn reconcile_single(
             generation,
             &route_hostnames,
             gateways,
-            grant_index,
+            namespace_labels,
+            listener_allowed,
         );
         let status_parent_ref = resolved.clone().unwrap_or_else(|| ParentRef {
-            namespace: Some(Arc::from(
-                parsed.namespace.as_deref().unwrap_or(route_ns),
-            )),
+            namespace: Some(Arc::from(parsed.namespace.as_deref().unwrap_or(route_ns))),
             name: Arc::from(parsed.name.clone()),
             section_name: parsed.section_name.clone().map(Arc::from),
         });
@@ -92,23 +125,23 @@ pub fn reconcile_single(
         }
 
         // Merge backend ref resolution into the parent status.
-        let resolved_refs = match &backend_resolution {
-            BackendResolution::Ok => resolved_refs_true(generation),
-            BackendResolution::RefNotPermitted(msg) => StatusCondition {
+        let resolved_refs = match &backend_resolution.overall {
+            BackendResolutionStatus::Ok => resolved_refs_true(generation),
+            BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,
                 reason: "RefNotPermitted".to_string(),
                 message: msg.clone(),
                 observed_generation: generation,
             },
-            BackendResolution::Unsupported(msg) => StatusCondition {
+            BackendResolutionStatus::Unsupported(msg) => StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,
                 reason: "InvalidKind".to_string(),
                 message: msg.clone(),
                 observed_generation: generation,
             },
-            BackendResolution::BackendNotFound(msg) => StatusCondition {
+            BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,
                 reason: "BackendNotFound".to_string(),
@@ -120,23 +153,24 @@ pub fn reconcile_single(
 
         // Programmed mirrors Accepted: the route is considered programmed when
         // it is accepted and all refs are resolved.
-        let programmed = if matches!(&backend_resolution, BackendResolution::Ok) && accepted {
-            StatusCondition {
-                condition_type: ConditionType::Programmed,
-                status: ConditionStatus::True,
-                reason: "Programmed".to_string(),
-                message: "Route programmed into proxy".to_string(),
-                observed_generation: generation,
-            }
-        } else {
-            StatusCondition {
-                condition_type: ConditionType::Programmed,
-                status: ConditionStatus::False,
-                reason: "NotProgrammed".to_string(),
-                message: "Route not programmed into proxy".to_string(),
-                observed_generation: generation,
-            }
-        };
+        let programmed =
+            if matches!(&backend_resolution.overall, BackendResolutionStatus::Ok) && accepted {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::True,
+                    reason: "Programmed".to_string(),
+                    message: "Route programmed into proxy".to_string(),
+                    observed_generation: generation,
+                }
+            } else {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::False,
+                    reason: "NotProgrammed".to_string(),
+                    message: "Route not programmed into proxy".to_string(),
+                    observed_generation: generation,
+                }
+            };
         conditions.push(programmed);
 
         parent_statuses.push(HTTPRouteParentStatus {
@@ -152,64 +186,136 @@ pub fn reconcile_single(
         generation,
         parent_refs,
     };
+    let programmed = !route_state.parent_refs.is_empty()
+        && matches!(backend_resolution.overall, BackendResolutionStatus::Ok);
 
     ReconciledHTTPRoute {
         route_state,
         parent_statuses,
+        programmed,
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum BackendResolution {
+pub enum BackendResolutionStatus {
     Ok,
     RefNotPermitted(String),
     Unsupported(String),
     BackendNotFound(String),
 }
 
-fn resolve_backend_refs(route: &HTTPRoute, route_ns: &str, grant_index: &GrantIndex) -> BackendResolution {
+/// Per-rule backend resolution result.
+#[derive(Clone, Debug)]
+pub struct RuleBackendResolution {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Backend-ref resolution for an HTTPRoute. `overall` drives status conditions;
+/// `rules` is parallel to `route.spec.rules` and drives per-rule programming.
+#[derive(Clone, Debug)]
+pub struct BackendResolution {
+    pub overall: BackendResolutionStatus,
+    pub rules: Vec<RuleBackendResolution>,
+}
+
+impl BackendResolution {
+    fn ok() -> Self {
+        Self {
+            overall: BackendResolutionStatus::Ok,
+            rules: Vec::new(),
+        }
+    }
+}
+
+fn check_backend_permitted(
+    backend: &HttpRouteRulesBackendRefs,
+    route_ns: &str,
+    grant_index: &GrantIndex,
+) -> Result<(), BackendResolutionStatus> {
+    let group = backend.group.as_deref().unwrap_or("");
+    let kind = backend.kind.as_deref().unwrap_or("Service");
+    let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
+
+    if !group.is_empty() || kind != "Service" {
+        return Err(BackendResolutionStatus::Unsupported(format!(
+            "backendRef group {} kind {} is not supported",
+            group, kind
+        )));
+    }
+
+    let permitted = grant_index.is_permitted(
+        route_ns,
+        "gateway.networking.k8s.io",
+        "HTTPRoute",
+        target_ns,
+        group,
+        kind,
+        &backend.name,
+    );
+
+    if !permitted {
+        return Err(BackendResolutionStatus::RefNotPermitted(format!(
+            "cross-namespace backend reference from {} to {}/{} is not permitted",
+            route_ns, target_ns, backend.name
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_backend_refs(
+    route: &HTTPRoute,
+    route_ns: &str,
+    grant_index: &GrantIndex,
+) -> BackendResolution {
     let rules = match route.spec.rules.as_ref() {
         Some(r) => r,
-        None => return BackendResolution::Ok,
+        None => return BackendResolution::ok(),
     };
+
+    let mut overall = BackendResolutionStatus::Ok;
+    let mut rule_results = Vec::with_capacity(rules.len());
 
     for rule in rules {
         let backends = match rule.backend_refs.as_ref() {
             Some(b) => b,
-            None => continue,
-        };
-        for backend in backends {
-            let group = backend.group.as_deref().unwrap_or("");
-            let kind = backend.kind.as_deref().unwrap_or("Service");
-            let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-
-            if !group.is_empty() || kind != "Service" {
-                return BackendResolution::Unsupported(format!(
-                    "backendRef group {} kind {} is not supported",
-                    group, kind
-                ));
+            None => {
+                rule_results.push(RuleBackendResolution {
+                    ok: true,
+                    message: String::new(),
+                });
+                continue;
             }
+        };
 
-            let permitted = grant_index.is_permitted(
-                route_ns,
-                "gateway.networking.k8s.io",
-                "HTTPRoute",
-                target_ns,
-                group,
-                kind,
-                &backend.name,
-            );
-
-            if !permitted {
-                return BackendResolution::RefNotPermitted(format!(
-                    "cross-namespace backend reference from {} to {}/{} is not permitted",
-                    route_ns, target_ns, backend.name
-                ));
+        let mut rule_ok = true;
+        let mut rule_message = String::new();
+        for backend in backends {
+            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
+                if matches!(overall, BackendResolutionStatus::Ok) {
+                    overall = status.clone();
+                }
+                rule_ok = false;
+                if rule_message.is_empty() {
+                    rule_message = match &status {
+                        BackendResolutionStatus::Unsupported(msg)
+                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
+                        _ => String::new(),
+                    };
+                }
             }
         }
+        rule_results.push(RuleBackendResolution {
+            ok: rule_ok,
+            message: rule_message,
+        });
     }
 
-    BackendResolution::Ok
+    BackendResolution {
+        overall,
+        rules: rule_results,
+    }
 }
 
 /// Async variant of [`resolve_backend_refs`] that also validates that
@@ -222,55 +328,72 @@ pub async fn resolve_backend_refs_async(
 ) -> BackendResolution {
     let rules = match route.spec.rules.as_ref() {
         Some(r) => r,
-        None => return BackendResolution::Ok,
+        None => return BackendResolution::ok(),
     };
+
+    let mut overall = BackendResolutionStatus::Ok;
+    let mut rule_results = Vec::with_capacity(rules.len());
 
     for rule in rules {
         let backends = match rule.backend_refs.as_ref() {
             Some(b) => b,
-            None => continue,
+            None => {
+                rule_results.push(RuleBackendResolution {
+                    ok: true,
+                    message: String::new(),
+                });
+                continue;
+            }
         };
+
+        let mut rule_ok = true;
+        let mut rule_message = String::new();
         for backend in backends {
-            let group = backend.group.as_deref().unwrap_or("");
-            let kind = backend.kind.as_deref().unwrap_or("Service");
+            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
+                if matches!(overall, BackendResolutionStatus::Ok) {
+                    overall = status.clone();
+                }
+                rule_ok = false;
+                if rule_message.is_empty() {
+                    rule_message = match &status {
+                        BackendResolutionStatus::Unsupported(msg)
+                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
+                        _ => String::new(),
+                    };
+                }
+                continue;
+            }
+
             let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-
-            if !group.is_empty() || kind != "Service" {
-                return BackendResolution::Unsupported(format!(
-                    "backendRef group {} kind {} is not supported",
-                    group, kind
-                ));
-            }
-
-            let permitted = grant_index.is_permitted(
-                route_ns,
-                "gateway.networking.k8s.io",
-                "HTTPRoute",
-                target_ns,
-                group,
-                kind,
-                &backend.name,
-            );
-
-            if !permitted {
-                return BackendResolution::RefNotPermitted(format!(
-                    "cross-namespace backend reference from {} to {}/{} is not permitted",
-                    route_ns, target_ns, backend.name
-                ));
-            }
-
             let services: kube::Api<k8s_openapi::api::core::v1::Service> =
                 kube::Api::namespaced(client.clone(), target_ns);
             if services.get(&backend.name).await.is_err() {
-                return BackendResolution::BackendNotFound(format!(
+                let status = BackendResolutionStatus::BackendNotFound(format!(
                     "backend Service {}/{} not found",
                     target_ns, backend.name
                 ));
+                if matches!(overall, BackendResolutionStatus::Ok) {
+                    overall = status.clone();
+                }
+                rule_ok = false;
+                if rule_message.is_empty() {
+                    rule_message = match &status {
+                        BackendResolutionStatus::BackendNotFound(msg) => msg.clone(),
+                        _ => String::new(),
+                    };
+                }
             }
         }
+        rule_results.push(RuleBackendResolution {
+            ok: rule_ok,
+            message: rule_message,
+        });
     }
 
-    BackendResolution::Ok
+    BackendResolution {
+        overall,
+        rules: rule_results,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -299,11 +422,7 @@ fn parse_parent_ref(value: &HttpRouteParentRefs) -> Option<ParsedParentRef> {
             .as_deref()
             .unwrap_or("gateway.networking.k8s.io")
             .to_string(),
-        kind: value
-            .kind
-            .as_deref()
-            .unwrap_or("Gateway")
-            .to_string(),
+        kind: value.kind.as_deref().unwrap_or("Gateway").to_string(),
         namespace: value.namespace.clone(),
         name: value.name.clone(),
         section_name: value.section_name.clone(),
@@ -312,7 +431,9 @@ fn parse_parent_ref(value: &HttpRouteParentRefs) -> Option<ParsedParentRef> {
 }
 
 /// Parse hostnames from an HTTPRoute spec into the model's HostnameMatch types.
-fn parse_route_hostnames(route: &HTTPRoute) -> Vec<crate::gateway::model::HostnameMatch> {
+pub(crate) fn parse_route_hostnames(
+    route: &HTTPRoute,
+) -> Vec<crate::gateway::model::HostnameMatch> {
     use crate::gateway::model::HostnameMatch;
     use std::sync::Arc;
     route
@@ -333,13 +454,82 @@ fn parse_route_hostnames(route: &HTTPRoute) -> Vec<crate::gateway::model::Hostna
         .unwrap_or_default()
 }
 
+/// Check whether `allowed` permits the given route kind.
+pub(crate) fn listener_allows_kind(allowed: &AllowedRoutes, group: &str, kind: &str) -> bool {
+    allowed.kinds.is_empty()
+        || allowed
+            .kinds
+            .iter()
+            .any(|k| k.group.as_ref() == group && k.kind.as_ref() == kind)
+}
+
+/// Check whether a listener's namespace scope allows routes from `route_ns`.
+pub(crate) fn namespace_allowed(
+    namespaces: &RouteNamespaces,
+    route_ns: &str,
+    gateway_ns: &str,
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+) -> bool {
+    match namespaces.from {
+        NamespaceFrom::All => true,
+        NamespaceFrom::Same => route_ns == gateway_ns,
+        NamespaceFrom::Selector => {
+            let labels = match namespace_labels.get(route_ns) {
+                Some(l) => l,
+                None => return false,
+            };
+            namespaces
+                .selector
+                .as_ref()
+                .is_some_and(|sel| sel.iter().all(|(k, v)| labels.get(k) == Some(v)))
+        }
+    }
+}
+
+/// Check whether `route_hostnames` intersect a listener's hostname.
+pub(crate) fn listener_hostname_intersects(
+    listener_hostname: Option<&str>,
+    route_hostnames: &[HostnameMatch],
+) -> bool {
+    if route_hostnames.is_empty() {
+        return true;
+    }
+    let Some(listener_hostname) = listener_hostname else {
+        return true;
+    };
+    let listener_match = crate::gateway::translate::parse_listener_hostname(listener_hostname);
+    route_hostnames
+        .iter()
+        .any(|rh| crate::gateway::translate::hostname_intersects(rh, &listener_match))
+}
+
+/// Check whether a listener accepts a route considering kind, namespace, and
+/// hostname constraints.
+pub(crate) fn listener_accepts_route(
+    listener: &ListenerState,
+    allowed: &AllowedRoutes,
+    route_ns: &str,
+    gateway_ns: &str,
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    route_hostnames: &[HostnameMatch],
+) -> bool {
+    if !listener_allows_kind(allowed, "gateway.networking.k8s.io", "HTTPRoute") {
+        return false;
+    }
+    if !namespace_allowed(&allowed.namespaces, route_ns, gateway_ns, namespace_labels) {
+        return false;
+    }
+    listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames)
+}
+
 fn resolve_parent_ref(
     parsed: &ParsedParentRef,
     route_ns: &str,
     observed_generation: i64,
     route_hostnames: &[crate::gateway::model::HostnameMatch],
     gateways: &[GatewayState],
-    grant_index: &GrantIndex,
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let target_ns = parsed.namespace.as_deref().unwrap_or(route_ns);
 
@@ -352,31 +542,6 @@ fn resolve_parent_ref(
             message: format!(
                 "parentRef group {} kind {} is not supported",
                 parsed.group, parsed.kind
-            ),
-            observed_generation,
-        }];
-        return (None, conditions);
-    }
-
-    // Check cross-namespace permission.
-    let permitted = grant_index.is_permitted(
-        route_ns,
-        "gateway.networking.k8s.io",
-        "HTTPRoute",
-        target_ns,
-        &parsed.group,
-        &parsed.kind,
-        &parsed.name,
-    );
-
-    if !permitted {
-        let conditions = vec![StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::False,
-            reason: "RefNotPermitted".to_string(),
-            message: format!(
-                "cross-namespace reference from {route_ns} to Gateway {}/{} is not permitted",
-                target_ns, parsed.name
             ),
             observed_generation,
         }];
@@ -409,10 +574,7 @@ fn resolve_parent_ref(
                 .as_deref()
                 .map(|s| s == l.name.as_ref())
                 .unwrap_or(true);
-            let port_matches = parsed
-                .port
-                .map(|p| p == l.port as i32)
-                .unwrap_or(true);
+            let port_matches = parsed.port.map(|p| p == l.port as i32).unwrap_or(true);
             section_matches && port_matches
         })
         .collect();
@@ -439,40 +601,80 @@ fn resolve_parent_ref(
     }
 
     // If port is specified but no listener matches, reject.
-    if parsed.port.is_some() && matching_listeners.is_empty() {
-        let conditions = vec![StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::False,
-            reason: "NoMatchingParent".to_string(),
-            message: format!(
-                "no listener matching port {} on Gateway {}/{}",
-                parsed.port.unwrap(),
-                target_ns,
-                parsed.name
-            ),
-            observed_generation,
-        }];
-        return (None, conditions);
+    if let Some(port) = parsed.port {
+        if matching_listeners.is_empty() {
+            let conditions = vec![StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "NoMatchingParent".to_string(),
+                message: format!(
+                    "no listener matching port {} on Gateway {}/{}",
+                    port, target_ns, parsed.name
+                ),
+                observed_generation,
+            }];
+            return (None, conditions);
+        }
     }
 
-    // Check hostname intersection: the route is accepted if at least one
-    // matching listener accepts it by hostname.
-    let hostname_accepted = route_hostnames.is_empty()
-        || matching_listeners.iter().any(|l| {
-            let intersected =
-                crate::gateway::translate::intersect_hostnames(route_hostnames, l.hostname.as_deref());
-            !intersected.is_empty()
-        });
+    // Classify why matching listeners reject the route.
+    let mut kind_allowed = false;
+    let mut namespace_allowed_flag = false;
+    let mut hostname_intersects = false;
 
-    if !hostname_accepted {
-        let conditions = vec![StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::False,
-            reason: "NoMatchingListenerHostname".to_string(),
-            message: "no matching listener hostname".to_string(),
-            observed_generation,
-        }];
-        return (None, conditions);
+    for listener in matching_listeners {
+        let allowed = listener_allowed
+            .get(&(
+                target_ns.to_string(),
+                parsed.name.clone(),
+                listener.name.to_string(),
+            ))
+            .cloned()
+            .unwrap_or_default();
+        if !listener_allows_kind(&allowed, "gateway.networking.k8s.io", "HTTPRoute") {
+            continue;
+        }
+        kind_allowed = true;
+        if !namespace_allowed(&allowed.namespaces, route_ns, target_ns, namespace_labels) {
+            continue;
+        }
+        namespace_allowed_flag = true;
+        if !listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames) {
+            continue;
+        }
+        hostname_intersects = true;
+    }
+
+    if !kind_allowed || !namespace_allowed_flag {
+        return (
+            None,
+            vec![StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "NotAllowedByListeners".to_string(),
+                message: format!(
+                    "Route is not allowed by any listener of Gateway {}/{}",
+                    target_ns, parsed.name
+                ),
+                observed_generation,
+            }],
+        );
+    }
+
+    if !hostname_intersects {
+        return (
+            None,
+            vec![StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "NoMatchingListenerHostname".to_string(),
+                message: format!(
+                    "Route hostnames do not intersect with any listener of Gateway {}/{}",
+                    target_ns, parsed.name
+                ),
+                observed_generation,
+            }],
+        );
     }
 
     // Parent ref is accepted. The namespace is always included in status
@@ -523,7 +725,11 @@ pub fn parse_httproute_state(route: &HTTPRoute) -> HTTPRouteState {
         .spec
         .rules
         .as_ref()
-        .map(|r| r.iter().filter_map(|rule| parse_rule(rule, route_ns_str)).collect())
+        .map(|r| {
+            r.iter()
+                .filter_map(|rule| parse_rule(rule, route_ns_str))
+                .collect()
+        })
         .unwrap_or_default();
 
     HTTPRouteState {
@@ -533,6 +739,7 @@ pub fn parse_httproute_state(route: &HTTPRoute) -> HTTPRouteState {
         hostnames,
         rules,
         parent_refs: vec![], // filled by reconcile_single
+        programmed: false,   // filled by reconcile_single
     }
 }
 
@@ -546,7 +753,11 @@ fn parse_rule(value: &HttpRouteRules, route_ns: &str) -> Option<HTTPRouteRule> {
     let backends: Vec<WeightedBackend> = value
         .backend_refs
         .as_ref()
-        .map(|arr| arr.iter().filter_map(|b| parse_backend_ref(b, route_ns)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| parse_backend_ref(b, route_ns))
+                .collect()
+        })
         .unwrap_or_default();
 
     let filters: Vec<RouteFilter> = value
@@ -557,7 +768,9 @@ fn parse_rule(value: &HttpRouteRules, route_ns: &str) -> Option<HTTPRouteRule> {
 
     let timeout_secs = value.timeouts.as_ref().and_then(|t| {
         t.backend_request.as_ref().and_then(|dur| {
-            dur.parse::<gateway_api::Duration>().ok().map(|d| d.as_secs())
+            dur.parse::<gateway_api::Duration>()
+                .ok()
+                .map(|d| d.as_secs())
         })
     });
 
@@ -566,6 +779,7 @@ fn parse_rule(value: &HttpRouteRules, route_ns: &str) -> Option<HTTPRouteRule> {
         backends,
         filters,
         timeout_secs,
+        programmed: true,
     })
 }
 
@@ -595,9 +809,17 @@ fn parse_match(value: &HttpRouteRulesMatches) -> Option<RouteMatch> {
 
 fn parse_header_match(value: &HttpRouteRulesMatchesHeaders) -> Option<HeaderMatch> {
     use gateway_api::httproutes::HttpRouteRulesMatchesHeadersType;
-    let value_match = match value.r#type.as_ref().unwrap_or(&HttpRouteRulesMatchesHeadersType::Exact) {
-        HttpRouteRulesMatchesHeadersType::Exact => HeaderMatchValue::Exact(Arc::from(value.value.as_str())),
-        HttpRouteRulesMatchesHeadersType::RegularExpression => HeaderMatchValue::Regex(Arc::from(value.value.as_str())),
+    let value_match = match value
+        .r#type
+        .as_ref()
+        .unwrap_or(&HttpRouteRulesMatchesHeadersType::Exact)
+    {
+        HttpRouteRulesMatchesHeadersType::Exact => {
+            HeaderMatchValue::Exact(Arc::from(value.value.as_str()))
+        }
+        HttpRouteRulesMatchesHeadersType::RegularExpression => {
+            HeaderMatchValue::Regex(Arc::from(value.value.as_str()))
+        }
     };
     Some(HeaderMatch {
         name: Arc::from(value.name.as_str()),
@@ -607,9 +829,17 @@ fn parse_header_match(value: &HttpRouteRulesMatchesHeaders) -> Option<HeaderMatc
 
 fn parse_query_param_match(value: &HttpRouteRulesMatchesQueryParams) -> Option<QueryParamMatch> {
     use gateway_api::httproutes::HttpRouteRulesMatchesQueryParamsType;
-    let value_match = match value.r#type.as_ref().unwrap_or(&HttpRouteRulesMatchesQueryParamsType::Exact) {
-        HttpRouteRulesMatchesQueryParamsType::Exact => QueryParamMatchValue::Exact(Arc::from(value.value.as_str())),
-        HttpRouteRulesMatchesQueryParamsType::RegularExpression => QueryParamMatchValue::Regex(Arc::from(value.value.as_str())),
+    let value_match = match value
+        .r#type
+        .as_ref()
+        .unwrap_or(&HttpRouteRulesMatchesQueryParamsType::Exact)
+    {
+        HttpRouteRulesMatchesQueryParamsType::Exact => {
+            QueryParamMatchValue::Exact(Arc::from(value.value.as_str()))
+        }
+        HttpRouteRulesMatchesQueryParamsType::RegularExpression => {
+            QueryParamMatchValue::Regex(Arc::from(value.value.as_str()))
+        }
     };
     Some(QueryParamMatch {
         name: Arc::from(value.name.as_str()),
@@ -632,7 +862,10 @@ fn method_to_str(method: &HttpRouteRulesMatchesMethod) -> &'static str {
 }
 
 fn parse_path_match(value: &HttpRouteRulesMatchesPath) -> Option<PathMatch> {
-    let typ = value.r#type.as_ref().unwrap_or(&HttpRouteRulesMatchesPathType::PathPrefix);
+    let typ = value
+        .r#type
+        .as_ref()
+        .unwrap_or(&HttpRouteRulesMatchesPathType::PathPrefix);
     let val = value.value.as_deref().unwrap_or("/");
     Some(match typ {
         HttpRouteRulesMatchesPathType::Exact => PathMatch::Exact(Arc::from(val)),
@@ -647,6 +880,16 @@ fn parse_backend_ref(value: &HttpRouteRulesBackendRefs, route_ns: &str) -> Optio
     let port = value.port.unwrap_or(80);
     let weight = value.weight.unwrap_or(1) as u32;
 
+    let filters = value
+        .filters
+        .as_ref()
+        .map(|arr| {
+            arr.iter()
+                .flat_map(|f| parse_backend_filter(f, route_ns))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Build a cluster-internal service address.  Always use the FQDN so that
     // the proxy resolves the backend in the route's namespace regardless of
     // which namespace the proxy pod itself runs in.
@@ -654,13 +897,16 @@ fn parse_backend_ref(value: &HttpRouteRulesBackendRefs, route_ns: &str) -> Optio
     Some(WeightedBackend {
         backend: Arc::from(backend),
         weight,
+        filters,
     })
 }
 
 fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilter> {
     match value.r#type {
         HttpRouteRulesFiltersType::UrlRewrite => {
-            let Some(url_rewrite) = value.url_rewrite.as_ref() else { return vec![] };
+            let Some(url_rewrite) = value.url_rewrite.as_ref() else {
+                return vec![];
+            };
             let hostname = url_rewrite.hostname.as_deref().map(Arc::from);
             let path = url_rewrite.path.as_ref();
             let path_rewrite = match path {
@@ -671,9 +917,10 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
                             replacement: Arc::from(p.replace_prefix_match.as_deref().unwrap_or("")),
                         })
                     }
-                    HttpRouteRulesFiltersUrlRewritePathType::ReplaceFullPath => {
-                        p.replace_full_path.as_deref().map(|s| PathRewrite::FullReplace(Arc::from(s)))
-                    }
+                    HttpRouteRulesFiltersUrlRewritePathType::ReplaceFullPath => p
+                        .replace_full_path
+                        .as_deref()
+                        .map(|s| PathRewrite::FullReplace(Arc::from(s))),
                 },
                 None => None,
             };
@@ -682,11 +929,13 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             }
             vec![RouteFilter::UrlRewrite {
                 hostname,
-                path: path_rewrite.unwrap_or(PathRewrite::FullReplace(Arc::from(""))),
+                path: path_rewrite,
             }]
         }
         HttpRouteRulesFiltersType::RequestHeaderModifier => {
-            let Some(modifier) = value.request_header_modifier.as_ref() else { return vec![] };
+            let Some(modifier) = value.request_header_modifier.as_ref() else {
+                return vec![];
+            };
             let mut out = Vec::new();
             if let Some(set) = &modifier.set {
                 for h in set {
@@ -714,7 +963,9 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             out
         }
         HttpRouteRulesFiltersType::ResponseHeaderModifier => {
-            let Some(modifier) = value.response_header_modifier.as_ref() else { return vec![] };
+            let Some(modifier) = value.response_header_modifier.as_ref() else {
+                return vec![];
+            };
             let mut out = Vec::new();
             if let Some(set) = &modifier.set {
                 for h in set {
@@ -742,7 +993,9 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             out
         }
         HttpRouteRulesFiltersType::RequestRedirect => {
-            let Some(redirect) = value.request_redirect.as_ref() else { return vec![] };
+            let Some(redirect) = value.request_redirect.as_ref() else {
+                return vec![];
+            };
             let scheme = redirect.scheme.as_ref().map(|s| match s {
                 HttpRouteRulesFiltersRequestRedirectScheme::Http => Arc::from("http"),
                 HttpRouteRulesFiltersRequestRedirectScheme::Https => Arc::from("https"),
@@ -760,7 +1013,9 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             }]
         }
         HttpRouteRulesFiltersType::RequestMirror => {
-            let Some(mirror) = value.request_mirror.as_ref() else { return vec![] };
+            let Some(mirror) = value.request_mirror.as_ref() else {
+                return vec![];
+            };
             let name = &mirror.backend_ref.name;
             let ns = mirror.backend_ref.namespace.as_deref().unwrap_or(route_ns);
             let port = mirror.backend_ref.port.unwrap_or(80);
@@ -770,11 +1025,29 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             }]
         }
         HttpRouteRulesFiltersType::Cors => {
-            let Some(cors) = value.cors.as_ref() else { return vec![] };
-            let allow_origins = cors.allow_origins.as_ref().map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect()).unwrap_or_default();
-            let allow_methods = cors.allow_methods.as_ref().map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect()).unwrap_or_default();
-            let allow_headers = cors.allow_headers.as_ref().map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect()).unwrap_or_default();
-            let expose_headers = cors.expose_headers.as_ref().map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect()).unwrap_or_default();
+            let Some(cors) = value.cors.as_ref() else {
+                return vec![];
+            };
+            let allow_origins = cors
+                .allow_origins
+                .as_ref()
+                .map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect())
+                .unwrap_or_default();
+            let allow_methods = cors
+                .allow_methods
+                .as_ref()
+                .map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect())
+                .unwrap_or_default();
+            let allow_headers = cors
+                .allow_headers
+                .as_ref()
+                .map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect())
+                .unwrap_or_default();
+            let expose_headers = cors
+                .expose_headers
+                .as_ref()
+                .map(|v| v.iter().map(|s| Arc::from(s.as_str())).collect())
+                .unwrap_or_default();
             vec![RouteFilter::Cors {
                 allow_origins,
                 allow_methods,
@@ -788,7 +1061,78 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
     }
 }
 
-fn parse_redirect_path(value: &gateway_api::httproutes::HttpRouteRulesFiltersRequestRedirectPath) -> Option<PathRewrite> {
+fn parse_backend_filter(
+    value: &HttpRouteRulesBackendRefsFilters,
+    _route_ns: &str,
+) -> Vec<RouteFilter> {
+    match value.r#type {
+        HttpRouteRulesBackendRefsFiltersType::RequestHeaderModifier => {
+            let Some(modifier) = value.request_header_modifier.as_ref() else {
+                return vec![];
+            };
+            let mut out = Vec::new();
+            if let Some(set) = &modifier.set {
+                for h in set {
+                    out.push(RouteFilter::RequestHeaderSet {
+                        name: Arc::from(h.name.as_str()),
+                        value: Arc::from(h.value.as_str()),
+                    });
+                }
+            }
+            if let Some(add) = &modifier.add {
+                for h in add {
+                    out.push(RouteFilter::RequestHeaderAdd {
+                        name: Arc::from(h.name.as_str()),
+                        value: Arc::from(h.value.as_str()),
+                    });
+                }
+            }
+            if let Some(remove) = &modifier.remove {
+                for h in remove {
+                    out.push(RouteFilter::RequestHeaderRemove {
+                        name: Arc::from(h.as_str()),
+                    });
+                }
+            }
+            out
+        }
+        HttpRouteRulesBackendRefsFiltersType::ResponseHeaderModifier => {
+            let Some(modifier) = value.response_header_modifier.as_ref() else {
+                return vec![];
+            };
+            let mut out = Vec::new();
+            if let Some(set) = &modifier.set {
+                for h in set {
+                    out.push(RouteFilter::ResponseHeaderSet {
+                        name: Arc::from(h.name.as_str()),
+                        value: Arc::from(h.value.as_str()),
+                    });
+                }
+            }
+            if let Some(add) = &modifier.add {
+                for h in add {
+                    out.push(RouteFilter::ResponseHeaderAdd {
+                        name: Arc::from(h.name.as_str()),
+                        value: Arc::from(h.value.as_str()),
+                    });
+                }
+            }
+            if let Some(remove) = &modifier.remove {
+                for h in remove {
+                    out.push(RouteFilter::ResponseHeaderRemove {
+                        name: Arc::from(h.as_str()),
+                    });
+                }
+            }
+            out
+        }
+        _ => vec![],
+    }
+}
+
+fn parse_redirect_path(
+    value: &gateway_api::httproutes::HttpRouteRulesFiltersRequestRedirectPath,
+) -> Option<PathRewrite> {
     match value.r#type {
         HttpRouteRulesFiltersRequestRedirectPathType::ReplaceFullPath => value
             .replace_full_path
@@ -797,11 +1141,9 @@ fn parse_redirect_path(value: &gateway_api::httproutes::HttpRouteRulesFiltersReq
         HttpRouteRulesFiltersRequestRedirectPathType::ReplacePrefixMatch => value
             .replace_prefix_match
             .as_ref()
-            .map(|s| {
-                PathRewrite::PrefixReplace {
-                    prefix: Arc::from("/"),
-                    replacement: Arc::from(s.as_str()),
-                }
+            .map(|s| PathRewrite::PrefixReplace {
+                prefix: Arc::from("/"),
+                replacement: Arc::from(s.as_str()),
             }),
     }
 }
@@ -844,10 +1186,11 @@ pub async fn reconcile_httproute(
     let name = route.metadata.name.clone().unwrap_or_default();
     let _observed_generation = route.metadata.generation.unwrap_or(0);
 
-    // Fetch all Gateways and ReferenceGrants for parentRef resolution.
+    // Fetch all Gateways, Namespaces, and ReferenceGrants for parentRef resolution.
     // In T1 we do a fresh list per reconcile; a shared cache can be added later.
     let gateways: Api<crate::gateway::api::Gateway> = Api::all(ctx.client.clone());
     let grants: Api<crate::gateway::api::ReferenceGrant> = Api::all(ctx.client.clone());
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client.clone());
 
     let gateway_list = match gateways.list(&Default::default()).await {
         Ok(list) => list,
@@ -863,18 +1206,50 @@ pub async fn reconcile_httproute(
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
     };
+    let namespace_list = match namespaces.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list Namespaces for HTTPRoute reconcile");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    };
 
     let gateway_states: Vec<GatewayState> = gateway_list
         .iter()
         .map(crate::gateway::reconcile::gateway::build_gateway_state)
         .collect();
 
-    let grant_states = crate::gateway::reconcile::refgrant::reconcile_reference_grants(&grant_list.items);
+    let grant_states =
+        crate::gateway::reconcile::refgrant::reconcile_reference_grants(&grant_list.items);
     let grant_index = GrantIndex::new(grant_states);
 
+    let namespace_labels: HashMap<String, HashMap<String, String>> = namespace_list
+        .iter()
+        .map(|ns| {
+            let name = ns.metadata.name.clone().unwrap_or_default();
+            let labels: HashMap<String, String> = ns
+                .metadata
+                .labels
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            (name, labels)
+        })
+        .collect();
+    let listener_allowed =
+        crate::gateway::reconcile::gateway::build_listener_allowed_map(&gateway_list.items);
+
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
-    let backend_resolution = resolve_backend_refs_async(&ctx.client, &route, route_ns, &grant_index).await;
-    let reconciled = reconcile_single(&route, &gateway_states, &grant_index, backend_resolution);
+    let backend_resolution =
+        resolve_backend_refs_async(&ctx.client, &route, route_ns, &grant_index).await;
+    let reconciled = reconcile_single(
+        &route,
+        &gateway_states,
+        &namespace_labels,
+        &listener_allowed,
+        backend_resolution,
+    );
 
     if ctx.is_leader.load(Ordering::Relaxed) {
         let parents: Vec<Value> = reconciled
@@ -927,14 +1302,20 @@ pub async fn reconcile_httproute(
 
         let new_status = serde_json::json!({ "parents": parents });
 
-        let old_status_json = route.status.as_ref()
+        let old_status_json = route
+            .status
+            .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .unwrap_or(serde_json::Value::Null);
         let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
         let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
 
         if old_stripped == new_stripped {
-            tracing::debug!(name, namespace = ns, "HTTPRoute status unchanged, skipping patch");
+            tracing::debug!(
+                name,
+                namespace = ns,
+                "HTTPRoute status unchanged, skipping patch"
+            );
         } else {
             let patch_body = serde_json::json!({
                 "apiVersion": "gateway.networking.k8s.io/v1",
@@ -948,7 +1329,10 @@ pub async fn reconcile_httproute(
 
             let api: Api<HTTPRoute> = Api::namespaced(ctx.client.clone(), &ns);
             let pp = PatchParams::apply("sunbeam-proxy");
-            if let Err(e) = api.patch_status(&name, &pp, &Patch::Apply(&patch_body)).await {
+            if let Err(e) = api
+                .patch_status(&name, &pp, &Patch::Apply(&patch_body))
+                .await
+            {
                 tracing::warn!(error = %e, name, namespace = ns, "HTTPRoute status patch failed");
             } else {
                 tracing::debug!(name, namespace = ns, "HTTPRoute status patched");
@@ -1114,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_namespace_requires_grant() {
+    fn cross_namespace_default_same_not_allowed() {
         let route = sample_route(vec![serde_json::json!({
             "namespace": "prod",
             "name": "gw-1",
@@ -1131,37 +1515,38 @@ mod tests {
             .find(|c| matches!(c.condition_type, ConditionType::Accepted))
             .unwrap();
         assert_eq!(accepted.status, ConditionStatus::False);
-        assert_eq!(accepted.reason, "RefNotPermitted");
+        assert_eq!(accepted.reason, "NotAllowedByListeners");
     }
 
     #[test]
-    fn cross_namespace_accepted_with_grant() {
+    fn cross_namespace_accepted_when_allowed_all() {
         let route = sample_route(vec![serde_json::json!({
             "namespace": "prod",
             "name": "gw-1",
             "sectionName": "http"
         })]);
         let gateways = vec![gw_with_listener("prod", "gw-1", "http")];
-        let grant = ReferenceGrantState {
-            namespace: Arc::from("prod"),
-            name: Arc::from("grant-1"),
-            generation: 1,
-            from: vec![GrantSubject {
-                group: Arc::from("gateway.networking.k8s.io"),
-                kind: Arc::from("HTTPRoute"),
-                namespace: Some(Arc::from("default")),
-                name: None,
-            }],
-            to: vec![GrantSubject {
-                group: Arc::from("gateway.networking.k8s.io"),
-                kind: Arc::from("Gateway"),
-                namespace: None,
-                name: None,
-            }],
-        };
-        let grant_index = GrantIndex::new(vec![grant]);
+        let grant_index = GrantIndex::new(vec![]);
+        let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+        let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_allowed.insert(
+            ("prod".to_string(), "gw-1".to_string(), "http".to_string()),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::All,
+                    selector: None,
+                },
+            },
+        );
 
-        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &gateways,
+            &namespace_labels,
+            &listener_allowed,
+            &grant_index,
+        );
         let status = &results[0].parent_statuses[0];
         let accepted = status
             .conditions
@@ -1169,6 +1554,153 @@ mod tests {
             .find(|c| matches!(c.condition_type, ConditionType::Accepted))
             .unwrap();
         assert_eq!(accepted.status, ConditionStatus::True);
+    }
+
+    #[test]
+    fn namespace_selector_accepts_matching_route() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "team-a", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "namespace": "infra", "name": "gw-1", "sectionName": "http" }]
+            }
+        }))
+        .expect("valid HTTPRoute");
+        let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
+        let grant_index = GrantIndex::new(vec![]);
+        let mut namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+        namespace_labels.insert(
+            "team-a".to_string(),
+            [("allowed".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_allowed.insert(
+            ("infra".to_string(), "gw-1".to_string(), "http".to_string()),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::Selector,
+                    selector: Some(
+                        [("allowed".to_string(), "true".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                },
+            },
+        );
+
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &gateways,
+            &namespace_labels,
+            &listener_allowed,
+            &grant_index,
+        );
+        let status = &results[0].parent_statuses[0];
+        let accepted = status
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+    }
+
+    #[test]
+    fn namespace_selector_rejects_non_matching_route() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "team-b", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "namespace": "infra", "name": "gw-1", "sectionName": "http" }]
+            }
+        }))
+        .expect("valid HTTPRoute");
+        let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
+        let grant_index = GrantIndex::new(vec![]);
+        let mut namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+        namespace_labels.insert(
+            "team-b".to_string(),
+            [("allowed".to_string(), "false".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_allowed.insert(
+            ("infra".to_string(), "gw-1".to_string(), "http".to_string()),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::Selector,
+                    selector: Some(
+                        [("allowed".to_string(), "true".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                },
+            },
+        );
+
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &gateways,
+            &namespace_labels,
+            &listener_allowed,
+            &grant_index,
+        );
+        let status = &results[0].parent_statuses[0];
+        let accepted = status
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NotAllowedByListeners");
+    }
+
+    #[test]
+    fn unsupported_route_kind_rejected_by_listener() {
+        let route = sample_route(vec![serde_json::json!({
+            "namespace": "infra",
+            "name": "gw-1",
+            "sectionName": "http"
+        })]);
+        let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
+        let grant_index = GrantIndex::new(vec![]);
+        let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+        let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_allowed.insert(
+            ("infra".to_string(), "gw-1".to_string(), "http".to_string()),
+            AllowedRoutes {
+                kinds: vec![crate::gateway::model::RouteGroupKind {
+                    group: Arc::from("gateway.networking.k8s.io"),
+                    kind: Arc::from("GRPCRoute"),
+                }],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::All,
+                    selector: None,
+                },
+            },
+        );
+
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &gateways,
+            &namespace_labels,
+            &listener_allowed,
+            &grant_index,
+        );
+        let status = &results[0].parent_statuses[0];
+        let accepted = status
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NotAllowedByListeners");
     }
 
     #[test]
@@ -1248,7 +1780,10 @@ mod tests {
         assert_eq!(resolved.status, ConditionStatus::True);
     }
 
-    fn route_with_backends(parent_refs: Vec<serde_json::Value>, backends: Vec<serde_json::Value>) -> HTTPRoute {
+    fn route_with_backends(
+        parent_refs: Vec<serde_json::Value>,
+        backends: Vec<serde_json::Value>,
+    ) -> HTTPRoute {
         let json = serde_json::json!({
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "HTTPRoute",
@@ -1390,14 +1925,26 @@ mod tests {
         assert_eq!(state.name.as_ref(), "route-1");
         assert_eq!(state.generation, 2);
         assert_eq!(state.hostnames.len(), 2);
-        assert_eq!(state.hostnames[0], HostnameMatch::Exact(Arc::from("example.com")));
-        assert_eq!(state.hostnames[1], HostnameMatch::Wildcard(Arc::from("wildcard.test")));
+        assert_eq!(
+            state.hostnames[0],
+            HostnameMatch::Exact(Arc::from("example.com"))
+        );
+        assert_eq!(
+            state.hostnames[1],
+            HostnameMatch::Wildcard(Arc::from("wildcard.test"))
+        );
         assert_eq!(state.rules.len(), 1);
         assert_eq!(state.rules[0].matches.len(), 1);
-        assert_eq!(state.rules[0].matches[0].path, Some(PathMatch::Prefix(Arc::from("/api"))));
+        assert_eq!(
+            state.rules[0].matches[0].path,
+            Some(PathMatch::Prefix(Arc::from("/api")))
+        );
         assert_eq!(state.rules[0].matches[0].method.as_deref(), Some("GET"));
         assert_eq!(state.rules[0].backends.len(), 1);
-        assert_eq!(state.rules[0].backends[0].backend.as_ref(), "svc-1.default.svc.cluster.local.:8080");
+        assert_eq!(
+            state.rules[0].backends[0].backend.as_ref(),
+            "svc-1.default.svc.cluster.local.:8080"
+        );
         assert_eq!(state.rules[0].backends[0].weight, 3);
     }
 
@@ -1451,10 +1998,22 @@ mod tests {
             }
         }));
 
-        assert_eq!(parse_httproute_state(&exact).rules[0].matches[0].path, Some(PathMatch::Exact(Arc::from("/foo"))));
-        assert_eq!(parse_httproute_state(&prefix).rules[0].matches[0].path, Some(PathMatch::Prefix(Arc::from("/bar"))));
-        assert_eq!(parse_httproute_state(&regex).rules[0].matches[0].path, Some(PathMatch::Regex(Arc::from("^/baz$"))));
-        assert_eq!(parse_httproute_state(&default_type).rules[0].matches[0].path, Some(PathMatch::Prefix(Arc::from("/ defaulted"))));
+        assert_eq!(
+            parse_httproute_state(&exact).rules[0].matches[0].path,
+            Some(PathMatch::Exact(Arc::from("/foo")))
+        );
+        assert_eq!(
+            parse_httproute_state(&prefix).rules[0].matches[0].path,
+            Some(PathMatch::Prefix(Arc::from("/bar")))
+        );
+        assert_eq!(
+            parse_httproute_state(&regex).rules[0].matches[0].path,
+            Some(PathMatch::Regex(Arc::from("^/baz$")))
+        );
+        assert_eq!(
+            parse_httproute_state(&default_type).rules[0].matches[0].path,
+            Some(PathMatch::Prefix(Arc::from("/ defaulted")))
+        );
     }
 
     #[test]
@@ -1479,7 +2038,9 @@ mod tests {
                 }
             }));
             assert_eq!(
-                parse_httproute_state(&route).rules[0].matches[0].method.as_deref(),
+                parse_httproute_state(&route).rules[0].matches[0]
+                    .method
+                    .as_deref(),
                 Some(expected),
                 "method {method}"
             );
@@ -1497,7 +2058,10 @@ mod tests {
             }
         }));
         let backend = &parse_httproute_state(&route).rules[0].backends[0];
-        assert_eq!(backend.backend.as_ref(), "svc.default.svc.cluster.local.:80");
+        assert_eq!(
+            backend.backend.as_ref(),
+            "svc.default.svc.cluster.local.:80"
+        );
         assert_eq!(backend.weight, 1);
     }
 
@@ -1512,7 +2076,10 @@ mod tests {
             }
         }));
         let backend = &parse_httproute_state(&route).rules[0].backends[0];
-        assert_eq!(backend.backend.as_ref(), "svc.other.svc.cluster.local.:9090");
+        assert_eq!(
+            backend.backend.as_ref(),
+            "svc.other.svc.cluster.local.:9090"
+        );
         assert_eq!(backend.weight, 1);
     }
 
@@ -1541,10 +2108,10 @@ mod tests {
             *filter,
             RouteFilter::UrlRewrite {
                 hostname: None,
-                path: PathRewrite::PrefixReplace {
+                path: Some(PathRewrite::PrefixReplace {
                     prefix: Arc::from("/"),
                     replacement: Arc::from("/v2"),
-                },
+                }),
             }
         );
     }
@@ -1574,7 +2141,7 @@ mod tests {
             *filter,
             RouteFilter::UrlRewrite {
                 hostname: None,
-                path: PathRewrite::FullReplace(Arc::from("/new")),
+                path: Some(PathRewrite::FullReplace(Arc::from("/new"))),
             }
         );
     }
@@ -1629,6 +2196,41 @@ mod tests {
             RouteFilter::ResponseHeaderSet {
                 name: Arc::from("X-Out"),
                 value: Arc::from("out"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_ref_request_header_modifier_filter() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "backendRefs": [{
+                        "name": "svc",
+                        "port": 8080,
+                        "filters": [{
+                            "type": "RequestHeaderModifier",
+                            "requestHeaderModifier": {
+                                "set": [{"name": "X-Backend", "value": "yes"}]
+                            }
+                        }]
+                    }]
+                }]
+            }
+        }));
+        let backend = &parse_httproute_state(&route).rules[0].backends[0];
+        assert_eq!(
+            backend.backend.as_ref(),
+            "svc.default.svc.cluster.local.:8080"
+        );
+        assert_eq!(
+            backend.filters[0],
+            RouteFilter::RequestHeaderSet {
+                name: Arc::from("X-Backend"),
+                value: Arc::from("yes"),
             }
         );
     }
@@ -1717,7 +2319,14 @@ mod tests {
         }));
         let filter = &parse_httproute_state(&route).rules[0].filters[0];
         match filter {
-            RouteFilter::RequestRedirect { path: Some(PathRewrite::PrefixReplace { prefix, replacement }), .. } => {
+            RouteFilter::RequestRedirect {
+                path:
+                    Some(PathRewrite::PrefixReplace {
+                        prefix,
+                        replacement,
+                    }),
+                ..
+            } => {
                 assert_eq!(prefix.as_ref(), "/");
                 assert_eq!(replacement.as_ref(), "/new-prefix");
             }
@@ -1745,5 +2354,382 @@ mod tests {
             }
         }));
         assert!(parse_httproute_state(&route).rules[0].filters.is_empty());
+    }
+
+    #[test]
+    fn parse_cors_filter() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "CORS",
+                        "cors": {
+                            "allowOrigins": ["https://example.com"],
+                            "allowMethods": ["GET", "POST"],
+                            "allowHeaders": ["X-Custom"],
+                            "exposeHeaders": ["X-Response"],
+                            "maxAge": 3600,
+                            "allowCredentials": true
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert_eq!(
+            *filter,
+            RouteFilter::Cors {
+                allow_origins: vec![Arc::from("https://example.com")],
+                allow_methods: vec![Arc::from("GET"), Arc::from("POST")],
+                allow_headers: vec![Arc::from("X-Custom")],
+                expose_headers: vec![Arc::from("X-Response")],
+                max_age: Some(3600),
+                allow_credentials: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cors_filter_defaults() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "CORS",
+                        "cors": {}
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert!(
+            matches!(filter, RouteFilter::Cors { allow_origins, allow_methods, allow_headers, expose_headers, max_age, allow_credentials }
+                if allow_origins.is_empty() && allow_methods.is_empty() && allow_headers.is_empty() && expose_headers.is_empty() && max_age.is_none() && !allow_credentials)
+        );
+    }
+
+    #[test]
+    fn parse_request_mirror_filter() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "RequestMirror",
+                        "requestMirror": {
+                            "backendRef": {
+                                "namespace": "mirror-ns",
+                                "name": "mirror-svc",
+                                "port": 8080
+                            }
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert_eq!(
+            *filter,
+            RouteFilter::RequestMirror {
+                backend: Arc::from("mirror-svc.mirror-ns.svc.cluster.local.:8080"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_request_timeout() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "timeouts": { "backendRequest": "30s" },
+                    "backendRefs": [{"name": "svc"}]
+                }]
+            }
+        }));
+        let rule = &parse_httproute_state(&route).rules[0];
+        assert_eq!(rule.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn parse_invalid_backend_request_timeout_is_ignored() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "timeouts": { "backendRequest": "not-a-duration" },
+                    "backendRefs": [{"name": "svc"}]
+                }]
+            }
+        }));
+        let rule = &parse_httproute_state(&route).rules[0];
+        assert_eq!(rule.timeout_secs, None);
+    }
+
+    fn gw_with_hostname(ns: &str, name: &str, listener: &str, hostname: &str) -> GatewayState {
+        GatewayState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from(listener),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: Some(Arc::from(hostname)),
+            }],
+        }
+    }
+
+    #[test]
+    fn parent_ref_port_matching_accepted() {
+        let route = sample_route(vec![serde_json::json!({
+            "name": "gw-1",
+            "port": 80
+        })]);
+        let gateways = vec![gw_with_listener("default", "gw-1", "http")];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+    }
+
+    #[test]
+    fn parent_ref_port_matching_rejected() {
+        let route = sample_route(vec![serde_json::json!({
+            "name": "gw-1",
+            "port": 9999
+        })]);
+        let gateways = vec![gw_with_listener("default", "gw-1", "http")];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NoMatchingParent");
+    }
+
+    #[test]
+    fn hostname_mismatch_rejected() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "parentRefs": [{"name": "gw-1"}],
+                "hostnames": ["foo.example.com"]
+            }
+        }));
+        let gateways = vec![gw_with_hostname(
+            "default",
+            "gw-1",
+            "http",
+            "bar.example.com",
+        )];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NoMatchingListenerHostname");
+    }
+
+    #[test]
+    fn hostname_intersection_accepted() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "parentRefs": [{"name": "gw-1"}],
+                "hostnames": ["*.example.com"]
+            }
+        }));
+        let gateways = vec![gw_with_hostname("default", "gw-1", "http", "*.example.com")];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+    }
+
+    #[test]
+    fn wildcard_route_intersects_specific_listener() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "parentRefs": [{"name": "gw-1"}],
+                "hostnames": ["*.specific.com"]
+            }
+        }));
+        let gateways = vec![gw_with_hostname(
+            "default",
+            "gw-1",
+            "http",
+            "very.specific.com",
+        )];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+    }
+
+    #[test]
+    fn no_intersecting_hostnames_rejected() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "parentRefs": [{"name": "gw-1"}],
+                "hostnames": ["specific.but.wrong.com", "wildcard.io"]
+            }
+        }));
+        let gateways = vec![gw_with_hostname(
+            "default",
+            "gw-1",
+            "http",
+            "very.specific.com",
+        )];
+        let grant_index = GrantIndex::new(vec![]);
+
+        let results = reconcile_httproutes(&[route], &gateways, &grant_index);
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NoMatchingListenerHostname");
+    }
+
+    #[test]
+    fn resolve_backend_refs_async_finds_service() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let route = route_with_backends(
+                vec![serde_json::json!({"name": "gw-1"})],
+                vec![serde_json::json!({"name": "svc-1", "port": 80})],
+            );
+            let client = kube::Client::new(
+                tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+                    let path = req.uri().path();
+                    let body = if path.contains("/services/svc-1") {
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Service",
+                            "metadata": { "name": "svc-1", "namespace": "default" }
+                        })
+                    } else {
+                        serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }),
+                "default",
+            );
+            let grant_index = GrantIndex::new(vec![]);
+            let result = resolve_backend_refs_async(&client, &route, "default", &grant_index).await;
+            assert!(matches!(result.overall, BackendResolutionStatus::Ok));
+        });
+    }
+
+    #[test]
+    fn resolve_backend_refs_async_missing_service() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let route = route_with_backends(
+                vec![serde_json::json!({"name": "gw-1"})],
+                vec![serde_json::json!({"name": "missing-svc", "port": 80})],
+            );
+            let client = kube::Client::new(
+                tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(404)
+                            .body(kube::client::Body::empty())
+                            .unwrap(),
+                    )
+                }),
+                "default",
+            );
+            let grant_index = GrantIndex::new(vec![]);
+            let result = resolve_backend_refs_async(&client, &route, "default", &grant_index).await;
+            assert!(
+                matches!(result.overall, BackendResolutionStatus::BackendNotFound(ref msg) if msg.contains("missing-svc")),
+                "unexpected result: {result:?}"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn error_policy_httproute_requeues_after_5s() {
+        let route = Arc::new(sample_route(vec![]));
+        let ctx = Arc::new(HTTPRouteContext {
+            client: kube::Client::new(
+                tower::service_fn(|_req| async {
+                    Ok::<_, std::convert::Infallible>(http::Response::new(
+                        kube::client::Body::empty(),
+                    ))
+                }),
+                "default",
+            ),
+            is_leader: Arc::new(AtomicBool::new(false)),
+        });
+        let err = kube::Error::Service(std::io::Error::other("test").into());
+        let action = error_policy_httproute(route, &err, ctx);
+        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+    }
+
+    #[tokio::test]
+    async fn run_httproute_controller_returns_handle() {
+        let client = kube::Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+            }),
+            "default",
+        );
+        let handle = run_httproute_controller(client, Arc::new(AtomicBool::new(false)));
+        handle.abort();
     }
 }

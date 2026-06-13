@@ -29,9 +29,6 @@ mod tests {
                 - example.com
         "#;
         let route: HTTPRoute = serde_yaml::from_str(yaml).expect("deserializes");
-        assert_eq!(
-            route.spec.hostnames,
-            Some(vec!["example.com".to_string()])
-        );
+        assert_eq!(route.spec.hostnames, Some(vec!["example.com".to_string()]));
     }
 }

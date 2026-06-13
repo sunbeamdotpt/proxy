@@ -7,6 +7,7 @@
 //! cross-references (RefGrant, parentRefs, backendRefs), and produces
 //! a `GatewayView` that is handed off to `translate`.
 
+pub mod endpoints;
 pub mod gateway;
 pub mod gatewayclass;
 pub mod httproute;
@@ -39,15 +40,19 @@ pub fn strip_last_transition_time(v: &Value) -> Value {
 use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant};
 use crate::gateway::model::{GatewayView, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
-use crate::gateway::reconcile::httproute::{reconcile_httproutes, parse_httproute_state};
+use crate::gateway::reconcile::httproute::{
+    parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
+};
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use kube::api::Api;
+use std::collections::HashMap;
 
 /// Single reconcile tick: fetch all Gateway API objects and emit a view.
 pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
     let gateways: Api<Gateway> = Api::all(client.clone());
     let httproutes: Api<HTTPRoute> = Api::all(client.clone());
     let grants: Api<ReferenceGrant> = Api::all(client.clone());
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
 
     let gateway_list = match gateways.list(&Default::default()).await {
         Ok(list) => list,
@@ -73,18 +78,62 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
         }
     };
 
+    let namespace_list = match namespaces.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list Namespaces");
+            return None;
+        }
+    };
+
     let gateway_states: Vec<_> = gateway_list.iter().map(build_gateway_state).collect();
     let grant_states = reconcile_reference_grants(&grant_list.items);
     let grant_index = GrantIndex::new(grant_states.clone());
 
-    let reconciled_routes = reconcile_httproutes(&httproute_list.items, &gateway_states, &grant_index);
+    let namespace_labels: HashMap<String, HashMap<String, String>> = namespace_list
+        .iter()
+        .map(|ns| {
+            let name = ns.metadata.name.clone().unwrap_or_default();
+            let labels: HashMap<String, String> = ns
+                .metadata
+                .labels
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            (name, labels)
+        })
+        .collect();
+    let listener_allowed =
+        crate::gateway::reconcile::gateway::build_listener_allowed_map(&gateway_list.items);
+
+    let reconciled_routes = reconcile_httproutes_with_context(
+        &httproute_list.items,
+        &gateway_states,
+        &namespace_labels,
+        &listener_allowed,
+        &grant_index,
+    );
 
     let mut http_routes = Vec::new();
     for (raw, reconciled) in httproute_list.items.iter().zip(reconciled_routes.iter()) {
         let mut state = parse_httproute_state(raw);
         state.parent_refs = reconciled.route_state.parent_refs.clone();
+        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
+        let backend_resolution =
+            resolve_backend_refs_async(client, raw, route_ns, &grant_index).await;
+        state.programmed = !state.parent_refs.is_empty()
+            && matches!(
+                backend_resolution.overall,
+                httproute::BackendResolutionStatus::Ok
+            );
+        for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
+            rule.programmed = rule.programmed && res.ok;
+        }
         http_routes.push(state);
     }
+
+    crate::gateway::reconcile::endpoints::resolve_service_endpoints(client, &mut http_routes).await;
 
     let routes: Vec<RouteState> = reconciled_routes
         .into_iter()
@@ -114,7 +163,9 @@ mod tests {
         })
     }
 
-    fn mock_client(responses: std::collections::HashMap<String, serde_json::Value>) -> kube::Client {
+    fn mock_client(
+        responses: std::collections::HashMap<String, serde_json::Value>,
+    ) -> kube::Client {
         let responses = std::sync::Arc::new(std::sync::Mutex::new(responses));
         kube::Client::new(
             tower::service_fn(move |req: http::Request<kube::client::Body>| {
@@ -123,11 +174,25 @@ mod tests {
                 async move {
                     let map = responses.lock().unwrap();
                     let body = if path.contains("/gateways") {
-                        map.get("gateways").cloned().unwrap_or(serde_json::json!({"items": []}))
+                        map.get("gateways")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
                     } else if path.contains("/httproutes") {
-                        map.get("httproutes").cloned().unwrap_or(serde_json::json!({"items": []}))
+                        map.get("httproutes")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
                     } else if path.contains("/referencegrants") {
-                        map.get("referencegrants").cloned().unwrap_or(serde_json::json!({"items": []}))
+                        map.get("referencegrants")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
+                    } else if path.contains("/namespaces") {
+                        map.get("namespaces")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []}))
+                    } else if path.contains("/services") {
+                        serde_json::json!({"apiVersion": "v1", "kind": "ServiceList", "items": []})
+                    } else if path.contains("/endpointslices") {
+                        serde_json::json!({"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "items": []})
                     } else {
                         serde_json::json!({"items": []})
                     };
@@ -176,12 +241,23 @@ mod tests {
         });
 
         let mut responses = std::collections::HashMap::new();
-        responses.insert("gateways".to_string(), list_response("GatewayList", vec![gateway]));
-        responses.insert("httproutes".to_string(), list_response("HTTPRouteList", vec![httproute]));
-        responses.insert("referencegrants".to_string(), list_response("ReferenceGrantList", vec![grant]));
+        responses.insert(
+            "gateways".to_string(),
+            list_response("GatewayList", vec![gateway]),
+        );
+        responses.insert(
+            "httproutes".to_string(),
+            list_response("HTTPRouteList", vec![httproute]),
+        );
+        responses.insert(
+            "referencegrants".to_string(),
+            list_response("ReferenceGrantList", vec![grant]),
+        );
 
         let client = mock_client(responses);
-        let view = reconcile_tick(&client).await.expect("reconcile_tick returns a view");
+        let view = reconcile_tick(&client)
+            .await
+            .expect("reconcile_tick returns a view");
 
         assert_eq!(view.gateways.len(), 1);
         assert_eq!(view.gateways[0].name.as_ref(), "gw-1");
@@ -226,11 +302,19 @@ mod tests {
     async fn reconcile_tick_empty_lists_produce_empty_view() {
         let mut responses = std::collections::HashMap::new();
         responses.insert("gateways".to_string(), list_response("GatewayList", vec![]));
-        responses.insert("httproutes".to_string(), list_response("HTTPRouteList", vec![]));
-        responses.insert("referencegrants".to_string(), list_response("ReferenceGrantList", vec![]));
+        responses.insert(
+            "httproutes".to_string(),
+            list_response("HTTPRouteList", vec![]),
+        );
+        responses.insert(
+            "referencegrants".to_string(),
+            list_response("ReferenceGrantList", vec![]),
+        );
 
         let client = mock_client(responses);
-        let view = reconcile_tick(&client).await.expect("reconcile_tick returns a view");
+        let view = reconcile_tick(&client)
+            .await
+            .expect("reconcile_tick returns a view");
         assert!(view.gateways.is_empty());
         assert!(view.http_routes.is_empty());
         assert!(view.reference_grants.is_empty());

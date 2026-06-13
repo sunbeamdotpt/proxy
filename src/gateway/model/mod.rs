@@ -10,7 +10,7 @@ pub mod view;
 
 pub use digest::compute_digest;
 pub use routing::{
-    HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, HTTPRouteRule, HTTPRouteState,
+    HTTPRouteRule, HTTPRouteState, HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch,
     PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
     RouteRule, RouteTable, WeightedBackend,
 };
@@ -18,6 +18,7 @@ pub use types::{
     BackendTarget, ListenerKey, RefResolution, ResolvedRoute, RouteTableDigest, StatusPatch,
 };
 pub use view::{
-    GatewayState, GatewayView, GrantSubject, ListenerModel, ListenerState, ParentRef,
-    ReferenceGrantState, ReconciledView, RouteState,
+    AllowedRoutes, GatewayState, GatewayView, GrantSubject, ListenerModel, ListenerState,
+    NamespaceFrom, ParentRef, ReconciledView, ReferenceGrantState, RouteGroupKind, RouteNamespaces,
+    RouteState,
 };

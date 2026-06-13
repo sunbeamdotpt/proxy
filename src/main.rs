@@ -4,16 +4,14 @@
 mod telemetry;
 mod watcher;
 
-use sunbeam_proxy::{acme, config};
-use sunbeam_proxy::config::RouteConfig;
 use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
+use sunbeam_proxy::{acme, config, ir};
 
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use kube::Client;
 use pingora::server::{configuration::Opt, Server};
@@ -161,43 +159,111 @@ enum Commands {
     },
 }
 
-
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Serve { upgrade: false }) {
         Commands::Serve { upgrade } => run_serve(upgrade),
-        Commands::Replay { input, window_secs, min_events } => {
-            sunbeam_proxy::ensemble::replay::run(sunbeam_proxy::ensemble::replay::ReplayEnsembleArgs {
-                input, window_secs, min_events,
-            })
-        },
-        Commands::DownloadDatasets => {
-            sunbeam_proxy::dataset::download::download_all()
-        },
-        Commands::PrepareDataset { input, owasp, wordlists, output, seed, heuristics, inject_csic, inject_modsec } => {
-            sunbeam_proxy::dataset::prepare::run(sunbeam_proxy::dataset::prepare::PrepareDatasetArgs {
-                input, owasp, wordlists, output, seed, heuristics, inject_csic, inject_modsec,
-            })
-        },
+        Commands::Replay {
+            input,
+            window_secs,
+            min_events,
+        } => sunbeam_proxy::ensemble::replay::run(
+            sunbeam_proxy::ensemble::replay::ReplayEnsembleArgs {
+                input,
+                window_secs,
+                min_events,
+            },
+        ),
+        Commands::DownloadDatasets => sunbeam_proxy::dataset::download::download_all(),
+        Commands::PrepareDataset {
+            input,
+            owasp,
+            wordlists,
+            output,
+            seed,
+            heuristics,
+            inject_csic,
+            inject_modsec,
+        } => sunbeam_proxy::dataset::prepare::run(
+            sunbeam_proxy::dataset::prepare::PrepareDatasetArgs {
+                input,
+                owasp,
+                wordlists,
+                output,
+                seed,
+                heuristics,
+                inject_csic,
+                inject_modsec,
+            },
+        ),
         #[cfg(feature = "training")]
-        Commands::TrainMlpScanner { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight } => {
-            sunbeam_proxy::training::train_scanner::run(sunbeam_proxy::training::train_scanner::TrainScannerMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight,
-            })
-        },
+        Commands::TrainMlpScanner {
+            dataset,
+            output_dir,
+            hidden_dim,
+            epochs,
+            learning_rate,
+            batch_size,
+            tree_max_depth,
+            tree_min_purity,
+            min_samples_leaf,
+            cookie_weight,
+        } => sunbeam_proxy::training::train_scanner::run(
+            sunbeam_proxy::training::train_scanner::TrainScannerMlpArgs {
+                dataset_path: dataset,
+                output_dir,
+                hidden_dim,
+                epochs,
+                learning_rate,
+                batch_size,
+                tree_max_depth,
+                tree_min_purity,
+                min_samples_leaf,
+                cookie_weight,
+            },
+        ),
         #[cfg(feature = "training")]
-        Commands::TrainMlpDdos { dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight } => {
-            sunbeam_proxy::training::train_ddos::run(sunbeam_proxy::training::train_ddos::TrainDdosMlpArgs {
-                dataset_path: dataset, output_dir, hidden_dim, epochs, learning_rate, batch_size, tree_max_depth, tree_min_purity, min_samples_leaf, cookie_weight,
-            })
-        },
+        Commands::TrainMlpDdos {
+            dataset,
+            output_dir,
+            hidden_dim,
+            epochs,
+            learning_rate,
+            batch_size,
+            tree_max_depth,
+            tree_min_purity,
+            min_samples_leaf,
+            cookie_weight,
+        } => sunbeam_proxy::training::train_ddos::run(
+            sunbeam_proxy::training::train_ddos::TrainDdosMlpArgs {
+                dataset_path: dataset,
+                output_dir,
+                hidden_dim,
+                epochs,
+                learning_rate,
+                batch_size,
+                tree_max_depth,
+                tree_min_purity,
+                min_samples_leaf,
+                cookie_weight,
+            },
+        ),
         #[cfg(feature = "training")]
-        Commands::SweepCookieWeight { dataset, detector, weights, tree_max_depth, tree_min_purity, min_samples_leaf } => {
-            sunbeam_proxy::training::sweep::run_cookie_sweep(
-                &dataset, &detector, weights.as_deref(), tree_max_depth, tree_min_purity, min_samples_leaf,
-            )
-        },
+        Commands::SweepCookieWeight {
+            dataset,
+            detector,
+            weights,
+            tree_max_depth,
+            tree_min_purity,
+            min_samples_leaf,
+        } => sunbeam_proxy::training::sweep::run_cookie_sweep(
+            &dataset,
+            &detector,
+            weights.as_deref(),
+            tree_max_depth,
+            tree_min_purity,
+            min_samples_leaf,
+        ),
     }
 }
 
@@ -208,8 +274,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
         .install_default()
         .expect("crypto provider already installed");
 
-    let config_path = std::env::var("SUNBEAM_CONFIG")
-        .unwrap_or_else(|_| "/etc/pingora/config.toml".to_string());
+    let config_path =
+        std::env::var("SUNBEAM_CONFIG").unwrap_or_else(|_| "/etc/pingora/config.toml".to_string());
     let cfg = config::Config::load(&config_path)?;
 
     // 1. Init telemetry (JSON logs + optional OTEL traces).
@@ -274,10 +340,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
                     &scanner_cfg.allowlist,
                     scanner_cfg.bot_cache_ttl_secs,
                 );
-                tracing::info!(
-                    rules = scanner_cfg.allowlist.len(),
-                    "bot allowlist enabled"
-                );
+                tracing::info!(rules = scanner_cfg.allowlist.len(), "bot allowlist enabled");
                 Some(al)
             } else {
                 None
@@ -376,29 +439,14 @@ fn run_serve(upgrade: bool) -> Result<()> {
         None
     };
 
-    let compiled_rewrites = SunbeamProxy::compile_rewrites(&cfg.routes);
+    let (route_manager, routes_tx) = sunbeam_proxy::route_manager::RouteManager::spawn(10);
+    let startup_ir = ir::from_config::from_route_configs(&cfg.routes);
+    if let Err(e) = route_manager.apply("toml", startup_ir) {
+        return Err(anyhow::anyhow!("failed to compile startup routes: {e}"));
+    }
+    let routes = route_manager.current();
+    let compiled_rewrites = route_manager.rewrites();
     let http_client = reqwest::Client::new();
-
-    let routes = Arc::new(ArcSwap::from_pointee(cfg.routes.clone()));
-    let compiled_rewrites = Arc::new(ArcSwap::from_pointee(compiled_rewrites));
-
-    // Gateway API route update channel.
-    let (routes_tx, routes_rx) = std::sync::mpsc::channel::<Vec<RouteConfig>>();
-    let routes_for_watcher = routes.clone();
-    let compiled_for_watcher = compiled_rewrites.clone();
-    std::thread::spawn(move || {
-        while let Ok(new_routes) = routes_rx.recv() {
-            // Drain pending updates, keep only the latest.
-            let mut latest = new_routes;
-            while let Ok(r) = routes_rx.try_recv() {
-                latest = r;
-            }
-            let compiled = SunbeamProxy::compile_rewrites(&latest);
-            compiled_for_watcher.store(Arc::new(compiled));
-            routes_for_watcher.store(Arc::new(latest));
-            tracing::info!("Gateway API route table hot-swapped");
-        }
-    });
 
     let proxy = SunbeamProxy {
         routes: routes.clone(),
@@ -410,11 +458,18 @@ fn run_serve(upgrade: bool) -> Result<()> {
         compiled_rewrites: compiled_rewrites.clone(),
         http_client,
         pipeline_bypass_cidrs: crate::rate_limit::cidr::parse_cidrs(
-            &cfg.rate_limit.as_ref().map(|rl| rl.bypass_cidrs.clone()).unwrap_or_default(),
+            &cfg.rate_limit
+                .as_ref()
+                .map(|rl| rl.bypass_cidrs.clone())
+                .unwrap_or_default(),
         ),
         cluster: cluster_handle.clone(),
         ddos_observe_only: cfg.ddos.as_ref().map(|d| d.observe_only).unwrap_or(false),
-        scanner_observe_only: cfg.scanner.as_ref().map(|s| s.observe_only).unwrap_or(false),
+        scanner_observe_only: cfg
+            .scanner
+            .as_ref()
+            .map(|s| s.observe_only)
+            .unwrap_or(false),
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
@@ -436,7 +491,11 @@ fn run_serve(upgrade: bool) -> Result<()> {
     let pingora_internal_addr = "127.0.0.1:10443";
 
     if cert_exists {
-        let tls_bind = if has_passthrough { pingora_internal_addr } else { &cfg.listen.https };
+        let tls_bind = if has_passthrough {
+            pingora_internal_addr
+        } else {
+            &cfg.listen.https
+        };
         let mut tls_settings = pingora_core::listeners::tls::TlsSettings::intermediate(
             &cfg.tls.cert_path,
             &cfg.tls.key_path,
@@ -499,7 +558,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
                     .enable_all()
                     .build()
                     .expect("tls passthrough runtime");
-                rt.block_on(sunbeam_proxy::tls_passthrough::run(&listen, &routes, &internal));
+                rt.block_on(sunbeam_proxy::tls_passthrough::run(
+                    &listen, &routes, &internal,
+                ));
             });
         }
     }

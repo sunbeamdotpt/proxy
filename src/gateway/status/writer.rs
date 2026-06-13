@@ -8,10 +8,10 @@
 //! (`Patch::Apply`) with a per-pod field manager so that multiple controller
 //! pods can cooperate without overwriting each other's conditions.
 
-use crate::gateway::election::LeaderToken;
-use crate::metrics::REGISTRY;
-use crate::gateway::status::{ConditionStatus, StatusCondition};
 use crate::gateway::api::Gateway;
+use crate::gateway::election::LeaderToken;
+use crate::gateway::status::{ConditionStatus, StatusCondition};
+use crate::metrics::REGISTRY;
 
 use anyhow::{Context, Result};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
@@ -127,7 +127,6 @@ pub struct StatusWriter {
     pub client: kube::Client,
     /// Per-pod leader identity used to build the field manager string.
     pub leader_id: String,
-
 }
 
 impl StatusWriter {
@@ -178,22 +177,17 @@ impl StatusWriter {
 
         let api: Api<Gateway> = Api::namespaced(self.client.clone(), namespace);
 
-        let result = retry_with_backoff(
-            3,
-            Duration::from_millis(100),
-            || async {
-                api.patch_status(name, &pp, &Patch::Apply(&patch_body))
-                    .await
-                    .map_err(|e| {
-                        if is_conflict(&e) {
-                            GATEWAY_STATUS_WRITE_CONFLICTS_TOTAL.inc();
-                        } else {
-                            GATEWAY_STATUS_WRITE_FAILURES_TOTAL.inc();
-                        }
-                        e
-                    })
-            },
-        )
+        let result = retry_with_backoff(3, Duration::from_millis(100), || async {
+            api.patch_status(name, &pp, &Patch::Apply(&patch_body))
+                .await
+                .inspect_err(|e| {
+                    if is_conflict(e) {
+                        GATEWAY_STATUS_WRITE_CONFLICTS_TOTAL.inc();
+                    } else {
+                        GATEWAY_STATUS_WRITE_FAILURES_TOTAL.inc();
+                    }
+                })
+        })
         .await;
 
         match result {
@@ -261,25 +255,22 @@ mod tests {
 
     #[tokio::test]
     async fn retry_with_backoff_succeeds_first_try() {
-        let result = retry_with_backoff(3, Duration::from_millis(10), || async { Ok::<_, ()>(42) }).await;
+        let result =
+            retry_with_backoff(3, Duration::from_millis(10), || async { Ok::<_, ()>(42) }).await;
         assert_eq!(result, Ok(42));
     }
 
     #[tokio::test]
     async fn retry_with_backoff_succeeds_on_second_try() {
         let attempts = AtomicUsize::new(0);
-        let result = retry_with_backoff(
-            3,
-            Duration::from_millis(10),
-            || async {
-                let a = attempts.fetch_add(1, Ordering::SeqCst);
-                if a == 0 {
-                    Err("transient")
-                } else {
-                    Ok::<_, &str>(42)
-                }
-            },
-        )
+        let result = retry_with_backoff(3, Duration::from_millis(10), || async {
+            let a = attempts.fetch_add(1, Ordering::SeqCst);
+            if a == 0 {
+                Err("transient")
+            } else {
+                Ok::<_, &str>(42)
+            }
+        })
         .await;
         assert_eq!(result, Ok(42));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -288,14 +279,10 @@ mod tests {
     #[tokio::test]
     async fn retry_with_backoff_exhausts_retries() {
         let attempts = AtomicUsize::new(0);
-        let result = retry_with_backoff(
-            3,
-            Duration::from_millis(10),
-            || async {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>("always fails")
-            },
-        )
+        let result = retry_with_backoff(3, Duration::from_millis(10), || async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>("always fails")
+        })
         .await;
         assert_eq!(result, Err("always fails"));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -355,25 +342,21 @@ mod tests {
         // before any network request because the token is expired.
         // Use a mock client (tower service that never gets called).
         let mock_svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async {
-            Ok::<_, std::convert::Infallible>(
-                http::Response::new(kube::client::Body::empty()),
-            )
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
         });
         let client = kube::Client::new(mock_svc, "default");
         let writer = StatusWriter::new(client, "pod-1");
 
         let result = writer
-            .write_gateway_status(
-                &token,
-                "gw",
-                "default",
-                &[],
-            )
+            .write_gateway_status(&token, "gw", "default", &[])
             .await;
 
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("leadership token expired"), "expected token expiry error, got: {msg}");
+        assert!(
+            msg.contains("leadership token expired"),
+            "expected token expiry error, got: {msg}"
+        );
     }
 
     #[test]
@@ -416,22 +399,20 @@ mod tests {
     #[tokio::test]
     async fn write_gateway_status_success() {
         let client = kube::Client::new(
-            tower::service_fn(|_req: http::Request<kube::client::Body>| {
-                async move {
-                    let body = serde_json::json!({
-                        "apiVersion": "gateway.networking.k8s.io/v1",
-                        "kind": "Gateway",
-                        "metadata": { "name": "gw", "namespace": "default" },
-                        "spec": { "gatewayClassName": "test-gc" }
-                    });
-                    Ok::<_, std::convert::Infallible>(
-                        http::Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(kube::client::Body::from(body.to_string().into_bytes()))
-                            .unwrap(),
-                    )
-                }
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+                let body = serde_json::json!({
+                    "apiVersion": "gateway.networking.k8s.io/v1",
+                    "kind": "Gateway",
+                    "metadata": { "name": "gw", "namespace": "default" },
+                    "spec": { "gatewayClassName": "test-gc" }
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
             }),
             "default",
         );
@@ -445,39 +426,41 @@ mod tests {
             message: "ok".to_string(),
             observed_generation: 1,
         }];
-        let result = writer.write_gateway_status(&token, "gw", "default", &conditions).await;
+        let result = writer
+            .write_gateway_status(&token, "gw", "default", &conditions)
+            .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn write_gateway_status_conflict_retries_then_fails() {
         let client = kube::Client::new(
-            tower::service_fn(|_req: http::Request<kube::client::Body>| {
-                async move {
-                    let status = kube::core::Status {
-                        code: 409,
-                        message: "Conflict".to_string(),
-                        reason: "Conflict".to_string(),
-                        status: None,
-                        details: None,
-                        metadata: None,
-                    };
-                    let body = serde_json::to_vec(&status).unwrap();
-                    Ok::<_, std::convert::Infallible>(
-                        http::Response::builder()
-                            .status(409)
-                            .header("content-type", "application/json")
-                            .body(kube::client::Body::from(body))
-                            .unwrap(),
-                    )
-                }
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+                let status = kube::core::Status {
+                    code: 409,
+                    message: "Conflict".to_string(),
+                    reason: "Conflict".to_string(),
+                    status: None,
+                    details: None,
+                    metadata: None,
+                };
+                let body = serde_json::to_vec(&status).unwrap();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(409)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body))
+                        .unwrap(),
+                )
             }),
             "default",
         );
         let writer = StatusWriter::new(client, "pod-1");
         let valid = Arc::new(AtomicBool::new(true));
         let token = LeaderToken::new_for_test(valid);
-        let result = writer.write_gateway_status(&token, "gw", "default", &[]).await;
+        let result = writer
+            .write_gateway_status(&token, "gw", "default", &[])
+            .await;
         assert!(result.is_err());
     }
 
@@ -528,7 +511,9 @@ mod tests {
         let writer = StatusWriter::new(client, "pod-1");
         let valid = Arc::new(AtomicBool::new(true));
         let token = LeaderToken::new_for_test(valid);
-        let result = writer.write_gateway_status(&token, "gw", "default", &[]).await;
+        let result = writer
+            .write_gateway_status(&token, "gw", "default", &[])
+            .await;
         assert!(result.is_ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }

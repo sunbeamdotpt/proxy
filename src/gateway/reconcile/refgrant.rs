@@ -69,6 +69,7 @@ impl GrantIndex {
     /// resource `(to_ns, to_group, to_kind, to_name)` is permitted.
     ///
     /// Same-namespace references are always allowed.
+    #[allow(clippy::too_many_arguments)]
     pub fn is_permitted(
         &self,
         from_ns: &str,
@@ -245,9 +246,7 @@ mod tests {
                     serde_json::json!({"group": "g2", "kind": "K2"}),
                     serde_json::json!("not-an-object"),
                 ],
-                to: vec![
-                    serde_json::json!({"group": "g3", "kind": "K3", "name": "target"}),
-                ],
+                to: vec![serde_json::json!({"group": "g3", "kind": "K3", "name": "target"})],
             },
         };
         let result = reconcile_reference_grants(&[grant]);

@@ -97,6 +97,8 @@ pub struct WeightedBackend {
     pub backend: Arc<str>,
     /// Weight relative to other backends in the same rule.
     pub weight: u32,
+    /// Filters applied only when this backend is selected.
+    pub filters: Vec<RouteFilter>,
 }
 
 /// A filter applied to a request or response.
@@ -115,9 +117,18 @@ pub enum RouteFilter {
     /// Remove a response header.
     ResponseHeaderRemove { name: Arc<str> },
     /// Rewrite the URL path and/or hostname.
-    UrlRewrite { hostname: Option<Arc<str>>, path: PathRewrite },
+    UrlRewrite {
+        hostname: Option<Arc<str>>,
+        path: Option<PathRewrite>,
+    },
     /// Redirect the request.
-    RequestRedirect { scheme: Option<Arc<str>>, hostname: Option<Arc<str>>, path: Option<PathRewrite>, port: Option<u16>, status_code: u16 },
+    RequestRedirect {
+        scheme: Option<Arc<str>>,
+        hostname: Option<Arc<str>>,
+        path: Option<PathRewrite>,
+        port: Option<u16>,
+        status_code: u16,
+    },
     /// Mirror requests to a backend (fire-and-forget).
     RequestMirror { backend: Arc<str> },
     /// CORS response header configuration.
@@ -135,7 +146,10 @@ pub enum RouteFilter {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PathRewrite {
     FullReplace(Arc<str>),
-    PrefixReplace { prefix: Arc<str>, replacement: Arc<str> },
+    PrefixReplace {
+        prefix: Arc<str>,
+        replacement: Arc<str>,
+    },
 }
 
 /// HTTP-specific route state produced by the reconciler.
@@ -147,6 +161,8 @@ pub struct HTTPRouteState {
     pub hostnames: Vec<HostnameMatch>,
     pub rules: Vec<HTTPRouteRule>,
     pub parent_refs: Vec<crate::gateway::model::ParentRef>,
+    /// True only when the route is accepted and all backend references resolve.
+    pub programmed: bool,
 }
 
 /// A rule from an HTTPRoute CRD, pre-parsed but not yet compiled into the
@@ -158,4 +174,6 @@ pub struct HTTPRouteRule {
     pub filters: Vec<RouteFilter>,
     /// Upstream backend request timeout in seconds (from `rules.timeouts.backendRequest`).
     pub timeout_secs: Option<u64>,
+    /// False when one or more backendRefs for this rule could not be resolved.
+    pub programmed: bool,
 }

@@ -28,9 +28,13 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # Core resources for cert/config reload.
+  # Core resources for backend resolution, namespace selectors, cert/config reload.
   - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
+    resources: ["namespaces", "services", "endpoints", "pods", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # EndpointSlices for headless / manually-endpointed Service backends.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

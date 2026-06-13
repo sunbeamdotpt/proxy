@@ -26,7 +26,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 /// Directory containing the integration manifests, relative to the workspace root.
-const MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gateway-integration/manifests");
+const MANIFEST_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/gateway-integration/manifests"
+);
 
 fn kubeconfig_path() -> PathBuf {
     std::env::var_os("KUBECONFIG")
@@ -141,7 +144,10 @@ async fn gateway_api_routes_traffic_to_backends() {
 
     assert_eq!(v1["path"], "/v1/");
     assert!(
-        v1["pod"].as_str().unwrap_or("").contains("infra-backend-v1"),
+        v1["pod"]
+            .as_str()
+            .unwrap_or("")
+            .contains("infra-backend-v1"),
         "expected backend v1, got {:?}",
         v1["pod"]
     );
@@ -158,7 +164,10 @@ async fn gateway_api_routes_traffic_to_backends() {
 
     assert_eq!(v2["path"], "/v2/");
     assert!(
-        v2["pod"].as_str().unwrap_or("").contains("infra-backend-v2"),
+        v2["pod"]
+            .as_str()
+            .unwrap_or("")
+            .contains("infra-backend-v2"),
         "expected backend v2, got {:?}",
         v2["pod"]
     );

@@ -30,19 +30,19 @@ pub fn supported_features() -> Vec<String> {
         // Core
         "Gateway".to_string(),
         "HTTPRoute".to_string(),
+        "ReferenceGrant".to_string(),
         // Gateway extended
         "GatewayPort8080".to_string(),
-        "GatewayHTTPListenerIsolation".to_string(),
         // HTTPRoute extended
         "HTTPRouteMethodMatching".to_string(),
-        "HTTPRouteHeaderMatching".to_string(),
+        "HTTPRouteQueryParamMatching".to_string(),
         "HTTPRoutePortRedirect".to_string(),
         "HTTPRouteSchemeRedirect".to_string(),
         "HTTPRoutePathRedirect".to_string(),
         "HTTPRoutePathRewrite".to_string(),
+        "HTTPRouteHostRewrite".to_string(),
         "HTTPRouteResponseHeaderModification".to_string(),
         "HTTPRouteBackendRequestHeaderModification".to_string(),
-        "HTTPRouteParentRefPort".to_string(),
         "HTTPRoute303RedirectStatusCode".to_string(),
         "HTTPRoute307RedirectStatusCode".to_string(),
         "HTTPRoute308RedirectStatusCode".to_string(),
@@ -53,10 +53,7 @@ pub fn supported_features() -> Vec<String> {
 ///
 /// Returns `True` when the GatewayClass's `controllerName` matches
 /// [`CONTROLLER_NAME`], otherwise `False`.
-pub fn compute_accepted_condition(
-    gc: &GatewayClass,
-    observed_generation: i64,
-) -> StatusCondition {
+pub fn compute_accepted_condition(gc: &GatewayClass, observed_generation: i64) -> StatusCondition {
     let matches = gc.spec.controller_name == CONTROLLER_NAME;
     StatusCondition {
         condition_type: ConditionType::Accepted,
@@ -133,7 +130,9 @@ pub async fn reconcile_gatewayclass(
             "supportedFeatures": features,
         });
 
-        let old_status_json = gc.status.as_ref()
+        let old_status_json = gc
+            .status
+            .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .unwrap_or(serde_json::Value::Null);
         let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
@@ -318,7 +317,9 @@ mod tests {
         let ctx = Arc::new(GatewayClassContext {
             client: kube::Client::new(
                 tower::service_fn(|_req| async {
-                    Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+                    Ok::<_, std::convert::Infallible>(http::Response::new(
+                        kube::client::Body::empty(),
+                    ))
                 }),
                 "default",
             ),
@@ -349,22 +350,20 @@ mod tests {
     #[tokio::test]
     async fn reconcile_gatewayclass_leader_patches_status() {
         let client = kube::Client::new(
-            tower::service_fn(|_req: http::Request<kube::client::Body>| {
-                async move {
-                    let body = serde_json::json!({
-                        "apiVersion": "gateway.networking.k8s.io/v1",
-                        "kind": "GatewayClass",
-                        "metadata": { "name": "test-gc" },
-                        "spec": { "controllerName": CONTROLLER_NAME }
-                    });
-                    Ok::<_, std::convert::Infallible>(
-                        http::Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(kube::client::Body::from(body.to_string().into_bytes()))
-                            .unwrap(),
-                    )
-                }
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+                let body = serde_json::json!({
+                    "apiVersion": "gateway.networking.k8s.io/v1",
+                    "kind": "GatewayClass",
+                    "metadata": { "name": "test-gc" },
+                    "spec": { "controllerName": CONTROLLER_NAME }
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
             }),
             "default",
         );

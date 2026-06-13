@@ -44,8 +44,7 @@ pub enum WatchdogOutcome {
     Poisoned(ReconcileKey),
 }
 
-type TaskFactory =
-    Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+type TaskFactory = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 struct TaskState {
     abort: AbortHandle,
@@ -161,8 +160,8 @@ impl Drop for Watchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn restart_after_panic_within_five_ticks() {
@@ -223,7 +222,10 @@ mod tests {
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(80));
             let outcomes = w.tick();
-            if outcomes.iter().any(|o| matches!(o, WatchdogOutcome::Poisoned(_))) {
+            if outcomes
+                .iter()
+                .any(|o| matches!(o, WatchdogOutcome::Poisoned(_)))
+            {
                 poisoned = true;
                 break;
             }

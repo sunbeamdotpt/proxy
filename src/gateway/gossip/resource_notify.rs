@@ -147,9 +147,8 @@ impl ResourceNotifierHandle {
         // about this resource inside the debounce window.
         let debounced = {
             let map = self.peer_debounce.read().await;
-            map.get(&key).map_or(false, |t| {
-                Instant::now().duration_since(*t) < DEBOUNCE_WINDOW
-            })
+            map.get(&key)
+                .is_some_and(|t| Instant::now().duration_since(*t) < DEBOUNCE_WINDOW)
         };
 
         if debounced {
@@ -173,7 +172,6 @@ impl ResourceNotifierHandle {
         self.peer_debounce.write().await.insert(key, Instant::now());
         let _ = events.send(NotifyEvent::TriggerReconcile).await;
     }
-
 }
 
 impl Default for ResourceNotifier {

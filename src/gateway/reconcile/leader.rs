@@ -13,8 +13,8 @@
 //! notifications are broadcast to peers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
@@ -23,16 +23,16 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::cluster::gateway_topics::GatewayResourceNotify;
 use crate::cluster::messages::{ClusterMessage, Payload};
 use crate::cluster::ClusterHandle;
-use crate::config::RouteConfig;
 use crate::gateway::election::{Election, LeaderState};
-use crate::gateway::gossip::digest_publisher::{DigestEvent, DigestPublisher, publish_digest};
-use crate::gateway::gossip::resource_notify::{NotifyEvent, ResourceNotifier, handle_notify};
+use crate::gateway::gossip::digest_publisher::{publish_digest, DigestEvent, DigestPublisher};
+use crate::gateway::gossip::resource_notify::{handle_notify, NotifyEvent, ResourceNotifier};
 use crate::gateway::model::ReconciledView;
 use crate::gateway::reconcile::gateway::run_gateway_controller;
 use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
 use crate::gateway::reconcile::httproute::run_httproute_controller;
 use crate::gateway::reconcile::reconcile_tick;
-use crate::gateway::translate::translate_view;
+use crate::gateway::translate::translate_view_to_ir;
+use crate::ir;
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -49,7 +49,7 @@ use kube::Client;
 pub async fn run_reconcile_loop(
     election: Election,
     client: Client,
-    routes_tx: Sender<Vec<RouteConfig>>,
+    routes_tx: Sender<ir::RouteTable>,
     cluster_handle: Option<Arc<ClusterHandle>>,
     cert_path: String,
     key_path: String,
@@ -181,10 +181,8 @@ pub async fn run_reconcile_loop(
 
         // Full reconcile tick: fetch, translate, and send to proxy.
         if let Some(view) = reconcile_tick(&client).await {
-            let routes = translate_view(&view);
-            if !routes.is_empty() {
-                let _ = routes_tx.send(routes);
-            }
+            let routes = translate_view_to_ir(&view);
+            let _ = routes_tx.send(routes);
 
             // Publish digest for cross-replica validation.
             publish_digest(&digest_publisher, &view).await;
@@ -200,7 +198,8 @@ pub async fn run_reconcile_loop(
             // Pingora can serve TLS on the next graceful upgrade.
             match crate::gateway::cert::maybe_write_gateway_certs(
                 &client, &view, &cert_path, &key_path,
-            ).await
+            )
+            .await
             {
                 Ok(true) => {
                     tracing::info!("Gateway TLS certs changed — triggering graceful upgrade");
@@ -221,10 +220,7 @@ pub async fn run_reconcile_loop(
 
 /// Compare `new` against `old` and emit a [`GatewayResourceNotify`] for every
 /// resource whose generation differs or that is newly present.
-fn diff_view(
-    old: &Option<ReconciledView>,
-    new: &ReconciledView,
-) -> Vec<GatewayResourceNotify> {
+fn diff_view(old: &Option<ReconciledView>, new: &ReconciledView) -> Vec<GatewayResourceNotify> {
     let mut notifies = Vec::new();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,7 +228,7 @@ fn diff_view(
         .as_secs();
 
     for gw in &new.gateways {
-        let changed = old.as_ref().map_or(true, |o| {
+        let changed = old.as_ref().is_none_or(|o| {
             !o.gateways.iter().any(|g| {
                 g.namespace == gw.namespace && g.name == gw.name && g.generation == gw.generation
             })
@@ -250,7 +246,7 @@ fn diff_view(
     }
 
     for route in &new.http_routes {
-        let changed = old.as_ref().map_or(true, |o| {
+        let changed = old.as_ref().is_none_or(|o| {
             !o.http_routes.iter().any(|r| {
                 r.namespace == route.namespace
                     && r.name == route.name
@@ -270,7 +266,7 @@ fn diff_view(
     }
 
     for grant in &new.reference_grants {
-        let changed = old.as_ref().map_or(true, |o| {
+        let changed = old.as_ref().is_none_or(|o| {
             !o.reference_grants.iter().any(|g| {
                 g.namespace == grant.namespace
                     && g.name == grant.name
@@ -295,7 +291,7 @@ fn diff_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::model::{GatewayState, HTTPRouteState, ListenerState, ReferenceGrantState, RouteState};
+    use crate::gateway::model::{GatewayState, HTTPRouteState, ListenerState, ReferenceGrantState};
 
     fn gw(ns: &str, name: &str, generation: i64) -> GatewayState {
         GatewayState {
@@ -319,6 +315,7 @@ mod tests {
             hostnames: vec![],
             rules: vec![],
             parent_refs: vec![],
+            programmed: true,
         }
     }
 
@@ -332,7 +329,11 @@ mod tests {
         }
     }
 
-    fn view(gateways: Vec<GatewayState>, routes: Vec<HTTPRouteState>, grants: Vec<ReferenceGrantState>) -> ReconciledView {
+    fn view(
+        gateways: Vec<GatewayState>,
+        routes: Vec<HTTPRouteState>,
+        grants: Vec<ReferenceGrantState>,
+    ) -> ReconciledView {
         ReconciledView {
             gateways,
             routes: vec![],
@@ -350,9 +351,15 @@ mod tests {
         );
         let notifies = diff_view(&None, &new);
         assert_eq!(notifies.len(), 3);
-        assert!(notifies.iter().any(|n| n.kind == "Gateway" && n.name == "gw-1"));
-        assert!(notifies.iter().any(|n| n.kind == "HTTPRoute" && n.name == "route-1"));
-        assert!(notifies.iter().any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "Gateway" && n.name == "gw-1"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "HTTPRoute" && n.name == "route-1"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
     }
 
     #[test]
@@ -373,16 +380,8 @@ mod tests {
 
     #[test]
     fn diff_view_emits_changed_generation() {
-        let old = view(
-            vec![gw("default", "gw-1", 1)],
-            vec![],
-            vec![],
-        );
-        let new = view(
-            vec![gw("default", "gw-1", 2)],
-            vec![],
-            vec![],
-        );
+        let old = view(vec![gw("default", "gw-1", 1)], vec![], vec![]);
+        let new = view(vec![gw("default", "gw-1", 2)], vec![], vec![]);
         let notifies = diff_view(&Some(old), &new);
         assert_eq!(notifies.len(), 1);
         assert_eq!(notifies[0].kind, "Gateway");
@@ -398,23 +397,28 @@ mod tests {
         );
         let new = view(
             vec![gw("default", "gw-1", 1), gw("default", "gw-2", 1)],
-            vec![route("default", "route-1", 1), route("default", "route-2", 1)],
+            vec![
+                route("default", "route-1", 1),
+                route("default", "route-2", 1),
+            ],
             vec![grant("default", "grant-1", 1)],
         );
         let notifies = diff_view(&Some(old), &new);
         assert_eq!(notifies.len(), 3);
-        assert!(notifies.iter().any(|n| n.kind == "Gateway" && n.name == "gw-2"));
-        assert!(notifies.iter().any(|n| n.kind == "HTTPRoute" && n.name == "route-2"));
-        assert!(notifies.iter().any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "Gateway" && n.name == "gw-2"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "HTTPRoute" && n.name == "route-2"));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
     }
 
     #[test]
     fn diff_view_differentiates_by_namespace_and_name() {
-        let old = view(
-            vec![gw("ns-a", "gw", 1)],
-            vec![],
-            vec![],
-        );
+        let old = view(vec![gw("ns-a", "gw", 1)], vec![], vec![]);
         let new = view(
             vec![gw("ns-a", "gw", 1), gw("ns-b", "gw", 1)],
             vec![],

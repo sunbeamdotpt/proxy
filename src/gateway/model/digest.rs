@@ -5,7 +5,7 @@
 
 use super::routing::HTTPRouteState;
 use super::view::{
-    GatewayState, GrantSubject, ListenerState, ParentRef, ReferenceGrantState, ReconciledView,
+    GatewayState, GrantSubject, ListenerState, ParentRef, ReconciledView, ReferenceGrantState,
     RouteState,
 };
 
@@ -163,7 +163,12 @@ fn encode_http_route(buf: &mut Vec<u8>, r: &HTTPRouteState) {
     }
 
     let mut rules = r.rules.clone();
-    rules.sort_by(|a, b| a.matches.len().cmp(&b.matches.len()).then_with(|| a.backends.len().cmp(&b.backends.len())));
+    rules.sort_by(|a, b| {
+        a.matches
+            .len()
+            .cmp(&b.matches.len())
+            .then_with(|| a.backends.len().cmp(&b.backends.len()))
+    });
     encode_u32(buf, rules.len() as u32);
     for rule in &rules {
         encode_http_route_rule(buf, rule);
@@ -197,14 +202,18 @@ fn encode_http_route_rule(buf: &mut Vec<u8>, rule: &super::routing::HTTPRouteRul
     }
 
     let mut backends = rule.backends.clone();
-    backends.sort_by(|a, b| a.backend.cmp(&b.backend).then_with(|| a.weight.cmp(&b.weight)));
+    backends.sort_by(|a, b| {
+        a.backend
+            .cmp(&b.backend)
+            .then_with(|| a.weight.cmp(&b.weight))
+    });
     encode_u32(buf, backends.len() as u32);
     for b in &backends {
         encode_weighted_backend(buf, b);
     }
 
     let mut filters = rule.filters.clone();
-    filters.sort_by(|a, b| route_filter_ord(a).cmp(&route_filter_ord(b)));
+    filters.sort_by_key(route_filter_ord);
     encode_u32(buf, filters.len() as u32);
     for f in &filters {
         encode_route_filter(buf, f);
@@ -339,9 +348,15 @@ fn encode_route_filter(buf: &mut Vec<u8>, f: &super::routing::RouteFilter) {
         RouteFilter::UrlRewrite { hostname, path } => {
             buf.push(0x06);
             encode_option_str(buf, hostname);
-            encode_path_rewrite(buf, path);
+            encode_option_path_rewrite(buf, path);
         }
-        RouteFilter::RequestRedirect { scheme, hostname, path, port, status_code } => {
+        RouteFilter::RequestRedirect {
+            scheme,
+            hostname,
+            path,
+            port,
+            status_code,
+        } => {
             buf.push(0x07);
             encode_option_str(buf, scheme);
             encode_option_str(buf, hostname);
@@ -353,16 +368,31 @@ fn encode_route_filter(buf: &mut Vec<u8>, f: &super::routing::RouteFilter) {
             buf.push(0x08);
             encode_str(buf, backend);
         }
-        RouteFilter::Cors { allow_origins, allow_methods, allow_headers, expose_headers, max_age, allow_credentials } => {
+        RouteFilter::Cors {
+            allow_origins,
+            allow_methods,
+            allow_headers,
+            expose_headers,
+            max_age,
+            allow_credentials,
+        } => {
             buf.push(0x09);
             encode_u32(buf, allow_origins.len() as u32);
-            for o in allow_origins { encode_str(buf, o); }
+            for o in allow_origins {
+                encode_str(buf, o);
+            }
             encode_u32(buf, allow_methods.len() as u32);
-            for m in allow_methods { encode_str(buf, m); }
+            for m in allow_methods {
+                encode_str(buf, m);
+            }
             encode_u32(buf, allow_headers.len() as u32);
-            for h in allow_headers { encode_str(buf, h); }
+            for h in allow_headers {
+                encode_str(buf, h);
+            }
             encode_u32(buf, expose_headers.len() as u32);
-            for h in expose_headers { encode_str(buf, h); }
+            for h in expose_headers {
+                encode_str(buf, h);
+            }
             encode_option_i32(buf, max_age);
             buf.push(if *allow_credentials { 1 } else { 0 });
         }
@@ -376,7 +406,10 @@ fn encode_path_rewrite(buf: &mut Vec<u8>, p: &super::routing::PathRewrite) {
             buf.push(0x00);
             encode_str(buf, s);
         }
-        PathRewrite::PrefixReplace { prefix, replacement } => {
+        PathRewrite::PrefixReplace {
+            prefix,
+            replacement,
+        } => {
             buf.push(0x01);
             encode_str(buf, prefix);
             encode_str(buf, replacement);
@@ -637,7 +670,9 @@ mod tests {
         assert_ne!(compute_digest(&a), compute_digest(&b));
     }
 
-    use crate::gateway::model::routing::{HostnameMatch, HTTPRouteRule, PathMatch, RouteMatch, WeightedBackend};
+    use crate::gateway::model::routing::{
+        HTTPRouteRule, HostnameMatch, PathMatch, RouteMatch, WeightedBackend,
+    };
 
     fn view_with_http_routes(routes: Vec<HTTPRouteState>) -> ReconciledView {
         ReconciledView {
@@ -656,6 +691,7 @@ mod tests {
             hostnames,
             rules: vec![],
             parent_refs: vec![],
+            programmed: true,
         }
     }
 
@@ -700,7 +736,7 @@ mod tests {
             ],
             1,
         )]);
-        let mut b = a.clone();
+        let b = a.clone();
         a.http_routes[0].hostnames.swap(0, 1);
         assert_eq!(compute_digest(&a), compute_digest(&b));
     }
@@ -729,7 +765,8 @@ mod tests {
     fn http_route_rules_change_digest() {
         let mut a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
         a.http_routes[0].rules.push(HTTPRouteRule {
-                timeout_secs: None,
+            programmed: true,
+            timeout_secs: None,
             matches: vec![RouteMatch {
                 path: Some(PathMatch::Prefix(arc("/api"))),
                 headers: vec![],
@@ -739,6 +776,8 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: arc("svc:80"),
                 weight: 1,
+
+                filters: vec![],
             }],
             filters: vec![],
         });
@@ -759,6 +798,7 @@ mod tests {
             generation: 1,
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Exact(arc("/e"))),
@@ -770,6 +810,7 @@ mod tests {
                 filters: vec![],
             }],
             parent_refs: vec![],
+            programmed: true,
         };
         let prefix = HTTPRouteState {
             namespace: arc("default"),
@@ -777,6 +818,7 @@ mod tests {
             generation: 1,
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(arc("/p"))),
@@ -788,6 +830,7 @@ mod tests {
                 filters: vec![],
             }],
             parent_refs: vec![],
+            programmed: true,
         };
         let regex = HTTPRouteState {
             namespace: arc("default"),
@@ -795,6 +838,7 @@ mod tests {
             generation: 1,
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Regex(arc("^/r$"))),
@@ -806,6 +850,7 @@ mod tests {
                 filters: vec![],
             }],
             parent_refs: vec![],
+            programmed: true,
         };
         let a = compute_digest(&view_with_http_routes(vec![exact]));
         let b = compute_digest(&view_with_http_routes(vec![prefix]));
@@ -822,6 +867,7 @@ mod tests {
             generation: 1,
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![RouteMatch {
                     path: None,
@@ -839,6 +885,7 @@ mod tests {
                 filters: vec![],
             }],
             parent_refs: vec![],
+            programmed: true,
         };
         let mut changed = base.clone();
         changed.rules[0].matches[0].headers[0].value = HeaderMatchValue::Present;
@@ -857,12 +904,14 @@ mod tests {
                 generation: 1,
                 hostnames: vec![],
                 rules: vec![HTTPRouteRule {
-                timeout_secs: None,
+                    programmed: true,
+                    timeout_secs: None,
                     matches: vec![],
                     backends: vec![],
                     filters: vec![filter],
                 }],
                 parent_refs: vec![],
+                programmed: true,
             }])
         }
 
@@ -887,14 +936,14 @@ mod tests {
             RouteFilter::ResponseHeaderRemove { name: arc("X-Old") },
             RouteFilter::UrlRewrite {
                 hostname: None,
-                path: PathRewrite::PrefixReplace {
+                path: Some(PathRewrite::PrefixReplace {
                     prefix: arc("/api"),
                     replacement: arc("/v2"),
-                },
+                }),
             },
             RouteFilter::UrlRewrite {
                 hostname: Some(arc("rewrite.example.com")),
-                path: PathRewrite::FullReplace(arc("/new")),
+                path: Some(PathRewrite::FullReplace(arc("/new"))),
             },
             RouteFilter::RequestRedirect {
                 scheme: Some(arc("https")),
@@ -914,27 +963,33 @@ mod tests {
 
     #[test]
     fn http_route_weighted_backend_ordering_stable() {
-        let mut a = view_with_http_routes(vec![HTTPRouteState {
+        let a = view_with_http_routes(vec![HTTPRouteState {
             namespace: arc("default"),
             name: arc("r1"),
             generation: 1,
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
+                programmed: true,
                 timeout_secs: None,
                 matches: vec![],
                 backends: vec![
                     WeightedBackend {
                         backend: arc("b:80"),
                         weight: 2,
+
+                        filters: vec![],
                     },
                     WeightedBackend {
                         backend: arc("a:80"),
                         weight: 1,
+
+                        filters: vec![],
                     },
                 ],
                 filters: vec![],
             }],
             parent_refs: vec![],
+            programmed: true,
         }]);
         let mut b = a.clone();
         b.http_routes[0].rules[0].backends.swap(0, 1);
@@ -968,5 +1023,128 @@ mod tests {
         let mut changed = base.clone();
         changed.reference_grants[0].from[0].name = Some(arc("specific"));
         assert_ne!(compute_digest(&base), compute_digest(&changed));
+    }
+
+    #[test]
+    fn http_route_request_mirror_changes_digest() {
+        let base = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![],
+                filters: vec![RouteFilter::RequestMirror {
+                    backend: arc("mirror-svc:80"),
+                }],
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        let changed = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![],
+                filters: vec![RouteFilter::RequestMirror {
+                    backend: arc("other-svc:80"),
+                }],
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        assert_ne!(compute_digest(&base), compute_digest(&changed));
+    }
+
+    #[test]
+    fn http_route_cors_filter_changes_digest() {
+        let base = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![],
+                filters: vec![RouteFilter::Cors {
+                    allow_origins: vec![arc("*")],
+                    allow_methods: vec![arc("GET")],
+                    allow_headers: vec![arc("X-Custom")],
+                    expose_headers: vec![],
+                    max_age: Some(600),
+                    allow_credentials: false,
+                }],
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        let changed = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![],
+                filters: vec![RouteFilter::Cors {
+                    allow_origins: vec![arc("*")],
+                    allow_methods: vec![arc("GET")],
+                    allow_headers: vec![arc("X-Custom")],
+                    expose_headers: vec![],
+                    max_age: Some(600),
+                    allow_credentials: true,
+                }],
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        assert_ne!(compute_digest(&base), compute_digest(&changed));
+    }
+
+    #[test]
+    fn http_route_rule_match_reordering_stable() {
+        let mut a = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![
+                    RouteMatch {
+                        path: Some(PathMatch::Prefix(arc("/z"))),
+                        headers: vec![],
+                        query_params: vec![],
+                        method: None,
+                    },
+                    RouteMatch {
+                        path: Some(PathMatch::Prefix(arc("/a"))),
+                        headers: vec![],
+                        query_params: vec![],
+                        method: None,
+                    },
+                ],
+                backends: vec![],
+                filters: vec![],
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        let b = a.clone();
+        a.http_routes[0].rules[0].matches.swap(0, 1);
+        assert_eq!(compute_digest(&a), compute_digest(&b));
     }
 }
