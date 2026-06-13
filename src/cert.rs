@@ -53,6 +53,92 @@ pub fn write_from_secret(secret: &Secret, cert_path: &str, key_path: &str) -> Re
     std::fs::write(cert_path, &crt.0).with_context(|| format!("writing {cert_path}"))?;
     std::fs::write(key_path, &key.0).with_context(|| format!("writing {key_path}"))?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let key_perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(key_path, key_perms)
+            .with_context(|| format!("restricting permissions on {key_path}"))?;
+    }
+
     tracing::info!(cert_path, key_path, "cert files written from K8s Secret");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use k8s_openapi::ByteString;
+    use std::collections::BTreeMap;
+
+    fn secret_with_data(data: BTreeMap<String, ByteString>) -> Secret {
+        Secret {
+            metadata: ObjectMeta::default(),
+            data: Some(data),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn write_from_secret_writes_cert_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("tls.crt");
+        let key_path = dir.path().join("tls.key");
+        let mut data = BTreeMap::new();
+        data.insert("tls.crt".to_string(), ByteString(b"CERT".to_vec()));
+        data.insert("tls.key".to_string(), ByteString(b"KEY".to_vec()));
+        let secret = secret_with_data(data);
+
+        write_from_secret(
+            &secret,
+            cert_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&cert_path).unwrap(), b"CERT");
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"KEY");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "TLS private key must be readable only by owner"
+            );
+        }
+    }
+
+    #[test]
+    fn write_from_secret_errors_when_data_missing() {
+        let secret = Secret {
+            metadata: ObjectMeta::default(),
+            data: None,
+            ..Default::default()
+        };
+        let err = write_from_secret(&secret, "/tmp/crt", "/tmp/key").unwrap_err();
+        assert!(err.to_string().contains("no data"));
+    }
+
+    #[test]
+    fn write_from_secret_errors_when_cert_missing() {
+        let mut data = BTreeMap::new();
+        data.insert("tls.key".to_string(), ByteString(b"KEY".to_vec()));
+        let secret = secret_with_data(data);
+        let err = write_from_secret(&secret, "/tmp/crt", "/tmp/key").unwrap_err();
+        assert!(err.to_string().contains("missing tls.crt"));
+    }
+
+    #[test]
+    fn write_from_secret_errors_when_key_missing() {
+        let mut data = BTreeMap::new();
+        data.insert("tls.crt".to_string(), ByteString(b"CERT".to_vec()));
+        let secret = secret_with_data(data);
+        let err = write_from_secret(&secret, "/tmp/crt", "/tmp/key").unwrap_err();
+        assert!(err.to_string().contains("missing tls.key"));
+    }
 }
