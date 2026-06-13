@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Cookie weight sweep: trains full tree+MLP ensembles (GPU via wgpu) across a
 //! range of cookie_weight values and reports accuracy metrics for each.

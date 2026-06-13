@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Shared training infrastructure: Dataset adapter, Batcher, and batch types
 //! for use with burn's SupervisedTraining.

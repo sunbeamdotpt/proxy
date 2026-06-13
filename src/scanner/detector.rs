@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 use crate::config::RouteConfig;
 use crate::scanner::features::{self, fx_hash_bytes, SUSPICIOUS_EXTENSIONS_LIST};

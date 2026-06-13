@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Auto-generated weights for the scanner ensemble.
 //! DO NOT EDIT — regenerate with `cargo run --features training -- train-scanner-mlp`.

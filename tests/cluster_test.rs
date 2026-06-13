@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Integration test: spin up two gossip nodes with bootstrap discovery
 //! and verify that bandwidth reports propagate between them.
