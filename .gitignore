@@ -6,6 +6,13 @@ certs/
 *.crt
 *.tmp
 .DS_Store
+*.profraw
+session_*.zip
+coverage_tls/
+tini-static-arm64
+.agents/
+lean4/.lake/
+tests/fixtures/gateway-integration/sunbeam-proxy
 
 # Training data and model binaries
 *.bin
