@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! End-to-end tests: spin up a real SunbeamProxy over plain HTTP, route it
 //! to a tiny TCP echo-backend, and verify that the upstream receives the
@@ -122,8 +122,12 @@ fn start_proxy_once(backend_port: u16) {
         let ir = sunbeam_proxy::ir::from_config::from_route_configs(&routes);
         let table = sunbeam_proxy::ir::compile::CompiledRouteTable::compile(ir).expect("compile");
         let compiled_rewrites = SunbeamProxy::compile_rewrites_from_ir(&table);
+        let l4_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+            sunbeam_proxy::ir::compile::CompiledL4Config::default(),
+        ));
         let proxy = SunbeamProxy {
             routes: Arc::new(arc_swap::ArcSwap::from_pointee(table)),
+            l4_config,
             acme_routes,
             ddos_detector: None,
             scanner_detector: None,

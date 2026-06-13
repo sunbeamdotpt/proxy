@@ -9,12 +9,22 @@ impl SunbeamProxy {
         session: &mut Session,
         ctx: &mut RequestCtx,
     ) -> Result<bool> {
-        ctx.downstream_scheme = if is_plain_http(session) {
-            "http"
+        // TLS-terminated HTTPS connections arrive as plaintext HTTP from the L4
+        // manager. Detect them by matching the internal target address and use
+        // the public listener port for redirects.
+        if let Some(listener_port) = downstream_local_addr(session)
+            .and_then(|a| https_terminate_port(&self.l4_config.load(), a))
+        {
+            ctx.downstream_scheme = "https";
+            ctx.downstream_port = listener_port;
         } else {
-            "https"
-        };
-        ctx.downstream_port = downstream_port(session);
+            ctx.downstream_scheme = if is_plain_http(session) {
+                "http"
+            } else {
+                "https"
+            };
+            ctx.downstream_port = downstream_port(session);
+        }
 
         // Create the request-scoped tracing span.
         let method = session.req_header().method.to_string();
@@ -716,6 +726,9 @@ mod tests {
             routes: Arc::new(arc_swap::ArcSwap::new(
                 Arc::new(CompiledRouteTable::empty()),
             )),
+            l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
+                crate::ir::compile::CompiledL4Config::empty(),
+            ))),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,

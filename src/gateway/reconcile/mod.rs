@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Reconciler submodule.
 //!
@@ -11,6 +11,7 @@ pub mod endpoints;
 pub mod gateway;
 pub mod gatewayclass;
 pub mod httproute;
+pub mod l4route;
 pub mod leader;
 pub mod refgrant;
 
@@ -37,15 +38,42 @@ pub fn strip_last_transition_time(v: &Value) -> Value {
     }
 }
 
-use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant};
+use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute};
 use crate::gateway::model::{GatewayView, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::httproute::{
     parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
 };
+use crate::gateway::reconcile::l4route::{
+    parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
+    parse_udproute_state, reconcile_tcproutes, reconcile_tlsroutes, reconcile_udproutes,
+    resolve_l4_backends_async,
+};
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use kube::api::Api;
 use std::collections::HashMap;
+
+/// List an optional L4 route CRD, returning an empty list when the CRD is not
+/// installed or the list call fails. HTTP routing is the primary concern of the
+/// reconcile tick; missing TCP/UDP/TLS CRDs should not block Gateway API HTTP
+/// routes from being programmed.
+async fn list_l4_routes<T>(api: &Api<T>, kind: &str) -> Vec<T>
+where
+    T: kube::Resource<DynamicType = ()> + serde::de::DeserializeOwned + std::fmt::Debug + Clone,
+{
+    match api.list(&Default::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            let is_missing = matches!(&e, kube::Error::Api(s) if s.code == 404);
+            if is_missing {
+                tracing::debug!(kind, "L4 route CRD is not installed; treating as empty");
+            } else {
+                tracing::warn!(error = %e, kind, "failed to list L4 routes; treating as empty");
+            }
+            vec![]
+        }
+    }
+}
 
 /// Single reconcile tick: fetch all Gateway API objects and emit a view.
 pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
@@ -140,12 +168,108 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
         .map(|r| r.route_state)
         .collect();
 
+    // ------------------------------------------------------------------
+    // L4 routes
+    // ------------------------------------------------------------------
+    let tcproutes: Api<TCPRoute> = Api::all(client.clone());
+    let udproutes: Api<UDPRoute> = Api::all(client.clone());
+    let tlsroutes: Api<TLSRoute> = Api::all(client.clone());
+
+    let tcp_route_items = list_l4_routes(&tcproutes, "TCPRoute").await;
+    let udp_route_items = list_l4_routes(&udproutes, "UDPRoute").await;
+    let tls_route_items = list_l4_routes(&tlsroutes, "TLSRoute").await;
+
+    let tcp_reconciled = reconcile_tcproutes(
+        &tcp_route_items,
+        &gateway_states,
+        &namespace_labels,
+        &listener_allowed,
+    );
+    let udp_reconciled = reconcile_udproutes(
+        &udp_route_items,
+        &gateway_states,
+        &namespace_labels,
+        &listener_allowed,
+    );
+    let tls_reconciled = reconcile_tlsroutes(
+        &tls_route_items,
+        &gateway_states,
+        &namespace_labels,
+        &listener_allowed,
+    );
+
+    let mut tcp_routes = Vec::new();
+    for (raw, reconciled) in tcp_route_items.iter().zip(tcp_reconciled.iter()) {
+        let mut state = parse_tcproute_state(raw);
+        state.parent_refs = reconciled.route_state.parent_refs.clone();
+        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
+        let observed_generation = raw.metadata.generation.unwrap_or(0);
+        let parsed = parse_tcproute(raw);
+        let (backends, resolved_refs) = resolve_l4_backends_async(
+            client,
+            &parsed.backends,
+            route_ns,
+            "TCPRoute",
+            &grant_index,
+            observed_generation,
+        )
+        .await;
+        state.backends = backends;
+        state.programmed = reconciled.programmed && resolved_refs.is_none();
+        tcp_routes.push(state);
+    }
+
+    let mut udp_routes = Vec::new();
+    for (raw, reconciled) in udp_route_items.iter().zip(udp_reconciled.iter()) {
+        let mut state = parse_udproute_state(raw);
+        state.parent_refs = reconciled.route_state.parent_refs.clone();
+        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
+        let observed_generation = raw.metadata.generation.unwrap_or(0);
+        let parsed = parse_udproute(raw);
+        let (backends, resolved_refs) = resolve_l4_backends_async(
+            client,
+            &parsed.backends,
+            route_ns,
+            "UDPRoute",
+            &grant_index,
+            observed_generation,
+        )
+        .await;
+        state.backends = backends;
+        state.programmed = reconciled.programmed && resolved_refs.is_none();
+        udp_routes.push(state);
+    }
+
+    let mut tls_routes = Vec::new();
+    for (raw, reconciled) in tls_route_items.iter().zip(tls_reconciled.iter()) {
+        let mut state = parse_tlsroute_state(raw);
+        state.parent_refs = reconciled.route_state.parent_refs.clone();
+        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
+        let observed_generation = raw.metadata.generation.unwrap_or(0);
+        let parsed = parse_tlsroute(raw);
+        let (backends, resolved_refs) = resolve_l4_backends_async(
+            client,
+            &parsed.backends,
+            route_ns,
+            "TLSRoute",
+            &grant_index,
+            observed_generation,
+        )
+        .await;
+        state.backends = backends;
+        state.programmed = reconciled.programmed && resolved_refs.is_none();
+        tls_routes.push(state);
+    }
+
     let reference_grants = grant_states;
 
     Some(GatewayView {
         gateways: gateway_states,
         routes,
         http_routes,
+        tcp_routes,
+        udp_routes,
+        tls_routes,
         reference_grants,
     })
 }
@@ -319,5 +443,210 @@ mod tests {
         assert!(view.http_routes.is_empty());
         assert!(view.reference_grants.is_empty());
         assert!(view.routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_returns_none_on_httproute_list_error() {
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                async move {
+                    if path.contains("/httproutes") {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(500)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    } else {
+                        let body = serde_json::json!({"items": []});
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(body.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    }
+                }
+            }),
+            "default",
+        );
+        assert!(reconcile_tick(&client).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_returns_none_on_referencegrant_list_error() {
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                async move {
+                    if path.contains("/referencegrants") {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(500)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    } else {
+                        let body = serde_json::json!({"items": []});
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(body.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    }
+                }
+            }),
+            "default",
+        );
+        assert!(reconcile_tick(&client).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_returns_none_on_namespace_list_error() {
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                async move {
+                    if path.contains("/namespaces") {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(500)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    } else {
+                        let body = serde_json::json!({"items": []});
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(body.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    }
+                }
+            }),
+            "default",
+        );
+        assert!(reconcile_tick(&client).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_tolerates_l4_route_list_errors() {
+        let gateway = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": { "name": "gw-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }]
+            }
+        });
+
+        let mut responses_map = std::collections::HashMap::new();
+        responses_map.insert(
+            "gateways".to_string(),
+            list_response("GatewayList", vec![gateway]),
+        );
+        responses_map.insert(
+            "httproutes".to_string(),
+            list_response("HTTPRouteList", vec![]),
+        );
+        responses_map.insert(
+            "referencegrants".to_string(),
+            list_response("ReferenceGrantList", vec![]),
+        );
+        let responses = std::sync::Arc::new(std::sync::Mutex::new(responses_map));
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let responses = responses.clone();
+                async move {
+                    let map = responses.lock().unwrap();
+                    if path.contains("/tcproutes")
+                        || path.contains("/udproutes")
+                        || path.contains("/tlsroutes")
+                    {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(500)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    } else {
+                        let body = if path.contains("/gateways") {
+                            map.get("gateways")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({"items": []}))
+                        } else if path.contains("/httproutes") {
+                            map.get("httproutes")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({"items": []}))
+                        } else if path.contains("/referencegrants") {
+                            map.get("referencegrants")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({"items": []}))
+                        } else if path.contains("/namespaces") {
+                            serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []})
+                        } else if path.contains("/services") {
+                            serde_json::json!({"apiVersion": "v1", "kind": "ServiceList", "items": []})
+                        } else if path.contains("/endpointslices") {
+                            serde_json::json!({"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "items": []})
+                        } else {
+                            serde_json::json!({"items": []})
+                        };
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(body.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    }
+                }
+            }),
+            "default",
+        );
+        let view = reconcile_tick(&client)
+            .await
+            .expect("reconcile_tick tolerates L4 list errors");
+        assert_eq!(view.gateways.len(), 1);
+        assert!(view.tcp_routes.is_empty());
+        assert!(view.udp_routes.is_empty());
+        assert!(view.tls_routes.is_empty());
+    }
+
+    #[test]
+    fn strip_last_transition_time_removes_timestamp_recursively() {
+        let value = serde_json::json!({
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "lastTransitionTime": "2026-01-01T00:00:00Z",
+                    "status": "True"
+                }
+            ],
+            "nested": {
+                "lastTransitionTime": "ignored",
+                "value": 1
+            }
+        });
+        let stripped = strip_last_transition_time(&value);
+        let conditions = stripped["conditions"].as_array().unwrap();
+        assert_eq!(conditions.len(), 1);
+        assert!(!conditions[0]
+            .as_object()
+            .unwrap()
+            .contains_key("lastTransitionTime"));
+        assert!(!stripped["nested"]
+            .as_object()
+            .unwrap()
+            .contains_key("lastTransitionTime"));
+        assert_eq!(stripped["nested"]["value"], 1);
     }
 }

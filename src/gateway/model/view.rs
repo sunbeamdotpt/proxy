@@ -1,12 +1,12 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Canonical reconciled view of the Gateway API object graph.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::routing::HTTPRouteState;
+use super::routing::{HTTPRouteState, TCPRouteState, TLSRouteState, UDPRouteState};
 
 /// Alias used by the reconcile and translate modules.
 pub type GatewayView = ReconciledView;
@@ -16,11 +16,14 @@ pub type GatewayView = ReconciledView;
 /// This struct is intentionally cheap to clone (all strings are
 /// [`Arc<str>`]) and is the input to both the hot-reload path and
 /// the cluster-gossip digest computation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ReconciledView {
     pub gateways: Vec<GatewayState>,
     pub routes: Vec<RouteState>,
     pub http_routes: Vec<HTTPRouteState>,
+    pub tcp_routes: Vec<TCPRouteState>,
+    pub udp_routes: Vec<UDPRouteState>,
+    pub tls_routes: Vec<TLSRouteState>,
     pub reference_grants: Vec<ReferenceGrantState>,
 }
 
@@ -36,6 +39,16 @@ pub struct GatewayState {
 /// Alias used by the listener integration module.
 pub type ListenerModel = ListenerState;
 
+/// TLS termination mode for a TLS or HTTPS listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum TlsMode {
+    /// TLS is terminated at the gateway and the plaintext stream is routed.
+    #[default]
+    Terminate,
+    /// TLS is forwarded verbatim to the backend (SNI-based routing).
+    Passthrough,
+}
+
 /// Stub for a listener attached to a [`GatewayState`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListenerState {
@@ -46,6 +59,8 @@ pub struct ListenerState {
     /// `*.example.org`).  When a route has no hostnames of its own this
     /// value becomes the effective hostname.
     pub hostname: Option<Arc<str>>,
+    /// TLS termination mode. `None` for plain HTTP/TCP/UDP listeners.
+    pub tls_mode: Option<TlsMode>,
 }
 
 /// Stub for the reconciled state of a single HTTPRoute / TLSRoute /

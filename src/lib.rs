@@ -2,7 +2,7 @@
 //! sunbeam-proxy — Pingora-based reverse proxy with ML-powered DDoS/scanner detection,
 //! rate limiting, gossip clustering, and ACME TLS support.
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Library crate root — exports the proxy/config/acme modules so that
 // integration tests in tests/ can construct and drive a SunbeamProxy
@@ -33,6 +33,8 @@ pub mod ensemble;
 pub mod gateway;
 /// Intermediate representation for routing.
 pub mod ir;
+/// L4 socket manager.
+pub mod l4;
 /// Metrics.
 pub mod metrics;
 /// Proxy.
@@ -49,6 +51,8 @@ pub mod sni;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
+/// TLS registry and utilities.
+pub mod tls;
 /// Tls passthrough.
 pub mod tls_passthrough;
 #[cfg(feature = "training")]

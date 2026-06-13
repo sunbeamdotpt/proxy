@@ -35,6 +35,63 @@ pub struct CompiledRouteTable {
     pub acme_routes: HashMap<Arc<str>, Arc<str>>,
 }
 
+/// Compiled L4 configuration consumed by the L4 socket manager.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CompiledL4Config {
+    /// Listeners the L4 manager should bind.
+    pub listeners: Vec<CompiledListener>,
+    /// TCP routes, ordered by precedence (higher-priority sources first).
+    pub tcp_routes: Vec<CompiledL4Route>,
+    /// UDP routes, ordered by precedence.
+    pub udp_routes: Vec<CompiledL4Route>,
+    /// TLS passthrough routes, ordered by precedence.
+    pub tls_routes: Vec<CompiledL4Route>,
+    /// HTTPS termination routes, ordered by precedence.
+    pub https_routes: Vec<CompiledL4Route>,
+}
+
+/// A compiled listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledListener {
+    /// Listener identifier.
+    pub id: Arc<str>,
+    /// Address to bind to.
+    pub bind_addr: Arc<str>,
+    /// Transport protocol.
+    pub protocol: Protocol,
+    /// TLS configuration, if any.
+    pub tls: Option<CompiledTlsConfig>,
+    /// When true, plain-HTTP requests on this listener are redirected to HTTPS.
+    pub redirect_http_to_https: bool,
+}
+
+/// Compiled TLS configuration for a listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompiledTlsConfig {
+    /// Reference to a certificate held by the central TLS registry.
+    Registry { cert_id: Arc<str> },
+    /// Static certificate files.
+    Files {
+        /// Path to the TLS certificate file.
+        cert_path: Arc<str>,
+        /// Path to the TLS private key file.
+        key_path: Arc<str>,
+    },
+}
+
+/// A compiled L4 route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledL4Route {
+    /// Listener this route is attached to.
+    pub listener_id: Arc<str>,
+    /// Match condition.
+    pub match_: L4Match,
+    /// Action to take.
+    pub action: L4Action,
+    /// Source priority — higher values win when multiple routes match.
+    pub priority: i64,
+}
+
 /// A compiled host route — contains the path trie for this hostname.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostNode {
@@ -333,6 +390,122 @@ impl CompiledRouteTable {
     }
 
     /// Empty compiled table — returns 404 for everything.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L4 compilation
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl CompiledL4Config {
+    /// Compile the L4 portion of an IR `RouteTable`.
+    pub fn compile(ir: RouteTable) -> Result<Self, CompileError> {
+        let mut listeners = Vec::with_capacity(ir.listeners.len());
+        for l in ir.listeners {
+            let tls = l.tls.map(|t| match t {
+                TlsConfig::Registry { cert_id } => CompiledTlsConfig::Registry { cert_id },
+                TlsConfig::Files {
+                    cert_path,
+                    key_path,
+                } => CompiledTlsConfig::Files {
+                    cert_path,
+                    key_path,
+                },
+            });
+
+            if matches!(l.protocol, Protocol::Https | Protocol::Tls) && tls.is_none() {
+                return Err(CompileError {
+                    message: format!(
+                        "listener {} ({:?}) requires TLS configuration",
+                        l.id, l.protocol
+                    ),
+                });
+            }
+
+            listeners.push(CompiledListener {
+                id: l.id,
+                bind_addr: l.bind_addr,
+                protocol: l.protocol,
+                tls,
+                redirect_http_to_https: l.redirect_http_to_https,
+            });
+        }
+
+        // Merge listeners that share the same bind address and protocol so that
+        // multiple Gateway API listeners on the same port (e.g. mixed TLS mode)
+        // share a single socket.
+        let mut listener_groups: HashMap<(Arc<str>, Protocol), Vec<CompiledListener>> =
+            HashMap::new();
+        for l in listeners {
+            listener_groups
+                .entry((Arc::clone(&l.bind_addr), l.protocol))
+                .or_default()
+                .push(l);
+        }
+
+        let mut listeners = Vec::with_capacity(listener_groups.len());
+        let mut listener_id_map: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+        for ((bind_addr, protocol), group) in listener_groups {
+            if group.len() == 1 {
+                let l = group.into_iter().next().unwrap();
+                listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&l.id));
+                listeners.push(l);
+            } else {
+                let canonical_id: Arc<str> = Arc::from(format!("{}#{:?}", bind_addr, protocol));
+                let tls = group.iter().find_map(|l| l.tls.clone());
+                let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
+                for l in &group {
+                    listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_id));
+                }
+                listeners.push(CompiledListener {
+                    id: canonical_id,
+                    bind_addr,
+                    protocol,
+                    tls,
+                    redirect_http_to_https,
+                });
+            }
+        }
+        listeners.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut tcp_routes = Vec::new();
+        let mut udp_routes = Vec::new();
+        let mut tls_routes = Vec::new();
+        let mut https_routes = Vec::new();
+
+        for route in ir.l4_routes {
+            let listener_id = listener_id_map
+                .get(&route.listener_id)
+                .cloned()
+                .unwrap_or(route.listener_id);
+            let compiled = CompiledL4Route {
+                listener_id,
+                match_: route.match_,
+                action: route.action,
+                priority: 0,
+            };
+            match &compiled.action {
+                L4Action::TcpRelay(_) => tcp_routes.push(compiled),
+                L4Action::UdpRelay(_) => udp_routes.push(compiled),
+                L4Action::TlsPassthrough(_) | L4Action::TlsTerminate(_) => {
+                    tls_routes.push(compiled)
+                }
+                L4Action::TerminateAndHttp(_) => https_routes.push(compiled),
+            }
+        }
+
+        Ok(CompiledL4Config {
+            listeners,
+            tcp_routes,
+            udp_routes,
+            tls_routes,
+            https_routes,
+        })
+    }
+
+    /// Empty compiled L4 config.
     pub fn empty() -> Self {
         Self::default()
     }
@@ -1208,6 +1381,318 @@ mod tests {
         assert!(empty.acme_routes.is_empty());
     }
 
+    // ── Action compilation ──────────────────────────────────────────────
+
+    #[test]
+    fn redirect_action_compiles_to_terminal() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules: vec![Rule {
+                    matches: vec![RequestMatch {
+                        path: Some(PathMatch::Exact("/old".into())),
+                        ..Default::default()
+                    }],
+                    action: Action::Redirect(RedirectAction {
+                        status_code: 301,
+                        scheme: Some("https".into()),
+                        hostname: Some("new.com".into()),
+                        port: Some(8443),
+                        path: Some(PathRewrite::FullReplace("/new".into())),
+                    }),
+                    rule_order: 0,
+                }],
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        let plan = compiled
+            .lookup("example.com", "/old", "GET", &Default::default(), None)
+            .unwrap();
+        assert!(matches!(
+            plan.request_stages[0],
+            RequestStage::Terminal(TerminalAction::Redirect(_))
+        ));
+    }
+
+    #[test]
+    fn fixed_response_action_compiles_to_terminal() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules: vec![Rule {
+                    matches: vec![RequestMatch {
+                        path: Some(PathMatch::Exact("/deny".into())),
+                        ..Default::default()
+                    }],
+                    action: Action::FixedResponse(FixedResponseAction {
+                        status: 403,
+                        headers: vec![("X-Denied".into(), "yes".into())],
+                        body: Some("no".into()),
+                    }),
+                    rule_order: 0,
+                }],
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        let plan = compiled
+            .lookup("example.com", "/deny", "GET", &Default::default(), None)
+            .unwrap();
+        assert!(matches!(
+            plan.request_stages[0],
+            RequestStage::Terminal(TerminalAction::FixedResponse { .. })
+        ));
+    }
+
+    #[test]
+    fn static_files_action_compiles() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Any,
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules: vec![Rule {
+                    matches: vec![RequestMatch {
+                        path: Some(PathMatch::Prefix("/".into())),
+                        ..Default::default()
+                    }],
+                    action: Action::StaticFiles(StaticFileAction {
+                        root: "/www".into(),
+                        fallback: Some("/index.html".into()),
+                        rewrites: vec![RewriteRule {
+                            pattern: "^/a$".into(),
+                            target: "/b".into(),
+                        }],
+                        extra_headers: vec![("Cache-Control".into(), "max-age=3600".into())],
+                    }),
+                    rule_order: 0,
+                }],
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        let plan = compiled
+            .lookup("example.com", "/foo", "GET", &Default::default(), None)
+            .unwrap();
+        assert!(matches!(
+            plan.request_stages[0],
+            RequestStage::StaticFiles(_)
+        ));
+        assert_eq!(compiled.any_host.as_ref().unwrap().static_rewrites.len(), 1);
+    }
+
+    #[test]
+    fn regex_path_match_compiles_and_looks_up() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules: vec![Rule {
+                    matches: vec![RequestMatch {
+                        path: Some(PathMatch::Regex("^/api/.*".into())),
+                        ..Default::default()
+                    }],
+                    action: Action::Route(simple_route_action()),
+                    rule_order: 0,
+                }],
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        assert!(compiled
+            .lookup("example.com", "/api/v1", "GET", &Default::default(), None)
+            .is_some());
+        assert!(compiled
+            .lookup("example.com", "/other", "GET", &Default::default(), None)
+            .is_none());
+    }
+
+    #[test]
+    fn method_discriminator_splits_plans() {
+        let mut rules = Vec::new();
+        for i in 0..10 {
+            rules.push(Rule {
+                matches: vec![RequestMatch {
+                    path: Some(PathMatch::Prefix("/api".into())),
+                    method: Some(format!("METH{}", i).into()),
+                    ..Default::default()
+                }],
+                action: Action::Route(simple_route_action()),
+                rule_order: i,
+            });
+        }
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules,
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        for i in 0..10 {
+            assert!(compiled
+                .lookup(
+                    "example.com",
+                    "/api",
+                    &format!("METH{}", i),
+                    &Default::default(),
+                    None
+                )
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn header_discriminator_splits_plans() {
+        let mut rules = Vec::new();
+        for i in 0..10 {
+            let mut headers = Vec::new();
+            headers.push(HeaderMatch {
+                name: "X-Version".into(),
+                value: HeaderMatchValue::Exact(format!("v{}", i).into()),
+            });
+            rules.push(Rule {
+                matches: vec![RequestMatch {
+                    path: Some(PathMatch::Prefix("/api".into())),
+                    headers,
+                    ..Default::default()
+                }],
+                action: Action::Route(simple_route_action()),
+                rule_order: i,
+            });
+        }
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules,
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        for i in 0..10 {
+            let mut headers = http::header::HeaderMap::new();
+            headers.insert("X-Version", format!("v{}", i).parse().unwrap());
+            assert!(compiled
+                .lookup("example.com", "/api", "GET", &headers, None)
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn query_discriminator_splits_plans() {
+        let mut rules = Vec::new();
+        for i in 0..10 {
+            let mut query_params = Vec::new();
+            query_params.push(QueryParamMatch {
+                name: "v".into(),
+                value: QueryParamMatchValue::Exact(format!("{}", i).into()),
+            });
+            rules.push(Rule {
+                matches: vec![RequestMatch {
+                    path: Some(PathMatch::Prefix("/api".into())),
+                    query_params,
+                    ..Default::default()
+                }],
+                action: Action::Route(simple_route_action()),
+                rule_order: i,
+            });
+        }
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules,
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        for i in 0..10 {
+            assert!(compiled
+                .lookup(
+                    "example.com",
+                    "/api",
+                    "GET",
+                    &Default::default(),
+                    Some(&format!("v={}", i))
+                )
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn gateway_api_flags_detected() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![HostRoute {
+                listener_hostname: None,
+                hostname: HostnameMatch::Exact("app.example.com".into()),
+                listener_ids: vec![],
+                gateway_api: true,
+                disable_secure_redirection: false,
+                rules: vec![Rule {
+                    matches: vec![RequestMatch {
+                        path: Some(PathMatch::Prefix("/".into())),
+                        ..Default::default()
+                    }],
+                    action: Action::Route(simple_route_action()),
+                    rule_order: 0,
+                }],
+            }],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let compiled = CompiledRouteTable::compile(rt).unwrap();
+        assert!(compiled.has_gateway_api_listener("app.example.com"));
+        assert!(compiled.has_gateway_api_routes());
+    }
+
     // ── Hostname lookup ─────────────────────────────────────────────────
 
     #[test]
@@ -1231,6 +1716,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1259,6 +1746,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1287,6 +1776,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1324,6 +1815,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1354,6 +1847,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1391,6 +1886,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
@@ -1451,6 +1948,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1516,6 +2015,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
 
@@ -1570,6 +2071,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1635,6 +2138,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
 
@@ -1692,6 +2197,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1744,6 +2251,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1798,6 +2307,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1860,6 +2371,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
@@ -1875,6 +2388,217 @@ mod tests {
             upstream.backend_request_mutations[1][0],
             UpstreamRequestMutation::SetHeader { .. }
         ));
+    }
+
+    // ── CompiledL4Config ───────────────────────────────────────────────
+
+    #[test]
+    fn l4_config_empty() {
+        let rt = RouteTable::default();
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert!(cfg.listeners.is_empty());
+        assert!(cfg.tcp_routes.is_empty());
+        assert!(cfg.udp_routes.is_empty());
+        assert!(cfg.tls_routes.is_empty());
+    }
+
+    #[test]
+    fn l4_config_single_tcp_route() {
+        let rt = RouteTable {
+            listeners: vec![ListenerConfig {
+                id: "tcp-l".into(),
+                bind_addr: "0.0.0.0:9000".into(),
+                protocol: Protocol::Tcp,
+                tls: None,
+                redirect_http_to_https: false,
+            }],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![L4Route {
+                listener_id: "tcp-l".into(),
+                match_: L4Match::Any,
+                action: L4Action::TcpRelay(vec![WeightedBackend {
+                    backend: "tcp://svc:8080".into(),
+                    weight: 1,
+                    request_filters: vec![],
+                }]),
+            }],
+            tls_certs: vec![],
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].protocol, Protocol::Tcp);
+        assert_eq!(cfg.tcp_routes.len(), 1);
+        assert!(cfg.udp_routes.is_empty());
+        assert!(cfg.tls_routes.is_empty());
+    }
+
+    #[test]
+    fn l4_config_udp_and_tls_routes() {
+        let rt = RouteTable {
+            listeners: vec![
+                ListenerConfig {
+                    id: "udp-l".into(),
+                    bind_addr: "0.0.0.0:9001".into(),
+                    protocol: Protocol::Udp,
+                    tls: None,
+                    redirect_http_to_https: false,
+                },
+                ListenerConfig {
+                    id: "tls-l".into(),
+                    bind_addr: "0.0.0.0:9443".into(),
+                    protocol: Protocol::Tls,
+                    tls: Some(TlsConfig::Registry {
+                        cert_id: "tls-cert".into(),
+                    }),
+                    redirect_http_to_https: false,
+                },
+            ],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![
+                L4Route {
+                    listener_id: "udp-l".into(),
+                    match_: L4Match::Any,
+                    action: L4Action::UdpRelay(vec![]),
+                },
+                L4Route {
+                    listener_id: "tls-l".into(),
+                    match_: L4Match::Sni(HostnameMatch::Wildcard("example.com".into())),
+                    action: L4Action::TlsPassthrough(vec![]),
+                },
+            ],
+            tls_certs: vec![],
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 2);
+        assert_eq!(cfg.udp_routes.len(), 1);
+        assert_eq!(cfg.tls_routes.len(), 1);
+        assert!(matches!(
+            cfg.tls_routes[0].match_,
+            L4Match::Sni(HostnameMatch::Wildcard(_))
+        ));
+    }
+
+    #[test]
+    fn l4_config_https_terminator_requires_tls() {
+        let rt = RouteTable {
+            listeners: vec![ListenerConfig {
+                id: "https-l".into(),
+                bind_addr: "0.0.0.0:443".into(),
+                protocol: Protocol::Https,
+                tls: None,
+                redirect_http_to_https: false,
+            }],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let err = CompiledL4Config::compile(rt).unwrap_err();
+        assert!(err.message.contains("requires TLS configuration"));
+    }
+
+    #[test]
+    fn l4_config_files_tls_preserved() {
+        let rt = RouteTable {
+            listeners: vec![ListenerConfig {
+                id: "https-l".into(),
+                bind_addr: "0.0.0.0:443".into(),
+                protocol: Protocol::Https,
+                tls: Some(TlsConfig::Files {
+                    cert_path: "/c".into(),
+                    key_path: "/k".into(),
+                }),
+                redirect_http_to_https: true,
+            }],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![],
+            tls_certs: vec![],
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 1);
+        assert!(matches!(
+            cfg.listeners[0].tls,
+            Some(CompiledTlsConfig::Files { .. })
+        ));
+        assert!(cfg.listeners[0].redirect_http_to_https);
+    }
+
+    #[test]
+    fn l4_config_terminate_and_http_compiles_to_https_routes() {
+        let rt = RouteTable {
+            listeners: vec![],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![L4Route {
+                listener_id: "https-l".into(),
+                match_: L4Match::Sni(HostnameMatch::Exact("app.example.com".into())),
+                action: L4Action::TerminateAndHttp("127.0.0.1:10443".into()),
+            }],
+            tls_certs: vec![],
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert!(cfg.tcp_routes.is_empty());
+        assert!(cfg.udp_routes.is_empty());
+        assert!(cfg.tls_routes.is_empty());
+        assert_eq!(cfg.https_routes.len(), 1);
+    }
+
+    #[test]
+    fn l4_config_merges_listeners_by_bind_addr_and_protocol() {
+        let rt = RouteTable {
+            listeners: vec![
+                ListenerConfig {
+                    id: "tls-term".into(),
+                    bind_addr: "0.0.0.0:9443".into(),
+                    protocol: Protocol::Tls,
+                    tls: Some(TlsConfig::Registry {
+                        cert_id: "term-cert".into(),
+                    }),
+                    redirect_http_to_https: false,
+                },
+                ListenerConfig {
+                    id: "tls-pass".into(),
+                    bind_addr: "0.0.0.0:9443".into(),
+                    protocol: Protocol::Tls,
+                    tls: Some(TlsConfig::Registry {
+                        cert_id: "pass-cert".into(),
+                    }),
+                    redirect_http_to_https: false,
+                },
+            ],
+            hosts: vec![],
+            acme_routes: Default::default(),
+            l4_routes: vec![
+                L4Route {
+                    listener_id: "tls-term".into(),
+                    match_: L4Match::Any,
+                    action: L4Action::TlsTerminate(vec![]),
+                },
+                L4Route {
+                    listener_id: "tls-pass".into(),
+                    match_: L4Match::Any,
+                    action: L4Action::TlsPassthrough(vec![]),
+                },
+            ],
+            tls_certs: vec![],
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].bind_addr.as_ref(), "0.0.0.0:9443");
+        assert_eq!(cfg.tls_routes.len(), 2);
+        assert!(cfg
+            .tls_routes
+            .iter()
+            .all(|r| r.listener_id.as_ref() == cfg.listeners[0].id.as_ref()));
+    }
+
+    #[test]
+    fn l4_config_empty_helper() {
+        let cfg = CompiledL4Config::empty();
+        assert_eq!(cfg, CompiledL4Config::default());
     }
 
     // ── CompileError Display ────────────────────────────────────────────

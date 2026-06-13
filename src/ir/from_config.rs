@@ -341,6 +341,8 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
         listeners: vec![],
         hosts,
         acme_routes: HashMap::new(),
+        l4_routes: vec![],
+        tls_certs: vec![],
     }
 }
 

@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 mod telemetry;
 mod watcher;
@@ -7,6 +7,9 @@ mod watcher;
 use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
+use sunbeam_proxy::tls::{
+    merge_cert_store, CertSource, CertStore, DiskCertSource, GatewayCertSource, TlsRegistry,
+};
 use sunbeam_proxy::{acme, config, ir};
 
 use std::{collections::HashMap, sync::Arc};
@@ -396,6 +399,24 @@ fn run_serve(upgrade: bool) -> Result<()> {
         })
     };
 
+    // 3b. Central TLS certificate registry.  L4 listeners terminate TLS here,
+    //     and the registry is hot-swapped by RouteManager updates.
+    let tls_registry = Arc::new(TlsRegistry::new());
+    let disk_cert_source = Arc::new(DiskCertSource::new(
+        Arc::from(cfg.tls.cert_path.as_str()),
+        Arc::from(cfg.tls.key_path.as_str()),
+    ));
+    let gateway_cert_source = Arc::new(GatewayCertSource::new());
+    tls_registry.apply(merge_cert_sources(
+        disk_cert_source.snapshot(),
+        gateway_cert_source.snapshot(),
+    ));
+
+    // Pingora now runs as a plaintext HTTP proxy on a loopback address.
+    // The L4 manager owns the public HTTPS socket and forwards decrypted
+    // traffic here.
+    let pingora_http_addr = "127.0.0.1:10443";
+
     let opt = Opt {
         upgrade,
         daemon: false,
@@ -440,16 +461,72 @@ fn run_serve(upgrade: bool) -> Result<()> {
     };
 
     let (route_manager, routes_tx) = sunbeam_proxy::route_manager::RouteManager::spawn(10);
-    let startup_ir = ir::from_config::from_route_configs(&cfg.routes);
+    let mut startup_ir = ir::from_config::from_route_configs(&cfg.routes);
+    if !cfg.listen.https.is_empty() {
+        let https_listener_id: Arc<str> = Arc::from("https");
+        let tls = if std::path::Path::new(&cfg.tls.cert_path).exists() {
+            Some(ir::TlsConfig::Files {
+                cert_path: Arc::from(cfg.tls.cert_path.as_str()),
+                key_path: Arc::from(cfg.tls.key_path.as_str()),
+            })
+        } else {
+            Some(ir::TlsConfig::Registry {
+                cert_id: Arc::from("default"),
+            })
+        };
+        startup_ir.listeners.push(ir::ListenerConfig {
+            id: Arc::clone(&https_listener_id),
+            bind_addr: Arc::from(cfg.listen.https.as_str()),
+            protocol: ir::Protocol::Https,
+            tls,
+            redirect_http_to_https: false,
+        });
+        // Terminate TLS for all traffic on the public HTTPS listener and
+        // forward the decrypted plaintext HTTP to Pingora.  Pingora still
+        // performs host-level routing.
+        startup_ir.l4_routes.push(ir::L4Route {
+            listener_id: Arc::clone(&https_listener_id),
+            match_: ir::L4Match::Any,
+            action: ir::L4Action::TerminateAndHttp(Arc::from(pingora_http_addr)),
+        });
+    }
     if let Err(e) = route_manager.apply("toml", startup_ir) {
         return Err(anyhow::anyhow!("failed to compile startup routes: {e}"));
     }
+
+    // 4b. Spawn the L4 socket manager and wire it to RouteManager updates.
+    let l4_config = route_manager.l4_config();
+    let l4_router = Arc::new(sunbeam_proxy::l4::router::Router::new(
+        Arc::clone(&l4_config),
+        Arc::clone(&tls_registry),
+    ));
+    let l4_manager = sunbeam_proxy::l4::manager::spawn_with_config(
+        Arc::clone(&tls_registry),
+        l4_router,
+        Arc::clone(&l4_config),
+    );
+    l4_manager.apply(l4_config.load_full());
+
+    let l4_manager_for_updates = l4_manager.clone();
+    let l4_config_for_updates = route_manager.l4_config();
+    std::thread::spawn(move || {
+        let mut last = l4_config_for_updates.load_full();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let current = l4_config_for_updates.load_full();
+            if !Arc::ptr_eq(&last, &current) {
+                l4_manager_for_updates.apply(current.clone());
+                last = current;
+            }
+        }
+    });
     let routes = route_manager.current();
     let compiled_rewrites = route_manager.rewrites();
     let http_client = reqwest::Client::new();
 
     let proxy = SunbeamProxy {
         routes: routes.clone(),
+        l4_config: route_manager.l4_config(),
         acme_routes: acme_routes.clone(),
         ddos_detector,
         scanner_detector,
@@ -483,32 +560,10 @@ fn run_serve(upgrade: bool) -> Result<()> {
         tracing::info!(%addr, "extra HTTP listener added");
     }
 
-    // Port 443: only add the TLS listener if the cert files exist.
-    // When tls_passthrough routes are configured, Pingora binds to an internal
-    // loopback address and a dedicated SNI router takes the real HTTPS port.
-    let cert_exists = std::path::Path::new(&cfg.tls.cert_path).exists();
-    let has_passthrough = cfg.tls_passthrough.as_ref().is_some_and(|r| !r.is_empty());
-    let pingora_internal_addr = "127.0.0.1:10443";
-
-    if cert_exists {
-        let tls_bind = if has_passthrough {
-            pingora_internal_addr
-        } else {
-            &cfg.listen.https
-        };
-        let mut tls_settings = pingora_core::listeners::tls::TlsSettings::intermediate(
-            &cfg.tls.cert_path,
-            &cfg.tls.key_path,
-        )?;
-        tls_settings.enable_h2();
-        svc.add_tls_with_settings(tls_bind, None, tls_settings);
-        tracing::info!(addr = %tls_bind, passthrough = has_passthrough, "TLS listener added");
-    } else {
-        tracing::warn!(
-            cert_path = %cfg.tls.cert_path,
-            "cert not found — starting HTTP-only; ACME challenge will complete and trigger upgrade"
-        );
-    }
+    // Pingora runs plaintext HTTP on a loopback address.  The L4 manager owns
+    // the public HTTPS socket and forwards decrypted traffic here.
+    svc.add_tcp(pingora_http_addr);
+    tracing::info!(addr = %pingora_http_addr, "Pingora plaintext HTTP listener added");
 
     server.add_service(svc);
 
@@ -541,30 +596,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
         });
     }
 
-    // 5d. TLS passthrough SNI router (port 443 → peek SNI → route or forward to Pingora).
-    if let Some(passthrough_routes) = &cfg.tls_passthrough {
-        if !passthrough_routes.is_empty() && cert_exists {
-            let listen = cfg.listen.https.clone();
-            let routes = passthrough_routes.clone();
-            let internal = pingora_internal_addr.to_string();
-            tracing::info!(
-                %listen,
-                routes = routes.len(),
-                internal = %internal,
-                "TLS passthrough SNI router enabled"
-            );
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tls passthrough runtime");
-                rt.block_on(sunbeam_proxy::tls_passthrough::run(
-                    &listen, &routes, &internal,
-                ));
-            });
-        }
-    }
-
     // 6. Background K8s watchers on their own OS thread + tokio runtime.
     if k8s_available {
         let k8s_cfg = cfg.kubernetes.clone();
@@ -576,8 +607,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
             let gateway_ns = k8s_cfg.namespace.clone();
             let routes_tx = routes_tx.clone();
             let cluster_for_reconcile = cluster_handle.clone();
-            let gw_cert_path = cert_path.clone();
-            let gw_key_path = key_path.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -602,8 +631,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
                         client,
                         routes_tx,
                         cluster_for_reconcile,
-                        gw_cert_path,
-                        gw_key_path,
+                        Arc::clone(&tls_registry),
+                        Arc::clone(&gateway_cert_source),
+                        Arc::clone(&disk_cert_source),
                     ).await;
                 });
             });
@@ -644,4 +674,13 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     tracing::info!(upgrade, "sunbeam-proxy starting");
     server.run_forever();
+}
+
+/// Merge disk and Gateway API certificate snapshots into a single store.
+fn merge_cert_sources(disk: Option<Arc<CertStore>>, gateway: Option<Arc<CertStore>>) -> CertStore {
+    let mut store = disk.map(|s| (*s).clone()).unwrap_or_default();
+    if let Some(gw) = gateway {
+        merge_cert_store(&mut store, &gw);
+    }
+    store
 }

@@ -20,6 +20,10 @@ pub struct RouteTable {
     pub hosts: Vec<HostRoute>,
     /// Global ACME challenge routes (path → backend).
     pub acme_routes: HashMap<Arc<str>, Arc<str>>,
+    /// L4 routes (TCPRoute / UDPRoute / TLSRoute).
+    pub l4_routes: Vec<L4Route>,
+    /// TLS certificates referenced by listeners and L4 routes.
+    pub tls_certs: Vec<TlsCertConfig>,
 }
 
 /// A listener that the proxy binds to.
@@ -42,17 +46,28 @@ pub struct ListenerConfig {
 pub enum Protocol {
     /// Plain HTTP.
     Http,
-    /// TLS-terminated HTTPS.
+    /// TLS-terminated HTTPS (TLS terminates in the L4 manager, then HTTP to Pingora).
     Https,
+    /// Raw TCP.
+    Tcp,
+    /// Raw UDP.
+    Udp,
+    /// TLS passthrough (TLSRoute).
+    Tls,
 }
 
 /// TLS configuration for a listener.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TlsConfig {
-    /// Path to the TLS certificate file.
-    pub cert_path: Arc<str>,
-    /// Path to the TLS private key file.
-    pub key_path: Arc<str>,
+pub enum TlsConfig {
+    /// Reference to a certificate held by the central TLS registry.
+    Registry { cert_id: Arc<str> },
+    /// Static certificate files (fallback for local development).
+    Files {
+        /// Path to the TLS certificate file.
+        cert_path: Arc<str>,
+        /// Path to the TLS private key file.
+        key_path: Arc<str>,
+    },
 }
 
 /// All rules that share a hostname matcher.
@@ -71,6 +86,69 @@ pub struct HostRoute {
     pub disable_secure_redirection: bool,
     /// Ordered rules for this hostname.
     pub rules: Vec<Rule>,
+}
+
+/// L4 route (TCPRoute / UDPRoute / TLSRoute).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct L4Route {
+    /// Listener this route is attached to.
+    pub listener_id: Arc<str>,
+    /// Match condition for this route.
+    pub match_: L4Match,
+    /// Action to take when the route matches.
+    pub action: L4Action,
+}
+
+/// L4 match condition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum L4Match {
+    /// Match any connection on the listener.
+    Any,
+    /// Match by SNI hostname (TLSRoute or HTTPS termination).
+    Sni(HostnameMatch),
+}
+
+/// L4 action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum L4Action {
+    /// Relay raw TCP to weighted backends.
+    TcpRelay(Vec<WeightedBackend>),
+    /// Relay raw UDP to weighted backends.
+    UdpRelay(Vec<WeightedBackend>),
+    /// Pass through raw TLS to weighted backends.
+    TlsPassthrough(Vec<WeightedBackend>),
+    /// Terminate TLS and forward plaintext TCP to weighted backends.
+    TlsTerminate(Vec<WeightedBackend>),
+    /// Terminate TLS and forward plaintext HTTP to the given upstream address.
+    TerminateAndHttp(Arc<str>),
+}
+
+/// TLS certificate configuration referenced by id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsCertConfig {
+    /// Certificate identifier referenced by `TlsConfig::Registry`.
+    pub id: Arc<str>,
+    /// Source of the certificate material.
+    pub source: TlsCertSource,
+}
+
+/// Source of TLS certificate material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TlsCertSource {
+    /// PEM files on disk.
+    Files {
+        /// Path to the certificate file.
+        cert_path: Arc<str>,
+        /// Path to the private key file.
+        key_path: Arc<str>,
+    },
+    /// Kubernetes Secret containing `tls.crt` and `tls.key`.
+    Secret {
+        /// Namespace of the Secret.
+        namespace: Arc<str>,
+        /// Name of the Secret.
+        name: Arc<str>,
+    },
 }
 
 /// Hostname matching strategy.
@@ -415,6 +493,8 @@ mod tests {
         assert!(rt.listeners.is_empty());
         assert!(rt.hosts.is_empty());
         assert!(rt.acme_routes.is_empty());
+        assert!(rt.l4_routes.is_empty());
+        assert!(rt.tls_certs.is_empty());
     }
 
     #[test]
@@ -428,6 +508,11 @@ mod tests {
             redirect_http_to_https: false,
         });
         rt.acme_routes.insert("/challenge".into(), "backend".into());
+        rt.l4_routes.push(L4Route {
+            listener_id: "l1".into(),
+            match_: L4Match::Any,
+            action: L4Action::TcpRelay(vec![]),
+        });
         let cloned = rt.clone();
         assert_eq!(rt, cloned);
     }
@@ -440,7 +525,7 @@ mod tests {
             id: "l1".into(),
             bind_addr: "0.0.0.0:443".into(),
             protocol: Protocol::Https,
-            tls: Some(TlsConfig {
+            tls: Some(TlsConfig::Files {
                 cert_path: "/etc/cert.pem".into(),
                 key_path: "/etc/key.pem".into(),
             }),
@@ -455,6 +540,8 @@ mod tests {
     #[test]
     fn protocol_variants() {
         assert_ne!(Protocol::Http, Protocol::Https);
+        assert_ne!(Protocol::Tcp, Protocol::Udp);
+        assert_ne!(Protocol::Udp, Protocol::Tls);
         assert_eq!(Protocol::Http, Protocol::Http);
         assert_eq!(hash_one(&Protocol::Http), hash_one(&Protocol::Http));
     }
@@ -463,15 +550,85 @@ mod tests {
 
     #[test]
     fn tls_config_eq() {
-        let a = TlsConfig {
+        let a = TlsConfig::Files {
             cert_path: "/a".into(),
             key_path: "/b".into(),
         };
-        let b = TlsConfig {
+        let b = TlsConfig::Files {
             cert_path: "/a".into(),
             key_path: "/b".into(),
         };
         assert_eq!(a, b);
+
+        let registry = TlsConfig::Registry {
+            cert_id: "default".into(),
+        };
+        assert_ne!(a, registry);
+    }
+
+    // ── L4Route / L4Match / L4Action ────────────────────────────────────
+
+    #[test]
+    fn l4_route_construction() {
+        let route = L4Route {
+            listener_id: "l1".into(),
+            match_: L4Match::Sni(HostnameMatch::Exact("tcp.example.com".into())),
+            action: L4Action::TcpRelay(vec![WeightedBackend {
+                backend: "tcp://svc:8080".into(),
+                weight: 1,
+                request_filters: vec![],
+            }]),
+        };
+        assert_eq!(route.listener_id.as_ref(), "l1");
+    }
+
+    #[test]
+    fn l4_match_any_eq() {
+        assert_eq!(L4Match::Any, L4Match::Any);
+        assert_ne!(L4Match::Any, L4Match::Sni(HostnameMatch::Exact("x".into())));
+    }
+
+    #[test]
+    fn l4_action_variants() {
+        let tcp = L4Action::TcpRelay(vec![]);
+        let udp = L4Action::UdpRelay(vec![]);
+        let tls = L4Action::TlsPassthrough(vec![]);
+        let term = L4Action::TlsTerminate(vec![]);
+        let http = L4Action::TerminateAndHttp("127.0.0.1:10443".into());
+        assert_ne!(tcp, udp);
+        assert_ne!(udp, tls);
+        assert_ne!(tls, term);
+        assert_ne!(term, http);
+    }
+
+    // ── TlsCertConfig ───────────────────────────────────────────────────
+
+    #[test]
+    fn tls_cert_config_eq() {
+        let a = TlsCertConfig {
+            id: "default".into(),
+            source: TlsCertSource::Files {
+                cert_path: "/a".into(),
+                key_path: "/b".into(),
+            },
+        };
+        let b = TlsCertConfig {
+            id: "default".into(),
+            source: TlsCertSource::Files {
+                cert_path: "/a".into(),
+                key_path: "/b".into(),
+            },
+        };
+        assert_eq!(a, b);
+
+        let secret = TlsCertConfig {
+            id: "default".into(),
+            source: TlsCertSource::Secret {
+                namespace: "ns".into(),
+                name: "sec".into(),
+            },
+        };
+        assert_ne!(a, secret);
     }
 
     // ── HostRoute ───────────────────────────────────────────────────────

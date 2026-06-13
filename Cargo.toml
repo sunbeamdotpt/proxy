@@ -74,6 +74,7 @@ reqwest = { workspace = true, default-features = false, features = ["blocking", 
 # for non-proxy crates. Keep inline to avoid feature unification forcing
 # aws-lc-rs onto all workspace members.
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
 
 # K8s watcher for cert/config hot-reload
 kube        = { workspace = true, default-features = false, features = ["derive", "runtime", "rustls-tls"] }
@@ -102,6 +103,7 @@ csv         = { workspace = true }
 # burn-rs ML framework (training only, behind `training` feature)
 burn = { workspace = true, optional = true, features = ["wgpu", "autodiff", "train", "std"] }
 gateway-api = { version = "0.21", features = ["experimental"] }
+tokio-rustls = { workspace = true }
 
 [features]
 training = ["burn"]
@@ -110,7 +112,6 @@ training = ["burn"]
 criterion     = { version = "0.5", features = ["html_reports"] }
 proptest      = { workspace = true }
 tempfile      = { workspace = true }
-tokio-rustls  = { workspace = true }
 reqwest       = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 
 [[bench]]

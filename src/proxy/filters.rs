@@ -617,6 +617,9 @@ mod tests {
             routes: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledRouteTable::empty(),
             ))),
+            l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
+                crate::ir::compile::CompiledL4Config::empty(),
+            ))),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,

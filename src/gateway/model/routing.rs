@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Routing model types — the output of the Gateway API reconcile/translate
 //! pipeline, consumed by the proxy hot path.
@@ -175,5 +175,39 @@ pub struct HTTPRouteRule {
     /// Upstream backend request timeout in seconds (from `rules.timeouts.backendRequest`).
     pub timeout_secs: Option<u64>,
     /// False when one or more backendRefs for this rule could not be resolved.
+    pub programmed: bool,
+}
+
+/// TCP route state produced by the reconciler.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TCPRouteState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    pub parent_refs: Vec<crate::gateway::model::ParentRef>,
+    pub backends: Vec<WeightedBackend>,
+    pub programmed: bool,
+}
+
+/// UDP route state produced by the reconciler.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UDPRouteState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    pub parent_refs: Vec<crate::gateway::model::ParentRef>,
+    pub backends: Vec<WeightedBackend>,
+    pub programmed: bool,
+}
+
+/// TLS route state produced by the reconciler.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TLSRouteState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    pub hostnames: Vec<HostnameMatch>,
+    pub parent_refs: Vec<crate::gateway::model::ParentRef>,
+    pub backends: Vec<WeightedBackend>,
     pub programmed: bool,
 }

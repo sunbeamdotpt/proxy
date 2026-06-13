@@ -6,7 +6,8 @@ use crate::cluster::ClusterHandle;
 use crate::config::RouteConfig;
 use crate::ddos::detector::DDoSDetector;
 use crate::ddos::model::DDoSAction;
-use crate::ir::compile::{CompiledPlan, CompiledRouteTable};
+use crate::ir::compile::{CompiledL4Config, CompiledPlan, CompiledRouteTable};
+use crate::ir::{L4Action, Protocol};
 use crate::metrics;
 use crate::rate_limit::key;
 use crate::rate_limit::limiter::{RateLimitResult, RateLimiter};
@@ -24,7 +25,7 @@ use pingora_core::{upstreams::peer::HttpPeer, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use regex::Regex;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,6 +73,9 @@ pub type CompiledRewrites = Vec<(String, Arc<Vec<CompiledRewrite>>)>;
 pub struct SunbeamProxy {
     /// Compiled routes — atomically swappable at runtime via [`Self::swap_routes`].
     pub routes: Arc<ArcSwap<CompiledRouteTable>>,
+    /// Compiled L4 configuration — used to detect TLS-terminated downstream
+    /// connections that arrive as plaintext HTTP from the L4 manager.
+    pub l4_config: Arc<ArcSwap<CompiledL4Config>>,
     /// Per-challenge route table populated by the Ingress watcher.
     pub acme_routes: AcmeRoutes,
     /// Optional DDoS detector (ensemble: decision tree + MLP).
@@ -295,6 +299,45 @@ fn downstream_port(session: &Session) -> u16 {
         .and_then(|s| s.local_addr())
         .and_then(|a| a.as_inet().map(|a| a.port()))
         .unwrap_or(0)
+}
+
+/// Returns the local socket address of the downstream connection.
+fn downstream_local_addr(session: &Session) -> Option<SocketAddr> {
+    session
+        .digest()
+        .and_then(|d| d.socket_digest.as_ref())
+        .and_then(|s| s.local_addr())
+        .and_then(|a| a.as_inet().copied())
+}
+
+/// For TLS-terminated HTTPS traffic, the L4 manager forwards decrypted HTTP to
+/// an internal plaintext address. This method checks whether the request
+/// arrived on such an internal address and, if so, returns the public listener
+/// port that should be used for redirects.
+fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u16> {
+    for route in &l4_config.https_routes {
+        if let L4Action::TerminateAndHttp(target) = &route.action {
+            if let Ok(target_addr) = target.as_ref().parse::<SocketAddr>() {
+                if target_addr == local {
+                    if let Some(listener) = l4_config
+                        .listeners
+                        .iter()
+                        .find(|l| l.id.as_ref() == route.listener_id.as_ref())
+                    {
+                        if listener.protocol == Protocol::Https {
+                            return listener
+                                .bind_addr
+                                .as_ref()
+                                .rsplit(':')
+                                .next()
+                                .and_then(|p| p.parse().ok());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[async_trait]
@@ -961,6 +1004,7 @@ mod tests {
         use arc_swap::ArcSwap;
         SunbeamProxy {
             routes: Arc::new(ArcSwap::new(Arc::new(table))),
+            l4_config: Arc::new(ArcSwap::new(Arc::new(CompiledL4Config::empty()))),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -1130,6 +1174,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: std::collections::HashMap::new(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         })
         .unwrap();
         let proxy = make_proxy(table);
@@ -1186,6 +1232,8 @@ mod tests {
             listeners: vec![],
             hosts: vec![host],
             acme_routes: std::collections::HashMap::new(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         })
         .unwrap();
         let proxy = make_proxy(table);
@@ -1277,6 +1325,8 @@ mod tests {
                 },
             ],
             acme_routes: std::collections::HashMap::new(),
+            l4_routes: vec![],
+            tls_certs: vec![],
         })
         .unwrap();
         let proxy = make_proxy(table);
@@ -1574,5 +1624,61 @@ mod tests {
         headers.insert("version", http::header::HeaderValue::from_static("ONE"));
         let chosen = select_path_route(&paths, "/", "GET", &headers, None).unwrap();
         assert_eq!(chosen.backend, "matched");
+    }
+
+    #[test]
+    fn https_terminate_port_matches_internal_target_to_listener_port() {
+        let listener = crate::ir::compile::CompiledListener {
+            id: "https".into(),
+            bind_addr: "0.0.0.0:443".into(),
+            protocol: Protocol::Https,
+            tls: Some(crate::ir::compile::CompiledTlsConfig::Registry {
+                cert_id: "gateway".into(),
+            }),
+            redirect_http_to_https: false,
+        };
+        let l4_config = crate::ir::compile::CompiledL4Config {
+            listeners: vec![listener],
+            https_routes: vec![crate::ir::compile::CompiledL4Route {
+                listener_id: "https".into(),
+                match_: crate::ir::L4Match::Any,
+                action: crate::ir::L4Action::TerminateAndHttp("127.0.0.1:10443".into()),
+                priority: 0,
+            }],
+            ..crate::ir::compile::CompiledL4Config::empty()
+        };
+        assert_eq!(
+            https_terminate_port(&l4_config, "127.0.0.1:10443".parse().unwrap()),
+            Some(443)
+        );
+        assert_eq!(
+            https_terminate_port(&l4_config, "127.0.0.1:9999".parse().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn https_terminate_port_ignores_non_https_listeners() {
+        let listener = crate::ir::compile::CompiledListener {
+            id: "http".into(),
+            bind_addr: "0.0.0.0:80".into(),
+            protocol: Protocol::Http,
+            tls: None,
+            redirect_http_to_https: false,
+        };
+        let l4_config = crate::ir::compile::CompiledL4Config {
+            listeners: vec![listener],
+            https_routes: vec![crate::ir::compile::CompiledL4Route {
+                listener_id: "http".into(),
+                match_: crate::ir::L4Match::Any,
+                action: crate::ir::L4Action::TerminateAndHttp("127.0.0.1:8080".into()),
+                priority: 0,
+            }],
+            ..crate::ir::compile::CompiledL4Config::empty()
+        };
+        assert_eq!(
+            https_terminate_port(&l4_config, "127.0.0.1:8080".parse().unwrap()),
+            None
+        );
     }
 }
