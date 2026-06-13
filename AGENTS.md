@@ -49,7 +49,15 @@ See [README.md](README.md) for full feature documentation and configuration refe
 src/main.rs          — binary entry point: server bootstrap, watcher spawn, SSH spawn
 src/lib.rs           — library crate root: re-exports all modules
 src/config.rs        — TOML config deserialization (Config, RouteConfig, PathRoute, CacheConfig, etc.)
-src/proxy.rs         — ProxyHttp impl: request_filter, cache hooks, upstream_peer, body rewriting, logging
+src/proxy/           — ProxyHttp implementation split by phase:
+                       ctx.rs, mod.rs, request_filter.rs, routing.rs, filters.rs,
+                       cache_hooks.rs, logging.rs, match_.rs
+src/ir/              — Intermediate representation: canonical route model + compiler
+                       (mod.rs: RouteTable and friends; compile.rs: CompiledRouteTable/CompiledPlan)
+src/gateway/         — Kubernetes Gateway API v1.5 reconciler + translator
+                       (reconcile/, model/, translate/, api/, listeners/, dataplane/)
+src/route_manager.rs — Lifecycle manager: merges sources, drives the compiler,
+                       versions compiled tables, and atomically hot-swaps the proxy table
 src/acme.rs          — Ingress watcher: maintains AcmeRoutes (path → solver backend)
 src/watcher.rs       — Secret/ConfigMap watcher: cert write + graceful upgrade trigger
 src/cert.rs          — fetch_and_write / write_from_secret: K8s Secret → cert files on disk
@@ -81,6 +89,10 @@ tests/proptest.rs    — property-based tests for static files, rewrites, config
 6. **Cert watcher writes certs from the Apply event payload.** It does NOT re-fetch via the API. The `watcher::Event::Apply(secret)` carries the full Secret object; `cert::write_from_secret` writes directly from it, then triggers the upgrade.
 
 7. **Graceful upgrade = spawn new process with `--upgrade` + SIGQUIT self.** Pingora transfers listening socket FDs via Unix socket. The new process inherits them. Do not change this flow.
+
+8. **Single route lookup per request.** `request_filter` performs one `CompiledRouteTable::lookup()` and stores the resulting `CompiledPlan` in `ctx.plan`. Every subsequent Pingora phase (`upstream_peer`, cache hooks, request/response filters, body filter) reads `ctx.plan` and executes only its phase-specific slice. Do not re-run matching in later phases.
+
+9. **Route updates flow through `RouteManager`.** Config sources produce `ir::RouteTable` snapshots. `RouteManager` merges them by source priority, drives `CompiledRouteTable::compile`, versions the result, and atomically swaps the table consumed by the proxy. Do not bypass the manager to mutate the proxy's `ArcSwap<CompiledRouteTable>` directly.
 
 ## Build & Test Commands
 
