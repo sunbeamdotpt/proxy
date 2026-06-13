@@ -43,15 +43,9 @@ pub enum Payload {
         data: Vec<u8>,
     },
     /// Leaderheartbeat.
-    LeaderHeartbeat {
-        term: u64,
-        leader_id: [u8; 32],
-    },
+    LeaderHeartbeat { term: u64, leader_id: [u8; 32] },
     /// Licensequota.
-    LicenseQuota {
-        max_bytes: u64,
-        current_bytes: u64,
-    },
+    LicenseQuota { max_bytes: u64, current_bytes: u64 },
     /// Gateway state digest broadcast (Gateway API controller).
     GatewayStateDigest(GatewayStateDigest),
     /// Gateway resource change notification (Gateway API controller).

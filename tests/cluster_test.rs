@@ -71,7 +71,10 @@ fn two_nodes_exchange_bandwidth_reports() {
     let mut received = false;
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(500));
-        let peer_count = handle_b.cluster_bandwidth.peer_count.load(Ordering::Relaxed);
+        let peer_count = handle_b
+            .cluster_bandwidth
+            .peer_count
+            .load(Ordering::Relaxed);
         if peer_count > 0 {
             received = true;
             break;
@@ -106,7 +109,10 @@ fn two_nodes_exchange_bandwidth_reports() {
         );
         // Both nodes should still be alive with zero peers.
         assert_eq!(
-            handle_b.cluster_bandwidth.peer_count.load(Ordering::Relaxed),
+            handle_b
+                .cluster_bandwidth
+                .peer_count
+                .load(Ordering::Relaxed),
             0,
             "node B should have 0 peers in standalone mode"
         );
@@ -136,9 +142,7 @@ fn two_nodes_exchange_bandwidth_reports() {
                 .cluster_bandwidth
                 .total_bytes_in
                 .load(Ordering::Relaxed);
-            eprintln!(
-                "Bidirectional confirmed: Node A sees node B's report, total_in={total_in}"
-            );
+            eprintln!("Bidirectional confirmed: Node A sees node B's report, total_in={total_in}");
         } else {
             eprintln!(
                 "Bidirectional exchange not confirmed within timeout \
@@ -334,8 +338,14 @@ fn aggregate_bandwidth_meter_across_nodes() {
     );
 
     // The aggregate should be nonzero on both nodes.
-    assert!(rate_a.total_per_sec > 0.0, "node A aggregate rate should be > 0");
-    assert!(rate_b.total_per_sec > 0.0, "node B aggregate rate should be > 0");
+    assert!(
+        rate_a.total_per_sec > 0.0,
+        "node A aggregate rate should be > 0"
+    );
+    assert!(
+        rate_b.total_per_sec > 0.0,
+        "node B aggregate rate should be > 0"
+    );
 
     handle_a.shutdown();
     handle_b.shutdown();
@@ -376,7 +386,11 @@ fn bandwidth_limiter_rejects_when_over_cap() {
     let handle = cluster::spawn_cluster(&cfg).expect("spawn limiter node");
 
     // Default limit is 1 Gbps = 125 MB/s. Lower it to 0.001 Gbps = 125 KB/s for this test.
-    handle.limiter.set_limit(sunbeam_proxy::cluster::bandwidth::gbps_to_bytes_per_sec(0.001));
+    handle
+        .limiter
+        .set_limit(sunbeam_proxy::cluster::bandwidth::gbps_to_bytes_per_sec(
+            0.001,
+        ));
 
     // Initially, no traffic — limiter should allow.
     assert_eq!(handle.limiter.check(), BandwidthLimitResult::Allow);
@@ -397,7 +411,11 @@ fn bandwidth_limiter_rejects_when_over_cap() {
     );
 
     // Raise the limit dynamically — should immediately allow again.
-    handle.limiter.set_limit(sunbeam_proxy::cluster::bandwidth::gbps_to_bytes_per_sec(100.0));
+    handle
+        .limiter
+        .set_limit(sunbeam_proxy::cluster::bandwidth::gbps_to_bytes_per_sec(
+            100.0,
+        ));
     assert_eq!(
         handle.limiter.check(),
         BandwidthLimitResult::Allow,

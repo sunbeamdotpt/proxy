@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use futures::stream::StreamExt;
+use futures::stream::{Stream, StreamExt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use iroh_gossip::net::Gossip;
@@ -53,13 +53,18 @@ fn load_or_generate_key(path: &Path) -> Result<SecretKey> {
     }
 }
 
+/// Parse a bootstrap peer entry of the form "endpointid@host:port".
+fn parse_bootstrap_peer(entry: &str) -> Option<(iroh::PublicKey, SocketAddr)> {
+    let (id_str, addr_str) = entry.split_once('@')?;
+    let id = id_str.parse::<iroh::PublicKey>().ok()?;
+    let addr = addr_str.parse::<SocketAddr>().ok()?;
+    Some((id, addr))
+}
+
 /// Parse and pre-connect to bootstrap peers.
 /// K8s mode starts with no bootstrap peers — relies on incoming connections.
 /// Bootstrap mode parses "endpointid@host:port" and initiates connections.
-async fn resolve_bootstrap_peers(
-    cfg: &ClusterConfig,
-    endpoint: &Endpoint,
-) -> Vec<iroh::PublicKey> {
+async fn resolve_bootstrap_peers(cfg: &ClusterConfig, endpoint: &Endpoint) -> Vec<iroh::PublicKey> {
     match cfg.discovery.method.as_str() {
         "k8s" => {
             tracing::info!("k8s discovery mode: waiting for peers to connect");
@@ -67,40 +72,30 @@ async fn resolve_bootstrap_peers(
         }
         "bootstrap" => {
             let mut peers = Vec::new();
-            for entry in cfg
-                .discovery
-                .bootstrap_peers
-                .as_deref()
-                .unwrap_or_default()
-            {
-                if let Some((id_str, addr_str)) = entry.split_once('@') {
-                    match id_str.parse::<iroh::PublicKey>() {
-                        Ok(id) => {
-                            if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-                                let node_addr = iroh::EndpointAddr::from_parts(
-                                    id,
-                                    [iroh::TransportAddr::Ip(addr)],
-                                );
-                                // Pre-connect so the gossip layer can reach this peer.
-                                match endpoint.connect(node_addr, ALPN).await {
-                                    Ok(conn) => {
-                                        tracing::info!(peer = %id, addr = %addr, "connected to bootstrap peer");
-                                        // Drop the connection — gossip will reuse the underlying QUIC path.
-                                        drop(conn);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(peer = %id, addr = %addr, error = %e, "failed to connect to bootstrap peer");
-                                    }
-                                }
+            for entry in cfg.discovery.bootstrap_peers.as_deref().unwrap_or_default() {
+                match parse_bootstrap_peer(entry) {
+                    Some((id, addr)) => {
+                        let node_addr =
+                            iroh::EndpointAddr::from_parts(id, [iroh::TransportAddr::Ip(addr)]);
+                        // Pre-connect so the gossip layer can reach this peer.
+                        match endpoint.connect(node_addr, ALPN).await {
+                            Ok(conn) => {
+                                tracing::info!(peer = %id, addr = %addr, "connected to bootstrap peer");
+                                // Drop the connection — gossip will reuse the underlying QUIC path.
+                                drop(conn);
                             }
-                            peers.push(id);
+                            Err(e) => {
+                                tracing::warn!(peer = %id, addr = %addr, error = %e, "failed to connect to bootstrap peer");
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(entry, error = %e, "invalid bootstrap peer id");
-                        }
+                        peers.push(id);
                     }
-                } else {
-                    tracing::warn!(entry, "invalid bootstrap peer format (expected id@host:port)");
+                    None => {
+                        tracing::warn!(
+                            entry,
+                            "invalid bootstrap peer format (expected id@host:port)"
+                        );
+                    }
                 }
             }
             peers
@@ -150,10 +145,7 @@ pub async fn run_cluster(
         .alpns(vec![ALPN.to_vec()])
         .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.gossip_port));
     let builder = try_init!(builder.context("setting iroh bind address"));
-    let endpoint = try_init!(builder
-        .bind()
-        .await
-        .context("binding iroh endpoint"));
+    let endpoint = try_init!(builder.bind().await.context("binding iroh endpoint"));
 
     let my_id = endpoint.id();
     let my_id_bytes: [u8; 32] = *my_id.as_bytes();
@@ -300,7 +292,7 @@ pub async fn run_cluster(
     let license_recv_task = tokio::spawn(handle_stub_events(license_receiver, "license"));
 
     // 11a. Gateway state broadcast loop (driven by leader.rs digest publisher).
-    let my_id_gs = my_id_bytes;
+    let _my_id_gs = my_id_bytes;
     let gs_broadcast_task = tokio::spawn(async move {
         while let Some(data) = gateway_state_rx.recv().await {
             if let Err(e) = gs_sender.broadcast(data.into()).await {
@@ -398,91 +390,132 @@ pub async fn run_cluster(
     }
 }
 
-async fn handle_bandwidth_events(
-    mut receiver: iroh_gossip::api::GossipReceiver,
+/// Apply a decoded cluster message to bandwidth state if it is a bandwidth report.
+/// Returns true when the payload was a [`Payload::BandwidthReport`].
+fn apply_bandwidth_message(
+    msg: &ClusterMessage,
+    cluster_bw: &ClusterBandwidthState,
+    meter: &BandwidthMeter,
+) -> bool {
+    if let Payload::BandwidthReport {
+        cumulative_in,
+        cumulative_out,
+        bytes_in,
+        bytes_out,
+        ..
+    } = &msg.payload
+    {
+        cluster_bw.update_peer(msg.sender, *cumulative_in, *cumulative_out);
+        // Feed remote peer's delta into the sliding window meter.
+        meter.record_sample(*bytes_in, *bytes_out);
+        true
+    } else {
+        false
+    }
+}
+
+async fn handle_bandwidth_events<S, E>(
+    mut receiver: S,
     cluster_bw: Arc<ClusterBandwidthState>,
     meter: Arc<BandwidthMeter>,
-) {
+) where
+    S: Stream<Item = Result<Event, E>> + Unpin,
+{
     while let Some(Ok(event)) = receiver.next().await {
         if let Event::Received(message) = event {
             match ClusterMessage::decode(&message.content) {
-                Ok(ClusterMessage {
-                    sender,
-                    payload:
-                        Payload::BandwidthReport {
-                            cumulative_in,
-                            cumulative_out,
+                Ok(msg) => {
+                    if apply_bandwidth_message(&msg, &cluster_bw, &meter) {
+                        metrics::CLUSTER_GOSSIP_MESSAGES
+                            .with_label_values(&["bandwidth"])
+                            .inc();
+                        if let Payload::BandwidthReport {
                             bytes_in,
                             bytes_out,
                             request_count,
                             ..
-                        },
-                    ..
-                }) => {
-                    cluster_bw.update_peer(sender, cumulative_in, cumulative_out);
-                    // Feed remote peer's delta into the sliding window meter.
-                    meter.record_sample(bytes_in, bytes_out);
-                    metrics::CLUSTER_GOSSIP_MESSAGES
-                        .with_label_values(&["bandwidth"])
-                        .inc();
-                    tracing::debug!(
-                        sender = hex::encode(sender),
-                        bytes_in,
-                        bytes_out,
-                        request_count,
-                        "received bandwidth report"
-                    );
+                        } = &msg.payload
+                        {
+                            tracing::debug!(
+                                sender = hex::encode(msg.sender),
+                                bytes_in,
+                                bytes_out,
+                                request_count,
+                                "received bandwidth report"
+                            );
+                        }
+                    } else {
+                        tracing::debug!("unexpected payload on bandwidth topic");
+                    }
                 }
-                Ok(_) => tracing::debug!("unexpected payload on bandwidth topic"),
                 Err(e) => tracing::debug!(error = %e, "failed to decode bandwidth message"),
             }
         }
     }
 }
 
-async fn handle_model_events(mut receiver: iroh_gossip::api::GossipReceiver) {
+/// Apply a decoded model message (logging/metrics only — model distribution is stubbed).
+fn apply_model_message(msg: &ClusterMessage) {
+    match &msg.payload {
+        Payload::ModelAnnounce {
+            model_type,
+            hash,
+            total_size,
+            ..
+        } => {
+            tracing::info!(
+                model_type,
+                hash = hex::encode(hash),
+                total_size,
+                "received model announce (stub — ignoring)"
+            );
+            metrics::CLUSTER_MODEL_UPDATES
+                .with_label_values(&[model_type, "ignored"])
+                .inc();
+        }
+        Payload::ModelChunk {
+            hash, chunk_index, ..
+        } => {
+            tracing::debug!(
+                hash = hex::encode(hash),
+                chunk_index,
+                "received model chunk (stub — ignoring)"
+            );
+        }
+        _ => {}
+    }
+}
+
+async fn handle_model_events<S, E>(mut receiver: S)
+where
+    S: Stream<Item = Result<Event, E>> + Unpin,
+{
     while let Some(Ok(event)) = receiver.next().await {
         if let Event::Received(message) = event {
             match ClusterMessage::decode(&message.content) {
-                Ok(ClusterMessage {
-                    payload: Payload::ModelAnnounce { model_type, hash, total_size, .. },
-                    ..
-                }) => {
-                    tracing::info!(
-                        model_type,
-                        hash = hex::encode(hash),
-                        total_size,
-                        "received model announce (stub — ignoring)"
-                    );
-                    metrics::CLUSTER_MODEL_UPDATES
-                        .with_label_values(&[&model_type, "ignored"])
-                        .inc();
-                }
-                Ok(ClusterMessage {
-                    payload: Payload::ModelChunk { hash, chunk_index, .. },
-                    ..
-                }) => {
-                    tracing::debug!(
-                        hash = hex::encode(hash),
-                        chunk_index,
-                        "received model chunk (stub — ignoring)"
-                    );
-                }
-                Ok(_) => {}
+                Ok(msg) => apply_model_message(&msg),
                 Err(e) => tracing::debug!(error = %e, "failed to decode model message"),
             }
         }
     }
 }
 
-async fn handle_stub_events(mut receiver: iroh_gossip::api::GossipReceiver, channel: &str) {
+/// Apply a decoded stub message for the given gossip channel.
+fn apply_stub_message(msg: &ClusterMessage, channel: &str) {
+    tracing::debug!(?msg, channel, "received stub message");
+    metrics::CLUSTER_GOSSIP_MESSAGES
+        .with_label_values(&[channel])
+        .inc();
+}
+
+async fn handle_stub_events<S, E>(mut receiver: S, channel: &str)
+where
+    S: Stream<Item = Result<Event, E>> + Unpin,
+{
     while let Some(Ok(event)) = receiver.next().await {
         if let Event::Received(message) = event {
             if let Ok(msg) = ClusterMessage::decode(&message.content) {
-                tracing::debug!(?msg, channel, "received stub message");
-                metrics::CLUSTER_GOSSIP_MESSAGES
-                    .with_label_values(&[channel])
-                    .inc();
+                apply_stub_message(&msg, channel);
             }
         }
     }
@@ -491,6 +524,9 @@ async fn handle_stub_events(mut receiver: iroh_gossip::api::GossipReceiver, chan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn topic_derivation_deterministic() {
@@ -511,5 +547,273 @@ mod tests {
         let t1 = derive_topic("550e8400-e29b-41d4-a716-446655440000", "bandwidth");
         let t2 = derive_topic("660e8400-e29b-41d4-a716-446655440001", "bandwidth");
         assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn load_or_generate_key_loads_existing_key() {
+        let key = SecretKey::generate(&mut rand::rng());
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&key.to_bytes()).unwrap();
+        let loaded = load_or_generate_key(tmp.path()).unwrap();
+        assert_eq!(loaded.to_bytes(), key.to_bytes());
+    }
+
+    #[test]
+    fn load_or_generate_key_generates_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+        assert!(!path.exists());
+        let key = load_or_generate_key(&path).unwrap();
+        assert!(path.exists());
+        let loaded = load_or_generate_key(&path).unwrap();
+        assert_eq!(loaded.to_bytes(), key.to_bytes());
+    }
+
+    #[test]
+    fn load_or_generate_key_rejects_bad_length() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"short").unwrap();
+        assert!(load_or_generate_key(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn parse_bootstrap_peer_valid() {
+        let secret = SecretKey::generate(&mut rand::rng());
+        let id = secret.public();
+        let entry = format!("{}@127.0.0.1:11204", id);
+        let (parsed_id, addr) = parse_bootstrap_peer(&entry).unwrap();
+        assert_eq!(parsed_id, id);
+        assert_eq!(
+            addr,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 11204))
+        );
+    }
+
+    #[test]
+    fn parse_bootstrap_peer_missing_at_sign() {
+        assert!(parse_bootstrap_peer("127.0.0.1:11204").is_none());
+    }
+
+    #[test]
+    fn parse_bootstrap_peer_invalid_id() {
+        assert!(parse_bootstrap_peer("not-an-id@127.0.0.1:11204").is_none());
+    }
+
+    #[test]
+    fn parse_bootstrap_peer_invalid_addr() {
+        let secret = SecretKey::generate(&mut rand::rng());
+        let id = secret.public();
+        assert!(parse_bootstrap_peer(&format!("{}@bad-addr", id)).is_none());
+    }
+
+    #[test]
+    fn apply_bandwidth_message_updates_state() {
+        let cluster_bw = Arc::new(ClusterBandwidthState::new(30));
+        let meter = Arc::new(BandwidthMeter::new(30));
+        let msg = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::BandwidthReport {
+                timestamp: 1,
+                bytes_in: 100,
+                bytes_out: 200,
+                request_count: 5,
+                cumulative_in: 1000,
+                cumulative_out: 2000,
+            },
+        };
+        assert!(apply_bandwidth_message(&msg, &cluster_bw, &meter));
+        assert_eq!(cluster_bw.total_bytes_in.load(Ordering::Relaxed), 1000);
+        assert_eq!(cluster_bw.total_bytes_out.load(Ordering::Relaxed), 2000);
+        assert_eq!(cluster_bw.peer_count.load(Ordering::Relaxed), 1);
+        let rate = meter.aggregate_rate();
+        assert_eq!(rate.sample_count, 1);
+    }
+
+    #[test]
+    fn apply_bandwidth_message_ignores_other_payloads() {
+        let cluster_bw = Arc::new(ClusterBandwidthState::new(30));
+        let meter = Arc::new(BandwidthMeter::new(30));
+        let msg = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::LeaderHeartbeat {
+                term: 1,
+                leader_id: [2u8; 32],
+            },
+        };
+        assert!(!apply_bandwidth_message(&msg, &cluster_bw, &meter));
+        assert_eq!(cluster_bw.peer_count.load(Ordering::Relaxed), 0);
+        assert_eq!(meter.aggregate_rate().sample_count, 0);
+    }
+
+    #[test]
+    fn apply_model_message_handles_announce_and_chunk() {
+        let announce = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::ModelAnnounce {
+                model_type: "scanner".to_string(),
+                hash: [0xAA; 32],
+                total_size: 1_000_000,
+                chunk_count: 16,
+            },
+        };
+        // Should not panic and should exercise metric/logging paths.
+        apply_model_message(&announce);
+
+        let chunk = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::ModelChunk {
+                hash: [0xBB; 32],
+                chunk_index: 7,
+                data: vec![1, 2, 3],
+            },
+        };
+        apply_model_message(&chunk);
+
+        let ignored = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::LeaderHeartbeat {
+                term: 1,
+                leader_id: [2u8; 32],
+            },
+        };
+        apply_model_message(&ignored);
+    }
+
+    #[test]
+    fn apply_stub_message_does_not_panic() {
+        let msg = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::LeaderHeartbeat {
+                term: 1,
+                leader_id: [2u8; 32],
+            },
+        };
+        apply_stub_message(&msg, "leader");
+    }
+
+    #[test]
+    fn load_or_generate_key_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested").join("deep").join("node.key");
+        assert!(!nested.parent().unwrap().exists());
+        let key = load_or_generate_key(&nested).unwrap();
+        assert!(nested.exists());
+        let loaded = load_or_generate_key(&nested).unwrap();
+        assert_eq!(loaded.to_bytes(), key.to_bytes());
+    }
+
+    #[tokio::test]
+    async fn handle_bandwidth_events_processes_reports() {
+        use bytes::Bytes;
+        use futures::stream;
+        use iroh_gossip::api::{Event, Message};
+        use iroh_gossip::proto::DeliveryScope;
+
+        let report = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::BandwidthReport {
+                timestamp: 1,
+                bytes_in: 100,
+                bytes_out: 200,
+                request_count: 5,
+                cumulative_in: 1000,
+                cumulative_out: 2000,
+            },
+        };
+        let event = Event::Received(Message {
+            content: Bytes::from(report.encode().unwrap()),
+            scope: DeliveryScope::Neighbors,
+            delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+        });
+
+        let cluster_bw = Arc::new(ClusterBandwidthState::new(30));
+        let meter = Arc::new(BandwidthMeter::new(30));
+        handle_bandwidth_events(
+            stream::iter(vec![Ok::<Event, std::convert::Infallible>(event)]),
+            cluster_bw.clone(),
+            meter,
+        )
+        .await;
+
+        assert_eq!(cluster_bw.total_bytes_in.load(Ordering::Relaxed), 1000);
+        assert_eq!(cluster_bw.peer_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_model_events_processes_announce_and_chunk() {
+        use bytes::Bytes;
+        use futures::stream;
+        use iroh_gossip::api::{Event, Message};
+        use iroh_gossip::proto::DeliveryScope;
+
+        let announce = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::ModelAnnounce {
+                model_type: "scanner".to_string(),
+                hash: [0xAA; 32],
+                total_size: 1_000_000,
+                chunk_count: 16,
+            },
+        };
+        let chunk = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::ModelChunk {
+                hash: [0xBB; 32],
+                chunk_index: 3,
+                data: vec![1, 2, 3],
+            },
+        };
+
+        let events = stream::iter(vec![
+            Ok::<Event, std::convert::Infallible>(Event::Received(Message {
+                content: Bytes::from(announce.encode().unwrap()),
+                scope: DeliveryScope::Neighbors,
+                delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+            })),
+            Ok::<Event, std::convert::Infallible>(Event::Received(Message {
+                content: Bytes::from(chunk.encode().unwrap()),
+                scope: DeliveryScope::Neighbors,
+                delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+            })),
+        ]);
+
+        handle_model_events(events).await;
+    }
+
+    #[tokio::test]
+    async fn handle_stub_events_processes_messages() {
+        use bytes::Bytes;
+        use futures::stream;
+        use iroh_gossip::api::{Event, Message};
+        use iroh_gossip::proto::DeliveryScope;
+
+        let msg = ClusterMessage {
+            version: 1,
+            sender: [1u8; 32],
+            payload: Payload::LeaderHeartbeat {
+                term: 1,
+                leader_id: [2u8; 32],
+            },
+        };
+        let event = Event::Received(Message {
+            content: Bytes::from(msg.encode().unwrap()),
+            scope: DeliveryScope::Neighbors,
+            delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+        });
+
+        handle_stub_events(
+            stream::iter(vec![Ok::<Event, std::convert::Infallible>(event)]),
+            "leader",
+        )
+        .await;
     }
 }

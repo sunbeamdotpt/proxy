@@ -22,6 +22,12 @@ pub struct BandwidthTracker {
     cumulative_out: AtomicU64,
 }
 
+impl Default for BandwidthTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BandwidthTracker {
     pub fn new() -> Self {
         Self {
@@ -283,7 +289,8 @@ impl BandwidthLimiter {
 
     /// Update the bandwidth cap at runtime (e.g. from a license update).
     pub fn set_limit(&self, bytes_per_sec: u64) {
-        self.limit_bytes_per_sec.store(bytes_per_sec, Ordering::Relaxed);
+        self.limit_bytes_per_sec
+            .store(bytes_per_sec, Ordering::Relaxed);
     }
 
     /// Current limit in bytes/sec (0 = unlimited).
@@ -353,9 +360,7 @@ mod tests {
             "expected ~{expected_out}, got {}",
             rate.bytes_out_per_sec
         );
-        assert!(
-            (rate.total_per_sec - (expected_in + expected_out)).abs() < 1.0,
-        );
+        assert!((rate.total_per_sec - (expected_in + expected_out)).abs() < 1.0,);
     }
 
     #[test]
@@ -420,7 +425,7 @@ mod tests {
     #[test]
     fn limiter_rejects_over_cap() {
         let meter = std::sync::Arc::new(BandwidthMeter::new(1)); // 1s window
-        // 200 MB total in 1s window = 200 MB/s > 125 MB/s (1 Gbps)
+                                                                 // 200 MB total in 1s window = 200 MB/s > 125 MB/s (1 Gbps)
         meter.record_sample(100_000_000, 100_000_000);
         let limiter = BandwidthLimiter::new(meter, gbps_to_bytes_per_sec(1.0));
         assert_eq!(limiter.check(), BandwidthLimitResult::Reject);

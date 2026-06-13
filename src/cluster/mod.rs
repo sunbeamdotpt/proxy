@@ -120,3 +120,134 @@ pub fn spawn_cluster(cfg: &ClusterConfig) -> Result<ClusterHandle> {
         shutdown_tx,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BandwidthClusterConfig, DiscoveryConfig};
+
+    fn test_cfg(key_path: &std::path::Path) -> ClusterConfig {
+        ClusterConfig {
+            enabled: true,
+            tenant: "test-tenant".to_string(),
+            gossip_port: 0,
+            key_path: Some(key_path.to_str().unwrap().to_string()),
+            discovery: DiscoveryConfig {
+                method: "k8s".to_string(),
+                headless_service: None,
+                bootstrap_peers: None,
+            },
+            bandwidth: Some(BandwidthClusterConfig {
+                broadcast_interval_secs: 1,
+                stale_peer_timeout_secs: 1,
+                meter_window_secs: 1,
+            }),
+            models: None,
+        }
+    }
+
+    fn dummy_handle() -> (ClusterHandle, watch::Receiver<bool>) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let handle = ClusterHandle {
+            bandwidth: Arc::new(BandwidthTracker::new()),
+            cluster_bandwidth: Arc::new(ClusterBandwidthState::new(30)),
+            meter: Arc::new(BandwidthMeter::new(30)),
+            limiter: Arc::new(BandwidthLimiter::new(
+                Arc::new(BandwidthMeter::new(30)),
+                gbps_to_bytes_per_sec(1.0),
+            )),
+            endpoint_id: secret.public(),
+            gateway_state_tx: None,
+            gateway_notify_tx: None,
+            shutdown_tx,
+        };
+        (handle, shutdown_rx)
+    }
+
+    #[test]
+    fn shutdown_sends_signal() {
+        let (handle, rx) = dummy_handle();
+        assert_eq!(*rx.borrow(), false);
+        handle.shutdown();
+        assert_eq!(*rx.borrow(), true);
+    }
+
+    #[test]
+    fn drop_sends_shutdown_signal() {
+        let (handle, rx) = dummy_handle();
+        assert_eq!(*rx.borrow(), false);
+        drop(handle);
+        assert_eq!(*rx.borrow(), true);
+    }
+
+    #[test]
+    fn handle_fields_are_populated() {
+        let (handle, _rx) = dummy_handle();
+        assert_eq!(handle.bandwidth.snapshot_and_reset().request_count, 0);
+        assert_eq!(
+            handle
+                .cluster_bandwidth
+                .peer_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(handle.limiter.limit(), gbps_to_bytes_per_sec(1.0));
+    }
+
+    #[test]
+    fn spawn_cluster_initializes_and_shuts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("node.key");
+        let handle = spawn_cluster(&test_cfg(&key_path)).unwrap();
+
+        assert!(key_path.exists());
+        assert_eq!(handle.limiter.limit(), gbps_to_bytes_per_sec(1.0));
+        assert!(handle.gateway_state_tx.is_some());
+        assert!(handle.gateway_notify_tx.is_some());
+        assert_eq!(handle.bandwidth.snapshot_and_reset().request_count, 0);
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn spawn_cluster_with_invalid_bootstrap_peers_initializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("node.key");
+        let mut cfg = test_cfg(&key_path);
+        cfg.discovery.method = "bootstrap".to_string();
+        cfg.discovery.bootstrap_peers =
+            Some(vec!["not-an-id".to_string(), "missing-at-sign".to_string()]);
+
+        let handle = spawn_cluster(&cfg).unwrap();
+        assert!(handle.gateway_state_tx.is_some());
+        handle.shutdown();
+    }
+
+    #[test]
+    fn spawn_cluster_with_bootstrap_connection_failure_initializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("node.key");
+        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let mut cfg = test_cfg(&key_path);
+        cfg.discovery.method = "bootstrap".to_string();
+        // Valid format, but 127.0.0.1:1 has no listener so the pre-connect will fail.
+        cfg.discovery.bootstrap_peers = Some(vec![format!("{}@127.0.0.1:1", secret.public())]);
+
+        let handle = spawn_cluster(&cfg).unwrap();
+        assert!(handle.gateway_state_tx.is_some());
+        handle.shutdown();
+    }
+
+    #[test]
+    fn spawn_cluster_with_unknown_discovery_initializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("node.key");
+        let mut cfg = test_cfg(&key_path);
+        cfg.discovery.method = "unknown".to_string();
+
+        let handle = spawn_cluster(&cfg).unwrap();
+        assert!(handle.gateway_state_tx.is_some());
+        handle.shutdown();
+    }
+}
