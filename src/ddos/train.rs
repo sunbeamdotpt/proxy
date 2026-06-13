@@ -1,8 +1,8 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ddos::audit_log::AuditLog;
 use crate::ddos::audit_log;
+use crate::ddos::audit_log::AuditLog;
 use crate::ddos::features::{method_to_u8, FeatureVector, LogIpState, NormParams, NUM_FEATURES};
 use anyhow::{bail, Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -61,13 +61,27 @@ pub struct HeuristicThresholds {
     pub min_events: usize,
 }
 
-fn default_rate_threshold() -> f64 { 10.0 }
-fn default_repetition_threshold() -> f64 { 0.9 }
-fn default_error_threshold() -> f64 { 0.7 }
-fn default_suspicious_path_threshold() -> f64 { 0.3 }
-fn default_no_cookies_threshold() -> f64 { 0.05 }
-fn default_no_cookies_path_count() -> f64 { 20.0 }
-fn default_min_events() -> usize { 10 }
+fn default_rate_threshold() -> f64 {
+    10.0
+}
+fn default_repetition_threshold() -> f64 {
+    0.9
+}
+fn default_error_threshold() -> f64 {
+    0.7
+}
+fn default_suspicious_path_threshold() -> f64 {
+    0.3
+}
+fn default_no_cookies_threshold() -> f64 {
+    0.05
+}
+fn default_no_cookies_path_count() -> f64 {
+    20.0
+}
+fn default_min_events() -> usize {
+    10
+}
 
 impl HeuristicThresholds {
     pub fn new(
@@ -151,7 +165,6 @@ fn parse_timestamp(ts: &str) -> f64 {
     day * 86400.0 + hour * 3600.0 + min * 60.0 + sec
 }
 
-
 /// Core training pipeline: parse logs, extract features, label IPs, build KNN model.
 pub fn train_model(args: &TrainArgs) -> Result<DdosTrainResult> {
     let ip_states = parse_logs(&args.input)?;
@@ -231,7 +244,11 @@ pub fn train_model_from_states(
                 && avg[1] > thresholds.no_cookies_path_count);
         ip_labels.insert(
             ip.clone(),
-            if is_attack { TrafficLabel::Attack } else { TrafficLabel::Normal },
+            if is_attack {
+                TrafficLabel::Attack
+            } else {
+                TrafficLabel::Normal
+            },
         );
     }
 
@@ -251,11 +268,17 @@ pub fn train_model_from_states(
         bail!("No labeled data points found with these heuristic thresholds.");
     }
 
-    let attack_count = all_labels.iter().filter(|&&l| l == TrafficLabel::Attack).count();
+    let attack_count = all_labels
+        .iter()
+        .filter(|&&l| l == TrafficLabel::Attack)
+        .count();
     let normal_count = all_labels.len() - attack_count;
 
     let norm_params = NormParams::from_data(&all_points);
-    let normalized: Vec<FeatureVector> = all_points.iter().map(|v| norm_params.normalize(v)).collect();
+    let normalized: Vec<FeatureVector> = all_points
+        .iter()
+        .map(|v| norm_params.normalize(v))
+        .collect();
 
     let model = SerializedModel {
         points: normalized,
@@ -265,14 +288,17 @@ pub fn train_model_from_states(
         threshold,
     };
 
-    Ok(DdosTrainResult { model, attack_count, normal_count })
+    Ok(DdosTrainResult {
+        model,
+        attack_count,
+        normal_count,
+    })
 }
 
 /// Parse audit logs into per-IP state maps.
 pub fn parse_logs(input: &str) -> Result<FxHashMap<String, LogIpState>> {
     let mut ip_states: FxHashMap<String, LogIpState> = FxHashMap::default();
-    let file = std::fs::File::open(input)
-        .with_context(|| format!("opening {}", input))?;
+    let file = std::fs::File::open(input).with_context(|| format!("opening {}", input))?;
     let reader = std::io::BufReader::new(file);
 
     for line in reader.lines() {
@@ -293,20 +319,28 @@ pub fn parse_logs(input: &str) -> Result<FxHashMap<String, LogIpState>> {
         state.methods.push(method_to_u8(&entry.fields.method));
         state.path_hashes.push(fx_hash(&entry.fields.path));
         state.host_hashes.push(fx_hash(&entry.fields.host));
-        state.user_agent_hashes.push(fx_hash(&entry.fields.user_agent));
+        state
+            .user_agent_hashes
+            .push(fx_hash(&entry.fields.user_agent));
         state.statuses.push(entry.fields.status);
-        state.durations.push(entry.fields.duration_ms.min(u32::MAX as u64) as u32);
-        state.content_lengths.push(entry.fields.content_length.min(u32::MAX as u64) as u32);
+        state
+            .durations
+            .push(entry.fields.duration_ms.min(u32::MAX as u64) as u32);
+        state
+            .content_lengths
+            .push(entry.fields.content_length.min(u32::MAX as u64) as u32);
         state.has_cookies.push(entry.fields.has_cookies);
-        state.has_referer.push(
-            !entry.fields.referer.is_empty() && entry.fields.referer != "-",
-        );
-        state.has_accept_language.push(
-            !entry.fields.accept_language.is_empty() && entry.fields.accept_language != "-",
-        );
-        state.suspicious_paths.push(
-            crate::ddos::features::is_suspicious_path(&entry.fields.path),
-        );
+        state
+            .has_referer
+            .push(!entry.fields.referer.is_empty() && entry.fields.referer != "-");
+        state
+            .has_accept_language
+            .push(!entry.fields.accept_language.is_empty() && entry.fields.accept_language != "-");
+        state
+            .suspicious_paths
+            .push(crate::ddos::features::is_suspicious_path(
+                &entry.fields.path,
+            ));
     }
 
     Ok(ip_states)
@@ -371,8 +405,8 @@ fn label_ips(
             }
         }
     } else if let Some(heuristics_file) = &args.heuristics {
-        let heuristics_str = std::fs::read_to_string(heuristics_file)
-            .context("reading heuristics file")?;
+        let heuristics_str =
+            std::fs::read_to_string(heuristics_file).context("reading heuristics file")?;
         let thresholds: HeuristicThresholds =
             toml::from_str(&heuristics_str).context("parsing heuristics TOML")?;
 
@@ -386,7 +420,11 @@ fn label_ips(
                     && avg[1] > thresholds.no_cookies_path_count);
             ip_labels.insert(
                 ip.clone(),
-                if is_attack { TrafficLabel::Attack } else { TrafficLabel::Normal },
+                if is_attack {
+                    TrafficLabel::Attack
+                } else {
+                    TrafficLabel::Normal
+                },
             );
         }
     } else {
@@ -435,4 +473,287 @@ fn average_features(features: &[FeatureVector]) -> FeatureVector {
         *v /= n;
     }
     avg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ddos::features::LogIpState;
+    use std::io::Write;
+
+    fn make_audit_log_line(ts: &str, client_ip: &str, path: &str, status: u16) -> String {
+        format!(
+            r#"{{"timestamp":"{}","level":"INFO","fields":{{"message":"request","target":"audit","request_id":"r1","method":"GET","host":"example.com","path":"{}","query":"","client_ip":"{}","status":{},"duration_ms":1,"content_length":0,"response_bytes":0,"user_agent":"ua","referer":"-","accept_language":"-","accept":"-","accept_encoding":"-","has_cookies":false,"connection":"-","cf_country":"-","backend":"","error":"","http_version":"1.1","header_count":10}}}}"#,
+            ts, path, client_ip, status
+        )
+    }
+
+    #[test]
+    fn heuristic_threshold_defaults() {
+        let raw = r#""#;
+        let h: HeuristicThresholds = toml::from_str(raw).unwrap();
+        assert_eq!(h.request_rate, 10.0);
+        assert_eq!(h.path_repetition, 0.9);
+        assert_eq!(h.error_rate, 0.7);
+        assert_eq!(h.suspicious_path_ratio, 0.3);
+        assert_eq!(h.no_cookies_threshold, 0.05);
+        assert_eq!(h.no_cookies_path_count, 20.0);
+        assert_eq!(h.min_events, 10);
+    }
+
+    #[test]
+    fn heuristic_thresholds_new() {
+        let h = HeuristicThresholds::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7);
+        assert_eq!(h.request_rate, 1.0);
+        assert_eq!(h.path_repetition, 2.0);
+        assert_eq!(h.error_rate, 3.0);
+        assert_eq!(h.suspicious_path_ratio, 4.0);
+        assert_eq!(h.no_cookies_threshold, 5.0);
+        assert_eq!(h.no_cookies_path_count, 6.0);
+        assert_eq!(h.min_events, 7);
+    }
+
+    #[test]
+    fn fx_hash_deterministic() {
+        assert_eq!(fx_hash("foo"), fx_hash("foo"));
+        assert_ne!(fx_hash("foo"), fx_hash("bar"));
+    }
+
+    #[test]
+    fn parse_timestamp_valid() {
+        // parse_timestamp extracts day-of-month + time-of-day as relative seconds.
+        let ts = parse_timestamp("2026-03-07T17:41:40.705326Z");
+        let expected = 7.0 * 86400.0 + 17.0 * 3600.0 + 41.0 * 60.0 + 40.0;
+        assert!((ts - expected).abs() < 1.0);
+    }
+
+    #[test]
+    fn parse_timestamp_invalid() {
+        assert_eq!(parse_timestamp("not-a-timestamp"), 0.0);
+        assert_eq!(parse_timestamp("2026-03-07"), 0.0);
+        assert_eq!(parse_timestamp("2026-03-07T17:41"), 0.0);
+    }
+
+    #[test]
+    fn parse_logs_skips_invalid_and_empty_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "not json").unwrap();
+        writeln!(file, "{{}}") // valid JSON but not an audit log
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            make_audit_log_line("2026-03-07T17:41:40.705326Z", "10.0.0.1:1234", "/", 200)
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            make_audit_log_line("2026-03-07T17:41:41.705326Z", "10.0.0.1:1234", "/api", 200)
+        )
+        .unwrap();
+
+        let states = parse_logs(path.to_str().unwrap()).unwrap();
+        assert_eq!(states.len(), 1);
+        let state = states.get("10.0.0.1").unwrap();
+        assert_eq!(state.timestamps.len(), 2);
+        assert_eq!(state.path_hashes.len(), 2);
+        assert_eq!(state.methods.len(), 2);
+    }
+
+    #[test]
+    fn extract_ip_features_skips_ips_below_min_events() {
+        let mut state = LogIpState::new();
+        state.timestamps.push(1.0);
+        state.methods.push(0);
+        state.path_hashes.push(1);
+        state.host_hashes.push(2);
+        state.user_agent_hashes.push(3);
+        state.statuses.push(200);
+        state.durations.push(10);
+        state.content_lengths.push(0);
+        state.has_cookies.push(false);
+        state.has_referer.push(false);
+        state.has_accept_language.push(false);
+        state.suspicious_paths.push(false);
+
+        let mut states = FxHashMap::default();
+        states.insert("10.0.0.1".to_string(), state);
+
+        let features = extract_ip_features(&states, 2, 60.0);
+        assert!(features.is_empty());
+    }
+
+    #[test]
+    fn extract_ip_features_creates_windows() {
+        let mut state = LogIpState::new();
+        for i in 0..5 {
+            state.timestamps.push(i as f64 * 10.0);
+            state.methods.push(0);
+            state.path_hashes.push(i as u64);
+            state.host_hashes.push(1);
+            state.user_agent_hashes.push(2);
+            state.statuses.push(200);
+            state.durations.push(1);
+            state.content_lengths.push(0);
+            state.has_cookies.push(false);
+            state.has_referer.push(false);
+            state.has_accept_language.push(false);
+            state.suspicious_paths.push(false);
+        }
+
+        let mut states = FxHashMap::default();
+        states.insert("10.0.0.1".to_string(), state);
+
+        let features = extract_ip_features(&states, 2, 25.0);
+        let vec = features.get("10.0.0.1").unwrap();
+        assert!(!vec.is_empty());
+        // First window spans timestamps 0..30 (>= 25s), so it includes events 0..3 (4 events).
+        assert_eq!(vec[0][1], 4.0); // 4 unique paths
+    }
+
+    #[test]
+    fn average_features_computes_mean() {
+        let features = vec![
+            [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+            ],
+            [
+                3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+            ],
+        ];
+        let avg = average_features(&features);
+        assert_eq!(avg[0], 2.0);
+        assert_eq!(avg[1], 3.0);
+        assert_eq!(avg[13], 15.0);
+    }
+
+    #[test]
+    fn train_model_from_states_labels_attack() {
+        let mut state = LogIpState::new();
+        // Repeated path and no cookies => path_repetition = 1.0, which exceeds the
+        // heuristic threshold of 0.9, so this IP is labeled attack.
+        for i in 0..15 {
+            state.timestamps.push(i as f64 * 0.01);
+            state.methods.push(0);
+            state.path_hashes.push(42); // all same path
+            state.host_hashes.push(1);
+            state.user_agent_hashes.push(2);
+            state.statuses.push(200);
+            state.durations.push(1);
+            state.content_lengths.push(0);
+            state.has_cookies.push(false);
+            state.has_referer.push(false);
+            state.has_accept_language.push(false);
+            state.suspicious_paths.push(false);
+        }
+
+        let mut states = FxHashMap::default();
+        states.insert("10.0.0.1".to_string(), state);
+
+        let thresholds = HeuristicThresholds::new(10.0, 0.9, 0.7, 0.3, 0.05, 20.0, 2);
+        let result = train_model_from_states(&states, &thresholds, 3, 0.6, 60, 2).unwrap();
+        assert!(result.attack_count > 0);
+        assert_eq!(
+            result.model.points.len(),
+            result.attack_count + result.normal_count
+        );
+        assert_eq!(result.model.k, 3);
+        assert_eq!(result.model.threshold, 0.6);
+    }
+
+    #[test]
+    fn train_model_with_ip_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("audit.log");
+        let attack_path = dir.path().join("attack.txt");
+        let normal_path = dir.path().join("normal.txt");
+        let model_path = dir.path().join("model.bin");
+
+        let mut file = std::fs::File::create(&log_path).unwrap();
+        for i in 0..12 {
+            writeln!(
+                file,
+                "{}",
+                make_audit_log_line(
+                    &format!("2026-03-07T17:41:{:02}.000000Z", i),
+                    "10.0.0.1:1234",
+                    "/",
+                    200
+                )
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{}",
+                make_audit_log_line(
+                    &format!("2026-03-07T17:41:{:02}.000000Z", i),
+                    "10.0.0.2:1234",
+                    "/home",
+                    200
+                )
+            )
+            .unwrap();
+        }
+
+        std::fs::write(&attack_path, "10.0.0.1\n").unwrap();
+        std::fs::write(&normal_path, "10.0.0.2\n").unwrap();
+
+        let args = TrainArgs {
+            input: log_path.to_str().unwrap().to_string(),
+            output: model_path.to_str().unwrap().to_string(),
+            attack_ips: Some(attack_path.to_str().unwrap().to_string()),
+            normal_ips: Some(normal_path.to_str().unwrap().to_string()),
+            heuristics: None,
+            k: 3,
+            threshold: 0.6,
+            window_secs: 60,
+            min_events: 2,
+        };
+
+        let result = train_model(&args).unwrap();
+        assert!(result.attack_count > 0);
+        assert!(result.normal_count > 0);
+
+        run(args).unwrap();
+        assert!(model_path.exists());
+    }
+
+    #[test]
+    fn train_model_requires_labeling() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("audit.log");
+        let model_path = dir.path().join("model.bin");
+
+        let mut file = std::fs::File::create(&log_path).unwrap();
+        for i in 0..12 {
+            writeln!(
+                file,
+                "{}",
+                make_audit_log_line(
+                    &format!("2026-03-07T17:41:{:02}.000000Z", i),
+                    "10.0.0.1:1234",
+                    "/",
+                    200
+                )
+            )
+            .unwrap();
+        }
+
+        let args = TrainArgs {
+            input: log_path.to_str().unwrap().to_string(),
+            output: model_path.to_str().unwrap().to_string(),
+            attack_ips: None,
+            normal_ips: None,
+            heuristics: None,
+            k: 3,
+            threshold: 0.6,
+            window_secs: 60,
+            min_events: 2,
+        };
+
+        assert!(train_model(&args).is_err());
+    }
 }

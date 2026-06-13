@@ -111,3 +111,84 @@ fn fx_hash(s: &str) -> u64 {
     s.hash(&mut h);
     h.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn cfg(min_events: usize) -> DDoSConfig {
+        DDoSConfig {
+            threshold: 0.6,
+            window_secs: 60,
+            window_capacity: 100,
+            min_events,
+            enabled: true,
+            observe_only: false,
+        }
+    }
+
+    #[test]
+    fn shard_index_is_in_range_and_deterministic() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let idx1 = shard_index(&ip);
+        let idx2 = shard_index(&ip);
+        assert_eq!(idx1, idx2);
+        assert!(idx1 < NUM_SHARDS);
+
+        let ip6: IpAddr = "2001:db8::1".parse().unwrap();
+        let idx6 = shard_index(&ip6);
+        assert!(idx6 < NUM_SHARDS);
+    }
+
+    #[test]
+    fn detector_new_uses_config_values() {
+        let detector = DDoSDetector::new(&cfg(5));
+        assert_eq!(detector.window_secs, 60);
+        assert_eq!(detector.window_capacity, 100);
+        assert_eq!(detector.min_events, 5);
+        assert_eq!(detector.shards.len(), NUM_SHARDS);
+    }
+
+    #[test]
+    fn check_allows_until_min_events_reached() {
+        let detector = DDoSDetector::new(&cfg(3));
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        assert_eq!(
+            detector.check(ip, "GET", "/", "example.com", "ua", 0, false, false, false),
+            DDoSAction::Allow
+        );
+        assert_eq!(
+            detector.check(ip, "GET", "/", "example.com", "ua", 0, false, false, false),
+            DDoSAction::Allow
+        );
+        // Third event reaches min_events; all cookies false → tree block.
+        let action = detector.check(ip, "GET", "/", "example.com", "ua", 0, false, false, false);
+        assert_eq!(action, DDoSAction::Block);
+    }
+
+    #[test]
+    fn check_allows_when_cookie_ratio_high() {
+        let detector = DDoSDetector::new(&cfg(3));
+        let ip: IpAddr = "192.0.2.2".parse().unwrap();
+        for _ in 0..2 {
+            detector.check(ip, "GET", "/", "example.com", "ua", 0, true, true, true);
+        }
+        let action = detector.check(ip, "GET", "/", "example.com", "ua", 0, true, true, true);
+        assert_eq!(action, DDoSAction::Allow);
+    }
+
+    #[test]
+    fn record_response_is_no_op() {
+        let detector = DDoSDetector::new(&cfg(1));
+        let ip: IpAddr = "192.0.2.3".parse().unwrap();
+        // Should not panic or mutate state in a visible way.
+        detector.record_response(ip, 200, 10);
+    }
+
+    #[test]
+    fn fx_hash_deterministic() {
+        assert_eq!(fx_hash("hello"), fx_hash("hello"));
+        assert_ne!(fx_hash("hello"), fx_hash("world"));
+    }
+}

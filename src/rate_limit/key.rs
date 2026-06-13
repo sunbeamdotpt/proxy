@@ -76,11 +76,7 @@ mod tests {
     #[test]
     fn test_cookie_extraction() {
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
-        let key = extract_key(
-            Some("ory_kratos_session=abc123; other=val"),
-            None,
-            ip,
-        );
+        let key = extract_key(Some("ory_kratos_session=abc123; other=val"), None, ip);
         assert!(key.is_authenticated());
         assert!(matches!(key, RateLimitKey::Identity(_)));
     }
@@ -110,11 +106,7 @@ mod tests {
     #[test]
     fn test_cookie_takes_priority_over_bearer() {
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
-        let key_cookie = extract_key(
-            Some("ory_kratos_session=sess1"),
-            Some("Bearer tok1"),
-            ip,
-        );
+        let key_cookie = extract_key(Some("ory_kratos_session=sess1"), Some("Bearer tok1"), ip);
         let key_bearer = extract_key(None, Some("Bearer tok1"), ip);
         // Cookie and bearer should produce different hashes
         assert_ne!(key_cookie, key_bearer);

@@ -23,9 +23,16 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            response_headers_add: vec![],
+            response_headers_remove: vec![],
             request_headers: vec![],
+            request_headers_add: vec![],
+            request_headers_remove: vec![],
             cache: None,
             cors: None,
+            timeout_secs: None,
+            listener_hostname: None,
+            gateway_api: false,
         },
         RouteConfig {
             host_prefix: "src".into(),
@@ -38,9 +45,16 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            response_headers_add: vec![],
+            response_headers_remove: vec![],
             request_headers: vec![],
+            request_headers_add: vec![],
+            request_headers_remove: vec![],
             cache: None,
             cors: None,
+            timeout_secs: None,
+            listener_hostname: None,
+            gateway_api: false,
         },
         RouteConfig {
             host_prefix: "docs".into(),
@@ -53,9 +67,16 @@ fn make_detector() -> ScannerDetector {
             rewrites: vec![],
             body_rewrites: vec![],
             response_headers: vec![],
+            response_headers_add: vec![],
+            response_headers_remove: vec![],
             request_headers: vec![],
+            request_headers_add: vec![],
+            request_headers_remove: vec![],
             cache: None,
             cors: None,
+            timeout_secs: None,
+            listener_hostname: None,
+            gateway_api: false,
         },
     ];
 
@@ -197,7 +218,13 @@ fn bench_check_api_legitimate(c: &mut Criterion) {
 
 fn bench_extract_features(c: &mut Criterion) {
     let fragment_hashes: rustc_hash::FxHashSet<u64> = [
-        ".env", "wp-admin", "wp-login", "phpinfo", "phpmyadmin", "cgi-bin", ".git",
+        ".env",
+        "wp-admin",
+        "wp-login",
+        "phpinfo",
+        "phpmyadmin",
+        "cgi-bin",
+        ".git",
     ]
     .iter()
     .map(|f| fx_hash_bytes(f.as_bytes()))
@@ -206,8 +233,10 @@ fn bench_extract_features(c: &mut Criterion) {
         .iter()
         .map(|e| fx_hash_bytes(e.as_bytes()))
         .collect();
-    let configured_hosts: rustc_hash::FxHashSet<u64> =
-        ["admin", "src", "docs"].iter().map(|h| fx_hash_bytes(h.as_bytes())).collect();
+    let configured_hosts: rustc_hash::FxHashSet<u64> = ["admin", "src", "docs"]
+        .iter()
+        .map(|h| fx_hash_bytes(h.as_bytes()))
+        .collect();
 
     c.bench_function("scanner::extract_features", |b| {
         b.iter(|| {
@@ -246,13 +275,15 @@ fn bench_ensemble_scanner_tree_only(c: &mut Criterion) {
 fn bench_ensemble_scanner_mlp_only(c: &mut Criterion) {
     let input: [f32; 12] = [0.5; 12];
     c.bench_function("ensemble::scanner mlp_only", |b| {
-        b.iter(|| mlp_predict_32::<12>(
-            black_box(&scanner_weights::W1),
-            black_box(&scanner_weights::B1),
-            black_box(&scanner_weights::W2),
-            black_box(scanner_weights::B2),
-            black_box(&input),
-        ))
+        b.iter(|| {
+            mlp_predict_32::<12>(
+                black_box(&scanner_weights::W1),
+                black_box(&scanner_weights::B1),
+                black_box(&scanner_weights::W2),
+                black_box(scanner_weights::B2),
+                black_box(&input),
+            )
+        })
     });
 }
 

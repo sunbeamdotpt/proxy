@@ -57,7 +57,12 @@ pub fn generate_rust_source(model: &ExportedModel) -> String {
     writeln!(s).unwrap();
 
     // Threshold.
-    writeln!(s, "pub const THRESHOLD: f32 = {:.8};", sanitize(model.threshold)).unwrap();
+    writeln!(
+        s,
+        "pub const THRESHOLD: f32 = {:.8};",
+        sanitize(model.threshold)
+    )
+    .unwrap();
     writeln!(s).unwrap();
 
     // Normalization params.
@@ -102,12 +107,7 @@ pub fn generate_rust_source(model: &ExportedModel) -> String {
     )
     .unwrap();
     for &(feat, thresh, left, right) in &model.tree_nodes {
-        writeln!(
-            s,
-            "    ({}, {:.8}, {}, {}),",
-            feat, thresh, left, right
-        )
-        .unwrap();
+        writeln!(s, "    ({}, {:.8}, {}, {}),", feat, thresh, left, right).unwrap();
     }
     writeln!(s, "];").unwrap();
 
@@ -124,11 +124,7 @@ pub fn generate_lean_source(model: &ExportedModel) -> String {
         model.model_name
     )
     .unwrap();
-    writeln!(
-        s,
-        "-- DO NOT EDIT — regenerate with the training pipeline."
-    )
-    .unwrap();
+    writeln!(s, "-- DO NOT EDIT — regenerate with the training pipeline.").unwrap();
     writeln!(s).unwrap();
 
     writeln!(
@@ -167,11 +163,7 @@ pub fn generate_lean_source(model: &ExportedModel) -> String {
     writeln!(s).unwrap();
 
     // Tree nodes as list of tuples.
-    writeln!(
-        s,
-        "def treeNodes : List (Nat × Float × Nat × Nat) := ["
-    )
-    .unwrap();
+    writeln!(s, "def treeNodes : List (Nat × Float × Nat × Nat) := [").unwrap();
     for (i, &(feat, thresh, left, right)) in model.tree_nodes.iter().enumerate() {
         let comma = if i + 1 < model.tree_nodes.len() {
             ","
@@ -188,12 +180,7 @@ pub fn generate_lean_source(model: &ExportedModel) -> String {
     writeln!(s, "]").unwrap();
     writeln!(s).unwrap();
 
-    writeln!(
-        s,
-        "end Sunbeam.Ensemble.{}",
-        capitalize(&model.model_name)
-    )
-    .unwrap();
+    writeln!(s, "end Sunbeam.Ensemble.{}", capitalize(&model.model_name)).unwrap();
 
     s
 }
@@ -212,7 +199,11 @@ pub fn export_to_file(model: &ExportedModel, path: &Path) -> Result<()> {
 
 /// Sanitize a float for Rust source: replace NaN/Inf with 0.0.
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 fn write_f32_array(s: &mut String, name: &str, values: &[f32]) {
@@ -265,11 +256,7 @@ mod tests {
             b1: vec![0.01, 0.02],
             w2: vec![0.5, 0.6],
             b2: -0.1,
-            tree_nodes: vec![
-                (0, 0.5, 1, 2),
-                (255, 0.0, 0, 0),
-                (255, 1.0, 0, 0),
-            ],
+            tree_nodes: vec![(0, 0.5, 1, 2), (255, 0.0, 0, 0), (255, 1.0, 0, 0)],
             threshold: 0.5,
             norm_mins: vec![0.0, 0.0],
             norm_maxs: vec![1.0, 10.0],
@@ -281,7 +268,10 @@ mod tests {
         let model = make_test_model();
         let src = generate_rust_source(&model);
 
-        assert!(src.contains("pub const THRESHOLD: f32 ="), "missing THRESHOLD");
+        assert!(
+            src.contains("pub const THRESHOLD: f32 ="),
+            "missing THRESHOLD"
+        );
         assert!(src.contains("pub const NORM_MINS:"), "missing NORM_MINS");
         assert!(src.contains("pub const NORM_MAXS:"), "missing NORM_MAXS");
         assert!(src.contains("pub const W1:"), "missing W1");

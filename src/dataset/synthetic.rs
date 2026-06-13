@@ -91,16 +91,10 @@ fn generate_ddos_attack_features(profiles: &[TimingProfile], rng: &mut StdRng) -
     // Sample from a random profile if available, otherwise use defaults.
     let (iat_mean, burst_mean, bps_mean) = if !profiles.is_empty() {
         let profile = &profiles[rng.random_range(0..profiles.len())];
-        let iat = sample_positive_normal(
-            rng,
-            profile.inter_arrival_mean,
-            profile.inter_arrival_std,
-        );
-        let burst = sample_positive_normal(
-            rng,
-            profile.burst_duration_mean,
-            profile.burst_duration_std,
-        );
+        let iat =
+            sample_positive_normal(rng, profile.inter_arrival_mean, profile.inter_arrival_std);
+        let burst =
+            sample_positive_normal(rng, profile.burst_duration_mean, profile.burst_duration_std);
         let bps = sample_positive_normal(
             rng,
             profile.flow_bytes_per_sec_mean,
@@ -132,7 +126,7 @@ fn generate_ddos_attack_features(profiles: &[TimingProfile], rng: &mut StdRng) -
     features[3] = rng.random_range(0.3..0.9) as f32;
 
     // 4: avg_duration_ms — derived from burst duration.
-    features[4] = (burst_mean * 100.0).max(1.0).min(5000.0) as f32;
+    features[4] = (burst_mean * 100.0).clamp(1.0, 5000.0) as f32;
 
     // 5: method_entropy — low (mostly GET).
     features[5] = rng.random_range(0.0..0.3) as f32;
@@ -148,7 +142,7 @@ fn generate_ddos_attack_features(profiles: &[TimingProfile], rng: &mut StdRng) -
     features[7] = rng.random_range(0.6..1.0) as f32;
 
     // 8: avg_content_length — derived from flow bytes.
-    features[8] = (bps_mean * 0.01).max(0.0).min(10000.0) as f32;
+    features[8] = (bps_mean * 0.01).clamp(0.0, 10000.0) as f32;
 
     // 9: unique_user_agents — low (1-2 UAs).
     features[9] = rng.random_range(1.0..3.0) as f32;
@@ -303,8 +297,16 @@ fn generate_scanner_attack_features_from_path(path: &str, rng: &mut StdRng) -> V
 
     // 0: suspicious_path_score — check for known bad fragments.
     let suspicious_frags = [
-        ".env", "wp-admin", "wp-login", "phpinfo", "phpmyadmin",
-        ".git", "cgi-bin", "shell", "admin", "config",
+        ".env",
+        "wp-admin",
+        "wp-login",
+        "phpinfo",
+        "phpmyadmin",
+        ".git",
+        "cgi-bin",
+        "shell",
+        "admin",
+        "config",
     ];
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let seg_count = segments.len().max(1) as f32;
@@ -321,7 +323,9 @@ fn generate_scanner_attack_features_from_path(path: &str, rng: &mut StdRng) -> V
     features[1] = path.bytes().filter(|&b| b == b'/').count().min(20) as f32;
 
     // 2: has_suspicious_extension.
-    let suspicious_exts = [".php", ".env", ".sql", ".bak", ".asp", ".jsp", ".cgi", ".tar", ".zip", ".git"];
+    let suspicious_exts = [
+        ".php", ".env", ".sql", ".bak", ".asp", ".jsp", ".cgi", ".tar", ".zip", ".git",
+    ];
     features[2] = if suspicious_exts.iter().any(|e| lower.ends_with(e)) {
         1.0
     } else {
@@ -375,7 +379,7 @@ fn generate_scanner_attack_features(rng: &mut StdRng) -> Vec<f32> {
     let mut features = vec![0.0f32; NUM_SCANNER_FEATURES];
 
     features[0] = rng.random_range(0.3..1.0) as f32; // suspicious_path_score
-    features[1] = rng.random_range(2.0..8.0) as f32;  // path_depth
+    features[1] = rng.random_range(2.0..8.0) as f32; // path_depth
     features[2] = if rng.random_bool(0.6) { 1.0 } else { 0.0 }; // suspicious_ext
     features[3] = if rng.random_bool(0.05) { 1.0 } else { 0.0 }; // cookies
     features[4] = if rng.random_bool(0.05) { 1.0 } else { 0.0 }; // referer
@@ -493,7 +497,10 @@ mod tests {
         let ddos_b = generate_ddos_samples(&[], &config);
 
         for (a, b) in ddos_a.iter().zip(ddos_b.iter()) {
-            assert_eq!(a.features, b.features, "DDoS samples should be deterministic");
+            assert_eq!(
+                a.features, b.features,
+                "DDoS samples should be deterministic"
+            );
             assert_eq!(a.label, b.label);
         }
 
@@ -501,7 +508,10 @@ mod tests {
         let scanner_b = generate_scanner_samples(None, None, &config).unwrap();
 
         for (a, b) in scanner_a.iter().zip(scanner_b.iter()) {
-            assert_eq!(a.features, b.features, "scanner samples should be deterministic");
+            assert_eq!(
+                a.features, b.features,
+                "scanner samples should be deterministic"
+            );
             assert_eq!(a.label, b.label);
         }
     }
@@ -559,8 +569,14 @@ mod tests {
         let features = generate_scanner_attack_features_from_path("/.env", &mut rng);
         assert_eq!(features.len(), NUM_SCANNER_FEATURES);
         // .env should trigger suspicious_path_score > 0.
-        assert!(features[0] > 0.0, "suspicious_path_score should be positive for /.env");
+        assert!(
+            features[0] > 0.0,
+            "suspicious_path_score should be positive for /.env"
+        );
         // .env should trigger suspicious_extension.
-        assert_eq!(features[2], 1.0, "should detect .env as suspicious extension");
+        assert_eq!(
+            features[2], 1.0,
+            "should detect .env as suspicious extension"
+        );
     }
 }

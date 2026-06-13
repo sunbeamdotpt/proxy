@@ -1,10 +1,10 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ddos::model::DDoSAction;
 use super::gen::ddos_weights;
 use super::mlp::mlp_predict_32;
 use super::tree::{tree_predict, TreeDecision};
+use crate::ddos::model::DDoSAction;
 
 /// Which path the DDoS ensemble took to reach its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -41,14 +41,37 @@ pub struct RequestEvent {
 
 /// Known-bad path fragments that scanners/bots probe for.
 const SUSPICIOUS_FRAGMENTS: &[&str] = &[
-    ".env", ".git/", ".git\\", ".bak", ".sql", ".tar", ".zip",
-    "wp-admin", "wp-login", "wp-includes", "wp-content", "xmlrpc",
-    "phpinfo", "phpmyadmin", "php-info", ".php",
-    "cgi-bin", "shell", "eval-stdin",
-    "/vendor/", "/telescope/", "/actuator/",
-    "/.htaccess", "/.htpasswd",
-    "/debug/", "/config.", "/admin/",
-    "yarn.lock", "yarn-debug", "package.json", "composer.json",
+    ".env",
+    ".git/",
+    ".git\\",
+    ".bak",
+    ".sql",
+    ".tar",
+    ".zip",
+    "wp-admin",
+    "wp-login",
+    "wp-includes",
+    "wp-content",
+    "xmlrpc",
+    "phpinfo",
+    "phpmyadmin",
+    "php-info",
+    ".php",
+    "cgi-bin",
+    "shell",
+    "eval-stdin",
+    "/vendor/",
+    "/telescope/",
+    "/actuator/",
+    "/.htaccess",
+    "/.htpasswd",
+    "/debug/",
+    "/config.",
+    "/admin/",
+    "yarn.lock",
+    "yarn-debug",
+    "package.json",
+    "composer.json",
 ];
 
 /// Is suspicious path.
@@ -105,7 +128,7 @@ impl IpState {
             .collect()
     }
 
-/// Extract features.
+    /// Extract features.
     pub fn extract_features(&self, window_secs: u64) -> FeatureVector {
         let events = self.active_events(window_secs);
         let n = events.len() as f64;
@@ -139,8 +162,7 @@ impl IpState {
         let error_rate = errors / n;
 
         // 4: avg_duration_ms
-        let avg_duration_ms =
-            events.iter().map(|e| e.duration_ms as f64).sum::<f64>() / n;
+        let avg_duration_ms = events.iter().map(|e| e.duration_ms as f64).sum::<f64>() / n;
 
         // 5: method_entropy (Shannon entropy of method distribution)
         let method_entropy = {
@@ -160,8 +182,7 @@ impl IpState {
 
         // 6: burst_score (inverse mean inter-arrival time)
         let burst_score = if events.len() >= 2 {
-            let mut timestamps: Vec<Instant> =
-                events.iter().map(|e| e.timestamp).collect();
+            let mut timestamps: Vec<Instant> = events.iter().map(|e| e.timestamp).collect();
             timestamps.sort();
             let total_span = timestamps
                 .last()
@@ -188,8 +209,7 @@ impl IpState {
         };
 
         // 8: avg_content_length
-        let avg_content_length =
-            events.iter().map(|e| e.content_length as f64).sum::<f64>() / n;
+        let avg_content_length = events.iter().map(|e| e.content_length as f64).sum::<f64>() / n;
 
         // 9: unique_user_agents
         let unique_user_agents = {
@@ -201,20 +221,17 @@ impl IpState {
         };
 
         // 10: cookie_ratio (fraction of requests that have cookies)
-        let cookie_ratio =
-            events.iter().filter(|e| e.has_cookies).count() as f64 / n;
+        let cookie_ratio = events.iter().filter(|e| e.has_cookies).count() as f64 / n;
 
         // 11: referer_ratio (fraction of requests with a referer)
-        let referer_ratio =
-            events.iter().filter(|e| e.has_referer).count() as f64 / n;
+        let referer_ratio = events.iter().filter(|e| e.has_referer).count() as f64 / n;
 
         // 12: accept_language_ratio (fraction with accept-language)
         let accept_language_ratio =
             events.iter().filter(|e| e.has_accept_language).count() as f64 / n;
 
         // 13: suspicious_path_ratio (fraction hitting known-bad paths)
-        let suspicious_path_ratio =
-            events.iter().filter(|e| e.suspicious_path).count() as f64 / n;
+        let suspicious_path_ratio = events.iter().filter(|e| e.suspicious_path).count() as f64 / n;
 
         [
             request_rate,
@@ -373,8 +390,11 @@ impl LogIpState {
             .count() as f64;
         let error_rate = errors / n;
 
-        let avg_duration_ms =
-            self.durations[start..end].iter().map(|&d| d as f64).sum::<f64>() / n;
+        let avg_duration_ms = self.durations[start..end]
+            .iter()
+            .map(|&d| d as f64)
+            .sum::<f64>()
+            / n;
 
         let method_entropy = {
             let mut counts = [0u32; 8];
@@ -392,8 +412,7 @@ impl LogIpState {
         };
 
         let burst_score = if (end - start) >= 2 {
-            let total_span =
-                self.timestamps[end - 1] - self.timestamps[start];
+            let total_span = self.timestamps[end - 1] - self.timestamps[start];
             if total_span > 0.0 {
                 (end - start - 1) as f64 / total_span
             } else {
@@ -426,14 +445,18 @@ impl LogIpState {
             set.len() as f64
         };
 
-        let cookie_ratio =
-            self.has_cookies[start..end].iter().filter(|&&v| v).count() as f64 / n;
-        let referer_ratio =
-            self.has_referer[start..end].iter().filter(|&&v| v).count() as f64 / n;
-        let accept_language_ratio =
-            self.has_accept_language[start..end].iter().filter(|&&v| v).count() as f64 / n;
-        let suspicious_path_ratio =
-            self.suspicious_paths[start..end].iter().filter(|&&v| v).count() as f64 / n;
+        let cookie_ratio = self.has_cookies[start..end].iter().filter(|&&v| v).count() as f64 / n;
+        let referer_ratio = self.has_referer[start..end].iter().filter(|&&v| v).count() as f64 / n;
+        let accept_language_ratio = self.has_accept_language[start..end]
+            .iter()
+            .filter(|&&v| v)
+            .count() as f64
+            / n;
+        let suspicious_path_ratio = self.suspicious_paths[start..end]
+            .iter()
+            .filter(|&&v| v)
+            .count() as f64
+            / n;
 
         [
             request_rate,
@@ -502,10 +525,18 @@ mod tests {
 
     #[test]
     fn test_norm_params() {
-        let data = vec![[0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                        [1.0, 20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]];
+        let data = vec![
+            [
+                0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                1.0, 20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            ],
+        ];
         let params = NormParams::from_data(&data);
-        let normalized = params.normalize(&[0.5, 15.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+        let normalized = params.normalize(&[
+            0.5, 15.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+        ]);
         for &v in &normalized {
             assert!((v - 0.5).abs() < 1e-10);
         }

@@ -86,8 +86,8 @@ pub fn save_dataset(manifest: &DatasetManifest, path: &Path) -> Result<()> {
 
 /// Deserialize a `DatasetManifest` from a bincode file.
 pub fn load_dataset(path: &Path) -> Result<DatasetManifest> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("reading dataset from {}", path.display()))?;
+    let data =
+        std::fs::read(path).with_context(|| format!("reading dataset from {}", path.display()))?;
     let manifest: DatasetManifest =
         bincode::deserialize(&data).context("deserializing dataset manifest")?;
     Ok(manifest)
@@ -97,8 +97,18 @@ pub fn load_dataset(path: &Path) -> Result<DatasetManifest> {
 mod tests {
     use super::*;
 
-    fn make_sample(features: Vec<f32>, label: f32, source: DataSource, weight: f32) -> TrainingSample {
-        TrainingSample { features, label, source, weight }
+    fn make_sample(
+        features: Vec<f32>,
+        label: f32,
+        source: DataSource,
+        weight: f32,
+    ) -> TrainingSample {
+        TrainingSample {
+            features,
+            label,
+            source,
+            weight,
+        }
     }
 
     #[test]
@@ -134,23 +144,35 @@ mod tests {
         assert_eq!(decoded.scanner_samples.len(), 2);
         assert_eq!(decoded.ddos_samples.len(), 2);
         assert_eq!(decoded.stats.total_samples, 4);
-        assert_eq!(decoded.stats.samples_by_source[&DataSource::ProductionLogs], 2);
+        assert_eq!(
+            decoded.stats.samples_by_source[&DataSource::ProductionLogs],
+            2
+        );
 
         // Verify feature values survive the roundtrip.
         assert!((decoded.scanner_samples[0].features[0] - 0.1).abs() < 1e-6);
         assert_eq!(decoded.scanner_samples[1].label, 1.0);
-        assert_eq!(decoded.ddos_samples[0].source, DataSource::SyntheticCicTiming);
+        assert_eq!(
+            decoded.ddos_samples[0].source,
+            DataSource::SyntheticCicTiming
+        );
     }
 
     #[test]
     fn test_save_load_roundtrip() {
         let manifest = DatasetManifest {
-            scanner_samples: vec![
-                make_sample(vec![1.0, 2.0], 0.0, DataSource::ProductionLogs, 1.0),
-            ],
-            ddos_samples: vec![
-                make_sample(vec![3.0, 4.0], 1.0, DataSource::OwaspModSec, 0.8),
-            ],
+            scanner_samples: vec![make_sample(
+                vec![1.0, 2.0],
+                0.0,
+                DataSource::ProductionLogs,
+                1.0,
+            )],
+            ddos_samples: vec![make_sample(
+                vec![3.0, 4.0],
+                1.0,
+                DataSource::OwaspModSec,
+                0.8,
+            )],
             stats: DatasetStats {
                 total_samples: 2,
                 scanner_samples: 1,

@@ -65,10 +65,7 @@ impl<B: Backend> MlpModel<B> {
     ///
     /// Uses raw logits for BCE (which applies sigmoid internally) and converts
     /// to two-column format `[1-p, p]` for AccuracyMetric (which uses argmax).
-    pub fn forward_classification(
-        &self,
-        batch: TrainingBatch<B>,
-    ) -> ClassificationOutput<B> {
+    pub fn forward_classification(&self, batch: TrainingBatch<B>) -> ClassificationOutput<B> {
         let logits = self.forward_logits(batch.features); // [batch, 1]
         let logits_1d = logits.clone().squeeze::<1>(); // [batch]
 

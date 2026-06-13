@@ -35,8 +35,7 @@ const CICIDS_FILES: &[&str] = &[
 ];
 
 /// Hugging Face mirror (public, no auth required).
-const CICIDS_BASE_URL: &str =
-    "https://huggingface.co/datasets/c01dsnap/CIC-IDS2017/resolve/main";
+const CICIDS_BASE_URL: &str = "https://huggingface.co/datasets/c01dsnap/CIC-IDS2017/resolve/main";
 
 fn cicids_cache_dir() -> PathBuf {
     cache_base().join("cicids")
@@ -83,8 +82,8 @@ pub fn download_cicids() -> Result<PathBuf> {
             .error_for_status()
             .with_context(|| format!("HTTP error for {url}"))?;
 
-        let mut file = std::fs::File::create(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        let mut file =
+            std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
         let bytes = resp.bytes().with_context(|| "reading response body")?;
         std::io::Write::write_all(&mut file, &bytes)?;
 

@@ -41,7 +41,11 @@ fn sigmoid_f32(x: f32) -> f32 {
 
 #[inline(always)]
 fn relu_f32(x: f32) -> f32 {
-    if x > 0.0 { x } else { 0.0 }
+    if x > 0.0 {
+        x
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]

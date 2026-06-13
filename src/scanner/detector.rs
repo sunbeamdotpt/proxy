@@ -80,10 +80,18 @@ impl ScannerDetector {
 
         // Ensemble path: extract f32 features → decision tree + MLP.
         let raw_f32 = features::extract_features_f32(
-            method, path, host_prefix,
-            has_cookies, has_referer, has_accept_language,
-            accept, user_agent, content_length,
-            &self.fragment_hashes, &self.extension_hashes, &self.configured_hosts,
+            method,
+            path,
+            host_prefix,
+            has_cookies,
+            has_referer,
+            has_accept_language,
+            accept,
+            user_agent,
+            content_length,
+            &self.fragment_hashes,
+            &self.extension_hashes,
+            &self.configured_hosts,
         );
         let ev = crate::ensemble::scanner::scanner_ensemble_predict(&raw_f32);
         crate::metrics::SCANNER_ENSEMBLE_PATH
@@ -134,9 +142,9 @@ mod tests {
             "GET",
             "/blog/hello-world",
             "app",
-            true,  // has_cookies
-            true,  // has_referer
-            true,  // has_accept_language
+            true, // has_cookies
+            true, // has_referer
+            true, // has_accept_language
             "text/html,application/xhtml+xml",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120",
             0,
@@ -152,7 +160,7 @@ mod tests {
             "POST",
             "/api/v1/data",
             "app",
-            true,  // has_cookies (session cookie)
+            true, // has_cookies (session cookie)
             false,
             true,
             "application/json",
@@ -167,15 +175,7 @@ mod tests {
     fn test_env_probe_blocked() {
         let detector = ScannerDetector::new(&test_routes());
         let verdict = detector.check(
-            "GET",
-            "/.env",
-            "unknown",
-            false,
-            false,
-            false,
-            "*/*",
-            "curl/7.0",
-            0,
+            "GET", "/.env", "unknown", false, false, false, "*/*", "curl/7.0", 0,
         );
         assert_eq!(verdict.action, ScannerAction::Block);
     }

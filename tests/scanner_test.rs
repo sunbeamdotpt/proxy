@@ -67,8 +67,12 @@ fn make_detector() -> ScannerDetector {
 fn normal_browser_with_cookies_allowed() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/blog/hello-world", "app",
-        true, true, true,
+        "GET",
+        "/blog/hello-world",
+        "app",
+        true,
+        true,
+        true,
         "text/html,application/xhtml+xml",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120",
         0,
@@ -81,8 +85,12 @@ fn normal_browser_with_cookies_allowed() {
 fn api_client_with_auth_allowed() {
     let d = make_detector();
     let v = d.check(
-        "POST", "/api/v1/users", "api",
-        true, false, true,
+        "POST",
+        "/api/v1/users",
+        "api",
+        true,
+        false,
+        true,
         "application/json",
         "MyApp/2.0",
         256,
@@ -95,9 +103,7 @@ fn api_client_with_auth_allowed() {
 fn env_probe_from_unknown_host_blocked() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/.env", "unknown",
-        false, false, false,
-        "*/*", "curl/7.0", 0,
+        "GET", "/.env", "unknown", false, false, false, "*/*", "curl/7.0", 0,
     );
     assert_eq!(v.action, ScannerAction::Block);
 }
@@ -106,9 +112,15 @@ fn env_probe_from_unknown_host_blocked() {
 fn wordpress_scan_blocked() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/wp-admin/install.php", "unknown",
-        false, false, false,
-        "*/*", "", 0,
+        "GET",
+        "/wp-admin/install.php",
+        "unknown",
+        false,
+        false,
+        false,
+        "*/*",
+        "",
+        0,
     );
     assert_eq!(v.action, ScannerAction::Block);
 }
@@ -117,9 +129,15 @@ fn wordpress_scan_blocked() {
 fn path_traversal_blocked() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/etc/../../../passwd", "unknown",
-        false, false, false,
-        "*/*", "python-requests/2.28", 0,
+        "GET",
+        "/etc/../../../passwd",
+        "unknown",
+        false,
+        false,
+        false,
+        "*/*",
+        "python-requests/2.28",
+        0,
     );
     assert_eq!(v.action, ScannerAction::Block);
 }
@@ -128,9 +146,15 @@ fn path_traversal_blocked() {
 fn legitimate_php_path_allowed() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/blog/php-is-dead", "app",
-        true, true, true,
-        "text/html", "Mozilla/5.0 Chrome/120", 0,
+        "GET",
+        "/blog/php-is-dead",
+        "app",
+        true,
+        true,
+        true,
+        "text/html",
+        "Mozilla/5.0 Chrome/120",
+        0,
     );
     assert_eq!(v.action, ScannerAction::Allow);
 }
@@ -139,8 +163,12 @@ fn legitimate_php_path_allowed() {
 fn browser_on_known_host_without_cookies_allowed() {
     let d = make_detector();
     let v = d.check(
-        "GET", "/", "app",
-        false, false, true,
+        "GET",
+        "/",
+        "app",
+        false,
+        false,
+        true,
         "text/html",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X) Safari/537.36",
         0,

@@ -78,8 +78,8 @@ const COOKIE_FEATURE_IDX: usize = 3;
 /// Entry point: train scanner ensemble and export weights.
 pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
     // 1. Load dataset.
-    let manifest = load_dataset(Path::new(&args.dataset_path))
-        .context("loading dataset manifest")?;
+    let manifest =
+        load_dataset(Path::new(&args.dataset_path)).context("loading dataset manifest")?;
 
     let samples = &manifest.scanner_samples;
     anyhow::ensure!(!samples.is_empty(), "no scanner samples in dataset");
@@ -126,11 +126,7 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
 
     // 3. Stratified 80/20 split.
     let (train_set, val_set) = stratified_split(samples, 0.8);
-    println!(
-        "[scanner] train={}, val={}",
-        train_set.len(),
-        val_set.len()
-    );
+    println!("[scanner] train={}, val={}", train_set.len(), val_set.len());
 
     // 4. Train CART tree (with cookie feature masking for reduced weight).
     let tree_train_set = mask_cookie_feature(&train_set, COOKIE_FEATURE_IDX, args.cookie_weight);
@@ -141,7 +137,11 @@ pub fn run(args: TrainScannerMlpArgs) -> Result<()> {
         num_features: NUM_FEATURES,
     };
     let tree_nodes = train_tree(&tree_train_set, &tree_config);
-    println!("[scanner] CART tree: {} nodes (max_depth={})", tree_nodes.len(), args.tree_max_depth);
+    println!(
+        "[scanner] CART tree: {} nodes (max_depth={})",
+        tree_nodes.len(),
+        args.tree_max_depth
+    );
 
     // Evaluate tree on validation set (use original norms — tree learned on masked features).
     let (tree_correct, tree_deferred) = eval_tree(&tree_nodes, &val_set, &norm_mins, &norm_maxs);
@@ -226,7 +226,9 @@ fn mask_cookie_feature(
             if cookie_weight < f32::EPSILON {
                 s2.features[cookie_idx] = 0.5;
             } else {
-                let hash = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(42);
+                let hash = (i as u64)
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(42);
                 let r = (hash >> 33) as f32 / (u32::MAX >> 1) as f32;
                 if r > cookie_weight {
                     s2.features[cookie_idx] = 0.5;
@@ -258,7 +260,10 @@ fn compute_norm_params(samples: &[TrainingSample]) -> (Vec<f32>, Vec<f32>) {
 // Stratified split
 // ---------------------------------------------------------------------------
 
-fn stratified_split(samples: &[TrainingSample], train_ratio: f64) -> (Vec<TrainingSample>, Vec<TrainingSample>) {
+fn stratified_split(
+    samples: &[TrainingSample],
+    train_ratio: f64,
+) -> (Vec<TrainingSample>, Vec<TrainingSample>) {
     let mut attacks: Vec<&TrainingSample> = samples.iter().filter(|s| s.label >= 0.5).collect();
     let mut normals: Vec<&TrainingSample> = samples.iter().filter(|s| s.label < 0.5).collect();
 
@@ -292,7 +297,9 @@ fn stratified_split(samples: &[TrainingSample], train_ratio: f64) -> (Vec<Traini
 fn deterministic_shuffle<T>(items: &mut [T]) {
     let mut rng = 42u64;
     for i in (1..items.len()).rev() {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (rng >> 33) as usize % (i + 1);
         items.swap(i, j);
     }
@@ -394,11 +401,7 @@ fn train_mlp(
         .init()
         .expect("valid cosine annealing config");
 
-    let learner = Learner::new(
-        model,
-        AdamConfig::new().init(),
-        lr_scheduler,
-    );
+    let learner = Learner::new(model, AdamConfig::new().init(), lr_scheduler);
 
     let result = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
         .metric_train_numeric(AccuracyMetric::new())
@@ -495,8 +498,14 @@ mod tests {
     #[test]
     fn test_norm_params() {
         let samples = vec![
-            make_scanner_sample([0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0),
-            make_scanner_sample([1.0, 20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 1.0),
+            make_scanner_sample(
+                [0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                0.0,
+            ),
+            make_scanner_sample(
+                [1.0, 20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                1.0,
+            ),
         ];
         let (mins, maxs) = compute_norm_params(&samples);
         assert_eq!(mins[0], 0.0);

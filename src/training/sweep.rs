@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::dataset::sample::load_dataset;
-use crate::training::train_scanner::TrainScannerMlpArgs;
 use crate::training::train_ddos::TrainDdosMlpArgs;
+use crate::training::train_scanner::TrainScannerMlpArgs;
 
 /// Run a sweep across cookie_weight values for either scanner or ddos.
 ///
@@ -24,8 +24,7 @@ pub fn run_cookie_sweep(
     min_samples_leaf: usize,
 ) -> Result<()> {
     // Validate dataset exists and has samples.
-    let manifest = load_dataset(Path::new(dataset_path))
-        .context("loading dataset manifest")?;
+    let manifest = load_dataset(Path::new(dataset_path)).context("loading dataset manifest")?;
 
     let (cookie_idx, sample_count) = match detector {
         "scanner" => (3usize, manifest.scanner_samples.len()),
@@ -49,7 +48,10 @@ pub fn run_cookie_sweep(
         "[sweep] {} detector, {} samples, cookie feature index: {}",
         detector, sample_count, cookie_idx,
     );
-    println!("[sweep] training {} trials with full tree+MLP (wgpu)\n", weights.len());
+    println!(
+        "[sweep] training {} trials with full tree+MLP (wgpu)\n",
+        weights.len()
+    );
 
     let sweep_dir = tempfile::tempdir().context("creating temp dir for sweep")?;
 
@@ -58,7 +60,12 @@ pub fn run_cookie_sweep(
         std::fs::create_dir_all(&trial_dir)?;
         let trial_dir_str = trial_dir.to_string_lossy().to_string();
 
-        println!("━━━ Trial {}/{}: cookie_weight={:.2} ━━━", trial + 1, weights.len(), cw);
+        println!(
+            "━━━ Trial {}/{}: cookie_weight={:.2} ━━━",
+            trial + 1,
+            weights.len(),
+            cw
+        );
 
         match detector {
             "scanner" => {

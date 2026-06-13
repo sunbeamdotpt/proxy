@@ -1,10 +1,10 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::scanner::model::{ScannerAction, ScannerVerdict};
 use super::gen::scanner_weights;
 use super::mlp::mlp_predict_32;
 use super::tree::{tree_predict, TreeDecision};
+use crate::scanner::model::{ScannerAction, ScannerVerdict};
 
 /// Which path the ensemble took to reach its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

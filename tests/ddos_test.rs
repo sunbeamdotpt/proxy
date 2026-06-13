@@ -86,8 +86,12 @@ fn normalization_preserves_midpoint() {
 #[test]
 fn norm_params_from_data_finds_extremes() {
     let data = vec![
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0],
-        [10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.5, 0.5, 0.5],
+        [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+        ],
+        [
+            10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.5, 0.5, 0.5,
+        ],
     ];
     let params = NormParams::from_data(&data);
     for i in 0..NUM_FEATURES {
@@ -106,7 +110,17 @@ fn detector_allows_below_min_events() {
     let detector = make_detector(10);
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     for _ in 0..9 {
-        let action = detector.check(ip, "GET", "/wp-admin", "evil.com", "bot", 0, false, false, false);
+        let action = detector.check(
+            ip,
+            "GET",
+            "/wp-admin",
+            "evil.com",
+            "bot",
+            0,
+            false,
+            false,
+            false,
+        );
         assert_eq!(action, DDoSAction::Allow, "should allow below min_events");
     }
 }
@@ -118,11 +132,31 @@ fn detector_ipv4_and_ipv6_tracked_separately() {
     let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
 
     for _ in 0..5 {
-        detector.check(v4, "GET", "/", "example.com", "Mozilla/5.0", 0, true, false, true);
+        detector.check(
+            v4,
+            "GET",
+            "/",
+            "example.com",
+            "Mozilla/5.0",
+            0,
+            true,
+            false,
+            true,
+        );
     }
 
     // v6 should still have 0 events (below min_events)
-    let action = detector.check(v6, "GET", "/", "example.com", "Mozilla/5.0", 0, true, false, true);
+    let action = detector.check(
+        v6,
+        "GET",
+        "/",
+        "example.com",
+        "Mozilla/5.0",
+        0,
+        true,
+        false,
+        true,
+    );
     assert_eq!(action, DDoSAction::Allow);
 }
 
@@ -130,9 +164,21 @@ fn detector_ipv4_and_ipv6_tracked_separately() {
 fn detector_normal_browsing_pattern_is_allowed() {
     let detector = make_detector(5);
     let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50));
-    let paths = ["/", "/about", "/products", "/products/1", "/contact",
-                 "/blog", "/blog/post-1", "/docs", "/pricing", "/login",
-                 "/dashboard", "/settings", "/api/me"];
+    let paths = [
+        "/",
+        "/about",
+        "/products",
+        "/products/1",
+        "/contact",
+        "/blog",
+        "/blog/post-1",
+        "/docs",
+        "/pricing",
+        "/login",
+        "/dashboard",
+        "/settings",
+        "/api/me",
+    ];
     let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
 
     for (i, path) in paths.iter().enumerate() {
@@ -151,13 +197,29 @@ fn detector_handles_concurrent_ips() {
     let detector = make_detector(5);
     for i in 0..50u8 {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i));
-        let paths = ["/", "/about", "/products", "/contact", "/blog",
-                     "/docs", "/api/status"];
+        let paths = [
+            "/",
+            "/about",
+            "/products",
+            "/contact",
+            "/blog",
+            "/docs",
+            "/api/status",
+        ];
         for path in &paths {
             // has_referer=true so referer_ratio stays above the tree threshold
-            let action = detector.check(ip, "GET", path, "example.com", "Chrome", 0, true, true, true);
-            assert_eq!(action, DDoSAction::Allow,
-                "IP 10.0.0.{i} blocked on {path}");
+            let action = detector.check(
+                ip,
+                "GET",
+                path,
+                "example.com",
+                "Chrome",
+                0,
+                true,
+                true,
+                true,
+            );
+            assert_eq!(action, DDoSAction::Allow, "IP 10.0.0.{i} blocked on {path}");
         }
     }
 }
@@ -166,13 +228,32 @@ fn detector_handles_concurrent_ips() {
 fn detector_ipv6_normal_traffic_is_allowed() {
     let detector = make_detector(5);
     let ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x42));
-    let paths = ["/", "/about", "/products", "/blog", "/contact",
-                 "/login", "/dashboard"];
+    let paths = [
+        "/",
+        "/about",
+        "/products",
+        "/blog",
+        "/contact",
+        "/login",
+        "/dashboard",
+    ];
     for path in &paths {
         // has_referer=true so referer_ratio stays above the tree threshold
-        let action = detector.check(ip, "GET", path, "example.com",
-                                     "Mozilla/5.0", 0, true, true, true);
-        assert_eq!(action, DDoSAction::Allow,
-            "IPv6 normal traffic blocked on {path}");
+        let action = detector.check(
+            ip,
+            "GET",
+            path,
+            "example.com",
+            "Mozilla/5.0",
+            0,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            action,
+            DDoSAction::Allow,
+            "IPv6 normal traffic blocked on {path}"
+        );
     }
 }

@@ -55,11 +55,7 @@ impl BotAllowlist {
                     .iter()
                     .map(|s| s.to_ascii_lowercase())
                     .collect(),
-                cidrs: r
-                    .cidrs
-                    .iter()
-                    .filter_map(|s| CidrBlock::parse(s))
-                    .collect(),
+                cidrs: r.cidrs.iter().filter_map(|s| CidrBlock::parse(s)).collect(),
             })
             .collect();
 
@@ -114,7 +110,10 @@ impl BotAllowlist {
             // 3. DNS verification (cached).
             if !rule.dns_suffixes.is_empty() {
                 // Check cache first.
-                let cache = self.verified_cache.read().unwrap_or_else(|e| e.into_inner());
+                let cache = self
+                    .verified_cache
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 if let Some(entry) = cache.get(&ip) {
                     if entry.created.elapsed() < self.cache_ttl {
                         if entry.verified && entry.rule_idx == idx {
@@ -146,7 +145,10 @@ impl BotAllowlist {
 
     /// Evict expired entries from the verified cache.
     pub fn evict_stale(&self) {
-        let mut cache = self.verified_cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .verified_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         cache.retain(|_, entry| entry.created.elapsed() < self.cache_ttl);
     }
 }
@@ -208,9 +210,9 @@ fn verify_dns(ip: IpAddr, suffixes: &[String]) -> bool {
     };
 
     // Step 2: hostname must end with one of the allowed suffixes.
-    let suffix_match = suffixes.iter().any(|s| {
-        hostname.ends_with(s) || hostname.ends_with(&format!(".{s}"))
-    });
+    let suffix_match = suffixes
+        .iter()
+        .any(|s| hostname.ends_with(s) || hostname.ends_with(&format!(".{s}")));
     if !suffix_match {
         return false;
     }
@@ -237,13 +239,13 @@ mod tests {
         }];
         let al = BotAllowlist::spawn(&rules, 3600);
         assert_eq!(
-            al.check("CCBot/2.0 (https://commoncrawl.org)", "1.2.3.4".parse().unwrap()),
+            al.check(
+                "CCBot/2.0 (https://commoncrawl.org)",
+                "1.2.3.4".parse().unwrap()
+            ),
             Some("commoncrawl"),
         );
-        assert_eq!(
-            al.check("Mozilla/5.0", "1.2.3.4".parse().unwrap()),
-            None,
-        );
+        assert_eq!(al.check("Mozilla/5.0", "1.2.3.4".parse().unwrap()), None,);
     }
 
     #[test]
@@ -260,10 +262,7 @@ mod tests {
             Some("openai"),
         );
         // Wrong IP → spoofed UA
-        assert_eq!(
-            al.check("GPTBot/1.0", "1.2.3.4".parse().unwrap()),
-            None,
-        );
+        assert_eq!(al.check("GPTBot/1.0", "1.2.3.4".parse().unwrap()), None,);
     }
 
     #[test]
@@ -315,6 +314,9 @@ mod tests {
     #[test]
     fn test_verify_dns_with_bad_ip() {
         // This IP almost certainly won't reverse-resolve to googlebot.com
-        assert!(!verify_dns("127.0.0.1".parse().unwrap(), &["googlebot.com".into()]));
+        assert!(!verify_dns(
+            "127.0.0.1".parse().unwrap(),
+            &["googlebot.com".into()]
+        ));
     }
 }

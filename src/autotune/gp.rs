@@ -3,7 +3,6 @@
 
 /// Gaussian Process surrogate with RBF kernel and Cholesky solver.
 /// Designed for <200 observations in 4-10 dimensions.
-
 /// RBF (squared exponential) kernel: k(x1, x2) = exp(-||x1-x2||^2 / (2 * l^2))
 fn rbf_kernel(x1: &[f64], x2: &[f64], length_scale: f64) -> f64 {
     let sq_dist: f64 = x1.iter().zip(x2.iter()).map(|(a, b)| (a - b).powi(2)).sum();
@@ -57,12 +56,18 @@ impl GaussianProcess {
         }
 
         // k_star = [k(x, x_i) for i in 0..n]
-        let k_star: Vec<f64> = self.xs.iter()
+        let k_star: Vec<f64> = self
+            .xs
+            .iter()
             .map(|xi| rbf_kernel(x, xi, self.length_scale))
             .collect();
 
         // mean = k_star^T * alpha
-        let mean: f64 = k_star.iter().zip(self.alpha.iter()).map(|(k, a)| k * a).sum();
+        let mean: f64 = k_star
+            .iter()
+            .zip(self.alpha.iter())
+            .map(|(k, a)| k * a)
+            .sum();
 
         // variance = k(x, x) - k_star^T * K^{-1} * k_star
         // K^{-1} * k_star is solved via L: v = L^{-1} * k_star (forward sub)
@@ -76,6 +81,10 @@ impl GaussianProcess {
 
     pub fn len(&self) -> usize {
         self.n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
     }
 
     fn recompute(&mut self) {

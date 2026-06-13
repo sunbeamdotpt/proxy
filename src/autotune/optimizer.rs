@@ -98,7 +98,9 @@ impl BayesianOptimizer {
     /// Return the best trial observed so far.
     pub fn best(&self) -> Option<&Trial> {
         self.trials.iter().max_by(|a, b| {
-            a.objective.partial_cmp(&b.objective).unwrap_or(std::cmp::Ordering::Equal)
+            a.objective
+                .partial_cmp(&b.objective)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
     }
 
@@ -119,8 +121,17 @@ mod tests {
     #[test]
     fn test_optimizer_suggest_returns_valid_params() {
         let space = ParamSpace::new(vec![
-            ParamDef { name: "x".into(), param_type: ParamType::Continuous { min: 0.0, max: 1.0 } },
-            ParamDef { name: "y".into(), param_type: ParamType::Continuous { min: -5.0, max: 5.0 } },
+            ParamDef {
+                name: "x".into(),
+                param_type: ParamType::Continuous { min: 0.0, max: 1.0 },
+            },
+            ParamDef {
+                name: "y".into(),
+                param_type: ParamType::Continuous {
+                    min: -5.0,
+                    max: 5.0,
+                },
+            },
         ]);
         let mut opt = BayesianOptimizer::new(space);
 
@@ -133,9 +144,10 @@ mod tests {
     #[test]
     fn test_optimizer_converges_1d() {
         // Optimize f(x) = -(x - 0.7)^2, max at x=0.7
-        let space = ParamSpace::new(vec![
-            ParamDef { name: "x".into(), param_type: ParamType::Continuous { min: 0.0, max: 1.0 } },
-        ]);
+        let space = ParamSpace::new(vec![ParamDef {
+            name: "x".into(),
+            param_type: ParamType::Continuous { min: 0.0, max: 1.0 },
+        }]);
         let mut opt = BayesianOptimizer::new(space);
 
         for _ in 0..30 {
@@ -155,9 +167,10 @@ mod tests {
 
     #[test]
     fn test_optimizer_best_tracks_maximum() {
-        let space = ParamSpace::new(vec![
-            ParamDef { name: "x".into(), param_type: ParamType::Continuous { min: 0.0, max: 1.0 } },
-        ]);
+        let space = ParamSpace::new(vec![ParamDef {
+            name: "x".into(),
+            param_type: ParamType::Continuous { min: 0.0, max: 1.0 },
+        }]);
         let mut opt = BayesianOptimizer::new(space);
 
         opt.observe(vec![0.2], 0.5, Duration::from_millis(1));

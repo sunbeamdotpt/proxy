@@ -181,16 +181,32 @@ pub type ScannerFeatureVectorF32 = [f32; NUM_SCANNER_FEATURES];
 /// Same as `extract_features` but returns f32 for ensemble inference.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_features_f32(
-    method: &str, path: &str, host_prefix: &str,
-    has_cookies: bool, has_referer: bool, has_accept_language: bool,
-    accept: &str, user_agent: &str, content_length: u64,
+    method: &str,
+    path: &str,
+    host_prefix: &str,
+    has_cookies: bool,
+    has_referer: bool,
+    has_accept_language: bool,
+    accept: &str,
+    user_agent: &str,
+    content_length: u64,
     fragment_hashes: &FxHashSet<u64>,
     extension_hashes: &FxHashSet<u64>,
     configured_hosts: &FxHashSet<u64>,
 ) -> ScannerFeatureVectorF32 {
     let f64_features = extract_features(
-        method, path, host_prefix, has_cookies, has_referer, has_accept_language,
-        accept, user_agent, content_length, fragment_hashes, extension_hashes, configured_hosts,
+        method,
+        path,
+        host_prefix,
+        has_cookies,
+        has_referer,
+        has_accept_language,
+        accept,
+        user_agent,
+        content_length,
+        fragment_hashes,
+        extension_hashes,
+        configured_hosts,
     );
     let mut out = [0.0f32; NUM_SCANNER_FEATURES];
     for i in 0..NUM_SCANNER_FEATURES {
@@ -249,10 +265,21 @@ mod tests {
 
     fn make_fragment_hashes() -> FxHashSet<u64> {
         let fragments = [
-            ".env", "wp-admin", "wp-login", "phpinfo", "phpmyadmin",
-            ".git", "cgi-bin", "shell", ".htaccess", ".htpasswd",
+            ".env",
+            "wp-admin",
+            "wp-login",
+            "phpinfo",
+            "phpmyadmin",
+            ".git",
+            "cgi-bin",
+            "shell",
+            ".htaccess",
+            ".htpasswd",
         ];
-        fragments.iter().map(|f| fx_hash_bytes(f.as_bytes())).collect()
+        fragments
+            .iter()
+            .map(|f| fx_hash_bytes(f.as_bytes()))
+            .collect()
     }
 
     fn make_extension_hashes() -> FxHashSet<u64> {
@@ -347,8 +374,18 @@ mod tests {
         let eh = make_extension_hashes();
         let ch = make_configured_hosts();
         let features = extract_features(
-            "GET", "/blog/post", "test", true, true, true,
-            "text/html", "Mozilla/5.0", 0, &fh, &eh, &ch,
+            "GET",
+            "/blog/post",
+            "test",
+            true,
+            true,
+            true,
+            "text/html",
+            "Mozilla/5.0",
+            0,
+            &fh,
+            &eh,
+            &ch,
         );
         assert_eq!(features.len(), NUM_SCANNER_FEATURES);
     }
@@ -371,6 +408,9 @@ mod tests {
         let hashes = make_fragment_hashes();
         // "php-is-dead" is NOT a known fragment
         let score = suspicious_path_score("/blog/php-is-dead", &hashes);
-        assert_eq!(score, 0.0, "legitimate path with 'php' substring should not match");
+        assert_eq!(
+            score, 0.0,
+            "legitimate path with 'php' substring should not match"
+        );
     }
 }

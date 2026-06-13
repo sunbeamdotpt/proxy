@@ -23,10 +23,7 @@ use super::gen::ddos_weights;
 ///
 /// The bounds are outward-rounded in f32: `lo ≤ mlpForwardF32(x') ≤ hi` for
 /// every `x'` in the box, on IEEE-754 hardware.
-pub fn ddos_pre_sigmoid_interval(
-    input_lo: &[f32; 14],
-    input_hi: &[f32; 14],
-) -> PreSigmoidInterval {
+pub fn ddos_pre_sigmoid_interval(input_lo: &[f32; 14], input_hi: &[f32; 14]) -> PreSigmoidInterval {
     ibp_mlp_pre_sigmoid::<14>(
         &ddos_weights::W1,
         &ddos_weights::B1,
@@ -59,8 +56,8 @@ pub fn ddos_certified_radius(input: &[f32; 14], max_eps: f32, tol: f32) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mlp::mlp_predict_32;
+    use super::*;
 
     /// Outward-rounded IBP bounds at ε = 0 contain the inner pre-sigmoid value.
     #[test]

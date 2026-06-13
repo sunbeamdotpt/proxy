@@ -49,7 +49,7 @@ fn parse_modsec_content(content: &str) -> Result<Vec<(AuditFields, String)>> {
             // Flush previous section.
             if let (Some(ref cid), Some(sec)) = (&current_id, current_section) {
                 let entry = sections.entry(cid.clone()).or_default();
-                entry.entry(sec).or_default().extend(current_lines.drain(..));
+                entry.entry(sec).or_default().append(&mut current_lines);
             }
             if !sections.contains_key(&id) {
                 id_order.push(id.clone());
@@ -64,7 +64,7 @@ fn parse_modsec_content(content: &str) -> Result<Vec<(AuditFields, String)>> {
     // Flush last section.
     if let (Some(ref cid), Some(sec)) = (&current_id, current_section) {
         let entry = sections.entry(cid.clone()).or_default();
-        entry.entry(sec).or_default().extend(current_lines.drain(..));
+        entry.entry(sec).or_default().append(&mut current_lines);
     }
 
     // Convert each transaction into AuditFields.
@@ -186,14 +186,17 @@ fn transaction_to_audit_fields(
         .get(&'F')
         .and_then(|lines| {
             // First non-empty line: "HTTP/1.1 403 Forbidden"
-            lines.iter().find(|l| !l.trim().is_empty()).and_then(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    parts[1].parse::<u16>().ok()
-                } else {
-                    None
-                }
-            })
+            lines
+                .iter()
+                .find(|l| !l.trim().is_empty())
+                .and_then(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        parts[1].parse::<u16>().ok()
+                    } else {
+                        None
+                    }
+                })
         })
         .unwrap_or(0);
 

@@ -123,7 +123,7 @@ pub fn extract_timing_profiles(csv_dir: &Path) -> Result<Vec<TimingProfile>> {
             .map(|e| e.path())
             .filter(|p| {
                 p.extension()
-                    .map(|e| e.to_ascii_lowercase() == "csv")
+                    .map(|e| e.eq_ignore_ascii_case("csv"))
                     .unwrap_or(false)
             })
             .collect();
@@ -162,11 +162,7 @@ fn parse_csv_file(
         .trim(csv::Trim::All)
         .from_path(path)?;
 
-    let headers: Vec<String> = rdr
-        .headers()?
-        .iter()
-        .map(|h| h.to_string())
-        .collect();
+    let headers: Vec<String> = rdr.headers()?.iter().map(|h| h.to_string()).collect();
 
     // Locate required columns.
     let col_label = find_column(&headers, "Label")
@@ -249,7 +245,7 @@ pub fn extract_ddos_samples(csv_dir: &Path) -> Result<Vec<crate::dataset::sample
             .map(|e| e.path())
             .filter(|p| {
                 p.extension()
-                    .map(|e| e.to_ascii_lowercase() == "csv")
+                    .map(|e| e.eq_ignore_ascii_case("csv"))
                     .unwrap_or(false)
             })
             .collect();
@@ -381,7 +377,7 @@ fn extract_ddos_samples_from_csv(
         let mut features = vec![0.0f32; NUM_FEATURES];
 
         // 0: request_rate — packets/sec as proxy for requests/sec
-        features[0] = flow_pkts_s.max(0.0).min(10000.0) as f32;
+        features[0] = flow_pkts_s.clamp(0.0, 10000.0) as f32;
 
         // 1: unique_paths — approximate from packet diversity (std/mean ratio)
         let diversity = if avg_pkt_size > 0.0 {
@@ -392,7 +388,11 @@ fn extract_ddos_samples_from_csv(
         features[1] = (diversity * 5.0 + 1.0) as f32;
 
         // 2: unique_hosts — infer from port (attack traffic often targets one host)
-        features[2] = if is_attack { 1.0 } else { rng.random_range(1.0..5.0) as f32 };
+        features[2] = if is_attack {
+            1.0
+        } else {
+            rng.random_range(1.0..5.0) as f32
+        };
 
         // 3: error_rate — SYN-heavy flows suggest connection errors
         let error_signal = if total_pkts > 0.0 {
@@ -432,7 +432,7 @@ fn extract_ddos_samples_from_csv(
         };
 
         // 8: avg_content_length — from average packet size
-        features[8] = avg_pkt_size.max(0.0).min(10000.0) as f32;
+        features[8] = avg_pkt_size.clamp(0.0, 10000.0) as f32;
 
         // 9: unique_user_agents — low for attacks
         features[9] = if is_attack {
@@ -556,13 +556,213 @@ Flow Duration,Total Fwd Packets,Flow Bytes/s,Flow IAT Mean,Flow IAT Std,Label
 
     #[test]
     fn test_find_column_case_insensitive() {
-        let headers: Vec<String> = vec![
-            " Flow Duration ".to_string(),
-            "label".to_string(),
-        ];
+        let headers: Vec<String> = vec![" Flow Duration ".to_string(), "label".to_string()];
         assert_eq!(find_column(&headers, "Flow Duration"), Some(0));
         assert_eq!(find_column(&headers, "Label"), Some(1));
         assert_eq!(find_column(&headers, "LABEL"), Some(1));
         assert_eq!(find_column(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn test_extract_timing_profiles_from_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s,Label\n1000000,100000,50000,5000,BENIGN\n500000,5000,2000,50000,DDoS\n";
+        std::fs::write(dir.path().join("a.csv"), csv).unwrap();
+        let profiles = extract_timing_profiles(dir.path()).unwrap();
+        assert_eq!(profiles.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_timing_profiles_missing_label_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv =
+            "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s\n1000000,100000,50000,5000\n";
+        std::fs::write(dir.path().join("bad.csv"), csv).unwrap();
+        let result = extract_timing_profiles(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_timing_profiles_empty_label_skipped() {
+        let csv = "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s,Label\n1000000,100000,50000,5000,\n";
+        let profiles = extract_timing_profiles_from_str(csv).unwrap();
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn test_stats_accumulator_non_finite_ignored() {
+        let mut acc = StatsAccumulator::default();
+        acc.push(2.0);
+        acc.push(f64::NAN);
+        acc.push(4.0);
+        assert!((acc.mean() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stats_accumulator_std_dev_single_value() {
+        let mut acc = StatsAccumulator::default();
+        acc.push(5.0);
+        assert_eq!(acc.std_dev(), 0.0);
+    }
+
+    #[test]
+    fn test_label_accumulator_into_profile() {
+        let mut acc = LabelAccumulator::new("BENIGN".to_string());
+        acc.count = 2;
+        acc.inter_arrival.push(0.1);
+        acc.inter_arrival.push(0.2);
+        acc.burst_duration.push(1.0);
+        acc.burst_duration.push(2.0);
+        acc.flow_bytes_per_sec.push(100.0);
+        acc.flow_bytes_per_sec.push(200.0);
+        let profile = acc.into_profile();
+        assert_eq!(profile.attack_type, "BENIGN");
+        assert_eq!(profile.sample_count, 2);
+        assert!((profile.inter_arrival_mean - 0.15).abs() < 1e-10);
+    }
+
+    fn make_ddos_csv() -> String {
+        "Flow Duration,Total Fwd Packets,Total Backward Packets,Flow Packets/s,Flow IAT Mean,Average Packet Size,Packet Length Std,SYN Flag Count,Label\n\
+         1000000,10,10,20.0,100000,500,50,5,BENIGN\n\
+         500000,100,100,400.0,5000,100,10,50,DDoS\n"
+            .to_string()
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_str() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ddos.csv");
+        std::fs::write(&path, make_ddos_csv()).unwrap();
+        let samples = extract_ddos_samples(&path).unwrap();
+        assert_eq!(samples.len(), 2);
+        let attack_count = samples.iter().filter(|s| s.label > 0.5).count();
+        let normal_count = samples.len() - attack_count;
+        assert_eq!(attack_count, 1);
+        assert_eq!(normal_count, 1);
+        assert_eq!(
+            samples[0].source,
+            crate::dataset::sample::DataSource::SyntheticCicTiming
+        );
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = extract_ddos_samples(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_csv_web_attack_label() {
+        let csv = "Flow Duration,Total Fwd Packets,Total Backward Packets,Flow Packets/s,Flow IAT Mean,Average Packet Size,Packet Length Std,SYN Flag Count,Label\n\
+                   500000,100,100,400.0,5000,100,10,50,Web Attack XSS\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web.csv");
+        std::fs::write(&path, csv).unwrap();
+        let samples = extract_ddos_samples(&path).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].label > 0.5);
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_csv_missing_columns() {
+        let csv = "Flow Duration,Label\n\
+                   500000,BENIGN\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.csv");
+        std::fs::write(&path, csv).unwrap();
+        let samples = extract_ddos_samples(&path).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].label < 0.5);
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_csv_bot_label() {
+        let csv = "Flow Duration,Total Fwd Packets,Total Backward Packets,Flow Packets/s,Flow IAT Mean,Average Packet Size,Packet Length Std,SYN Flag Count,Label\n\
+                   500000,100,100,400.0,5000,100,10,50,Bot\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bot.csv");
+        std::fs::write(&path, csv).unwrap();
+        let samples = extract_ddos_samples(&path).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].label > 0.5);
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_csv_infiltration_label() {
+        let csv = "Flow Duration,Total Fwd Packets,Total Backward Packets,Flow Packets/s,Flow IAT Mean,Average Packet Size,Packet Length Std,SYN Flag Count,Label\n\
+                   500000,100,100,400.0,5000,100,10,50,Infiltration\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("infiltration.csv");
+        std::fs::write(&path, csv).unwrap();
+        let samples = extract_ddos_samples(&path).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].label > 0.5);
+    }
+
+    #[test]
+    fn test_extract_timing_profiles_sorts_by_attack_type() {
+        let csv = "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s,Label\n\
+                   1000000,100000,50000,5000,DDoS\n\
+                   1000000,100000,50000,5000,BENIGN\n\
+                   1000000,100000,50000,5000,PortScan\n";
+        let profiles = extract_timing_profiles_from_str(csv).unwrap();
+        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles[0].attack_type, "BENIGN");
+        assert_eq!(profiles[1].attack_type, "DDoS");
+        assert_eq!(profiles[2].attack_type, "PortScan");
+    }
+
+    #[test]
+    fn test_extract_timing_profiles_aggregates_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.csv"),
+            "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s,Label\n1000000,100000,50000,5000,BENIGN\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.csv"),
+            "Flow Duration,Flow IAT Mean,Flow IAT Std,Flow Bytes/s,Label\n500000,5000,2000,50000,BENIGN\n",
+        )
+        .unwrap();
+        let profiles = extract_timing_profiles(dir.path()).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].attack_type, "BENIGN");
+        assert_eq!(profiles[0].sample_count, 2);
+    }
+
+    #[test]
+    fn test_stats_accumulator_infinity_ignored() {
+        let mut acc = StatsAccumulator::default();
+        acc.push(1.0);
+        acc.push(f64::INFINITY);
+        acc.push(3.0);
+        assert!((acc.mean() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stats_accumulator_neg_infinity_ignored() {
+        let mut acc = StatsAccumulator::default();
+        acc.push(1.0);
+        acc.push(f64::NEG_INFINITY);
+        acc.push(3.0);
+        assert!((acc.mean() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_label_accumulator_zero_count_filtered() {
+        let mut accumulators: std::collections::HashMap<String, LabelAccumulator> =
+            std::collections::HashMap::new();
+        accumulators.insert(
+            "EMPTY".to_string(),
+            LabelAccumulator::new("EMPTY".to_string()),
+        );
+        let profiles: Vec<TimingProfile> = accumulators
+            .into_values()
+            .filter(|a| a.count > 0)
+            .map(|a| a.into_profile())
+            .collect();
+        assert!(profiles.is_empty());
     }
 }

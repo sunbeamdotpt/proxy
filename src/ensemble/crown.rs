@@ -183,7 +183,10 @@ pub fn ibp_mlp_pre_sigmoid<const IN: usize>(
         }
     }
 
-    PreSigmoidInterval { lo: out_lo, hi: out_hi }
+    PreSigmoidInterval {
+        lo: out_lo,
+        hi: out_hi,
+    }
 }
 
 /// Construct an outward-rounded input box around `input` of L∞ radius `eps`.
@@ -208,6 +211,7 @@ fn input_box<const IN: usize>(input: &[f32; IN], eps: f32) -> ([f32; IN], [f32; 
 /// (verdict `block`); we then require `sigmoid_down(pre.lo) > threshold` to
 /// certify. `false` means the center is below (verdict `allow`); we require
 /// `sigmoid_up(pre.hi) < threshold`. Both checks use outward-rounded sigmoid.
+#[allow(clippy::too_many_arguments)]
 fn verdict_stable<const IN: usize>(
     w1: &[[f32; IN]; 32],
     b1: &[f32; 32],
@@ -242,6 +246,7 @@ fn verdict_stable<const IN: usize>(
 /// forward-error component. It is not necessarily tight — IBP is a
 /// conservative bound and tighter relaxations (CROWN linear bounds, β-CROWN,
 /// etc.) may certify larger radii.
+#[allow(clippy::too_many_arguments)]
 pub fn certified_radius<const IN: usize>(
     w1: &[[f32; IN]; 32],
     b1: &[f32; 32],
@@ -279,9 +284,9 @@ fn sigmoid_f32(x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::gen::scanner_weights;
     use super::super::mlp::mlp_predict_32;
+    use super::*;
 
     /// Outward-rounded IBP bounds at ε = 0 sandwich the actual MLP output.
     #[test]

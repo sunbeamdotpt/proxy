@@ -106,8 +106,8 @@ impl<B: Backend> Batcher<B, TrainingItem, TrainingBatch<B>> for SampleBatcher {
 
         let labels = Tensor::<B, 1, Int>::from_ints(labels.as_slice(), device);
 
-        let weights = Tensor::<B, 1>::from_floats(weights.as_slice(), device)
-            .reshape([batch_size, 1]);
+        let weights =
+            Tensor::<B, 1>::from_floats(weights.as_slice(), device).reshape([batch_size, 1]);
 
         TrainingBatch {
             features,

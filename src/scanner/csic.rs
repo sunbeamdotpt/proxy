@@ -12,8 +12,7 @@ use crate::ddos::audit_log::AuditFields;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-const REPO_BASE: &str =
-    "https://raw.githubusercontent.com/sunbeamdotpt/csic-dataset/mainline";
+const REPO_BASE: &str = "https://raw.githubusercontent.com/sunbeamdotpt/csic-dataset/mainline";
 
 const FILES: &[(&str, &str)] = &[
     ("normalTrafficTraining.txt", "normal"),
@@ -182,7 +181,10 @@ impl Rng {
         Self(seed)
     }
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn next_usize(&mut self, bound: usize) -> usize {
@@ -196,12 +198,7 @@ impl Rng {
     }
 }
 
-fn to_audit_fields(
-    req: &ParsedRequest,
-    label: &str,
-    hosts: &[&str],
-    rng: &mut Rng,
-) -> AuditFields {
+fn to_audit_fields(req: &ParsedRequest, label: &str, hosts: &[&str], rng: &mut Rng) -> AuditFields {
     let (host_prefix, status) = if label == "normal" {
         let host = rng.choice(hosts).to_string();
         let statuses: &[u16] = &[200, 200, 200, 200, 301, 304];
@@ -229,7 +226,11 @@ fn to_audit_fields(
             "-".to_string()
         } else {
             let al = req.accept_language.clone();
-            if al == "-" { "-".to_string() } else { al }
+            if al == "-" {
+                "-".to_string()
+            } else {
+                al
+            }
         };
         let r = rng.next_f64();
         let user_agent = if r < 0.15 {
@@ -247,8 +248,16 @@ fn to_audit_fields(
     } else {
         (
             req.has_cookies,
-            if req.referer == "-" { "-".to_string() } else { req.referer.clone() },
-            if req.accept_language == "-" { "-".to_string() } else { req.accept_language.clone() },
+            if req.referer == "-" {
+                "-".to_string()
+            } else {
+                req.referer.clone()
+            },
+            if req.accept_language == "-" {
+                "-".to_string()
+            } else {
+                req.accept_language.clone()
+            },
             req.user_agent.clone(),
         )
     };
@@ -293,7 +302,12 @@ fn to_audit_fields(
             "-".to_string()
         },
         label: Some(
-            if label == "normal" { "normal" } else { "attack" }.to_string(),
+            if label == "normal" {
+                "normal"
+            } else {
+                "attack"
+            }
+            .to_string(),
         ),
         ..AuditFields::default()
     }
@@ -310,7 +324,10 @@ pub fn fetch_csic_dataset() -> Result<Vec<(AuditFields, String)>> {
     for (filename, label) in FILES {
         let content = download_or_cached(filename)?;
         let requests = parse_csic_content(&content);
-        eprintln!("  parsed {} {label} requests from {filename}", requests.len());
+        eprintln!(
+            "  parsed {} {label} requests from {filename}",
+            requests.len()
+        );
 
         for req in &requests {
             let fields = to_audit_fields(req, label, DEFAULT_HOSTS, &mut rng);
@@ -329,8 +346,14 @@ pub fn fetch_csic_dataset() -> Result<Vec<(AuditFields, String)>> {
     eprintln!(
         "CSIC total: {} ({} normal, {} attack)",
         all_entries.len(),
-        all_entries.iter().filter(|(f, _)| f.label.as_deref() == Some("normal")).count(),
-        all_entries.iter().filter(|(f, _)| f.label.as_deref() == Some("attack")).count(),
+        all_entries
+            .iter()
+            .filter(|(f, _)| f.label.as_deref() == Some("normal"))
+            .count(),
+        all_entries
+            .iter()
+            .filter(|(f, _)| f.label.as_deref() == Some("attack"))
+            .count(),
     );
 
     Ok(all_entries)
@@ -379,7 +402,8 @@ mod tests {
 
     #[test]
     fn test_parse_csic_content_multiple_requests() {
-        let content = "GET /page1 HTTP/1.1\nHost: localhost\n\nPOST /page2 HTTP/1.1\nHost: localhost\n\n";
+        let content =
+            "GET /page1 HTTP/1.1\nHost: localhost\n\nPOST /page2 HTTP/1.1\nHost: localhost\n\n";
         let reqs = parse_csic_content(content);
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0].method, "GET");

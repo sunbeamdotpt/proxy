@@ -138,7 +138,12 @@ fn replay_scanner(entries: &[AuditLogLine]) {
                     ));
                 }
                 if (200..400).contains(&f.status) {
-                    fp_candidates.push((f.path.clone(), f.user_agent.clone(), f.status, verdict.score));
+                    fp_candidates.push((
+                        f.path.clone(),
+                        f.user_agent.clone(),
+                        f.status,
+                        verdict.score,
+                    ));
                 }
             }
             ScannerAction::Allow => allowed += 1,
@@ -154,16 +159,8 @@ fn replay_scanner(entries: &[AuditLogLine]) {
     };
 
     eprintln!("  total:       {total}");
-    eprintln!(
-        "  blocked:     {} ({:.1}%)",
-        blocked,
-        pct(blocked)
-    );
-    eprintln!(
-        "  allowed:     {} ({:.1}%)",
-        allowed,
-        pct(allowed)
-    );
+    eprintln!("  blocked:     {} ({:.1}%)", blocked, pct(blocked));
+    eprintln!("  allowed:     {} ({:.1}%)", allowed, pct(allowed));
     eprintln!(
         "  paths:       tree_block={} tree_allow={} mlp={}",
         path_counts[0], path_counts[1], path_counts[2]
@@ -220,15 +217,13 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         state
             .content_lengths
             .push(f.content_length.min(u32::MAX as u64) as u32);
+        state.has_cookies.push(f.has_cookies);
         state
-            .has_cookies
-            .push(f.has_cookies);
-        state.has_referer.push(
-            !f.referer.is_empty() && f.referer != "-",
-        );
-        state.has_accept_language.push(
-            !f.accept_language.is_empty() && f.accept_language != "-",
-        );
+            .has_referer
+            .push(!f.referer.is_empty() && f.referer != "-");
+        state
+            .has_accept_language
+            .push(!f.accept_language.is_empty() && f.accept_language != "-");
         state
             .suspicious_paths
             .push(crate::ddos::features::is_suspicious_path(&f.path));
@@ -285,7 +280,12 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
         }
     };
 
-    eprintln!("  unique IPs:  {} ({} skipped < {} events)", ip_states.len(), skipped_ips, min_events);
+    eprintln!(
+        "  unique IPs:  {} ({} skipped < {} events)",
+        ip_states.len(),
+        skipped_ips,
+        min_events
+    );
     eprintln!("  evaluated:   {total_ips}");
     eprintln!(
         "  blocked:     {} ({:.1}%)",
@@ -305,20 +305,197 @@ fn replay_ddos(entries: &[AuditLogLine], window_secs: f64, min_events: usize) {
     if !blocked_details.is_empty() {
         eprintln!("\n  blocked IPs (up to 30):");
         let mut sorted = blocked_details;
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (ip, reqs, score, reason) in &sorted {
-            eprintln!(
-                "    {:<40} {} reqs  score={:.3}  {reason}",
-                ip, reqs, score
-            );
+            eprintln!("    {:<40} {} reqs  score={:.3}  {reason}", ip, reqs, score);
         }
     }
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max - 3])
+        format!(
+            "{}...",
+            s.chars().take(max.saturating_sub(3)).collect::<String>()
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_audit_line(
+        path: &str,
+        user_agent: &str,
+        status: u16,
+        client_ip: &str,
+        has_cookies: bool,
+    ) -> String {
+        format!(
+            r#"{{"timestamp":"2026-01-01T00:00:00Z","level":"INFO","fields":{{"message":"request","target":"audit","method":"GET","host":"app.example.com","path":"{path}","client_ip":"{client_ip}","status":{status},"duration_ms":10,"content_length":0,"response_bytes":0,"user_agent":"{user_agent}","referer":"-","accept_language":"-","accept":"*/*","accept_encoding":"gzip","has_cookies":{has_cookies},"connection":"keep-alive","cf_country":"PT","backend":"svc:8080","error":"","http_version":"HTTP/1.1","header_count":10}}}}"#
+        )
+    }
+
+    fn make_non_audit_line() -> String {
+        r#"{"timestamp":"2026-01-01T00:00:00Z","level":"ERROR","fields":{"message":"tls handshake failed","target":"proxy"}}"#.to_string()
+    }
+
+    fn write_replay_file(dir: &tempfile::TempDir, lines: &[String]) -> String {
+        let path = dir.path().join("replay.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        let s = "exactly10!";
+        assert_eq!(truncate(s, 10), s);
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        let s = "αβγδεζηθικλμνξοπρστ";
+        assert_eq!(truncate(s, 8), "αβγδε...");
+    }
+
+    #[test]
+    fn test_run_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_replay_file(&dir, &[]);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_non_audit_lines_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_replay_file(&dir, &[make_non_audit_line(), make_non_audit_line()]);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_valid_audit_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_audit_line("/", "Mozilla/5.0", 200, "1.2.3.4", true),
+            make_audit_line("/about", "Mozilla/5.0", 200, "1.2.3.4", true),
+        ];
+        let input = write_replay_file(&dir, &lines);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_mixed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_non_audit_line(),
+            make_audit_line("/", "Mozilla/5.0", 200, "1.2.3.4", true),
+            make_non_audit_line(),
+        ];
+        let input = write_replay_file(&dir, &lines);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_scanner_blocked_example() {
+        // Suspicious path with non-browser UA should be blocked by the scanner tree.
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_audit_line("/.env", "curl/7.0", 200, "1.2.3.4", false)];
+        let input = write_replay_file(&dir, &lines);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_ddos_min_events_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_audit_line("/", "Mozilla/5.0", 200, "1.2.3.4", true),
+            make_audit_line("/about", "Mozilla/5.0", 200, "1.2.3.4", true),
+        ];
+        let input = write_replay_file(&dir, &lines);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 5,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_schema_error() {
+        // Missing required 'status' field.
+        let dir = tempfile::tempdir().unwrap();
+        let bad_line = r#"{"timestamp":"2026-01-01T00:00:00Z","level":"INFO","fields":{"message":"request","target":"audit","method":"GET","host":"app.example.com","path":"/","client_ip":"1.2.3.4"}}"#.to_string();
+        let input = write_replay_file(&dir, &[bad_line]);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_multiple_schema_errors_prints_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_line = r#"{"timestamp":"2026-01-01T00:00:00Z","level":"INFO","fields":{"message":"request","target":"audit","method":"GET","host":"app.example.com","path":"/","client_ip":"1.2.3.4"}}"#.to_string();
+        let input = write_replay_file(&dir, &vec![bad_line; 5]);
+        let args = ReplayEnsembleArgs {
+            input,
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn test_run_missing_file_errors() {
+        let args = ReplayEnsembleArgs {
+            input: "/tmp/nonexistent_replay_file_xyz.jsonl".to_string(),
+            window_secs: 60,
+            min_events: 1,
+        };
+        assert!(run(args).is_err());
     }
 }

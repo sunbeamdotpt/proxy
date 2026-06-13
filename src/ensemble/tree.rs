@@ -99,22 +99,34 @@ mod tests {
     fn test_deeper_tree() {
         // Depth-3 tree with 4 features
         let tree: [PackedNode; 7] = [
-            (0, 0.5, 1, 2),        // root: feature 0
-            (1, 0.3, 3, 4),        // left: feature 1
-            (2, 0.7, 5, 6),        // right: feature 2
-            (255, 0.0, 0, 0),      // Allow
-            (255, 0.5, 0, 0),      // Defer
-            (255, 1.0, 0, 0),      // Block
-            (255, 0.0, 0, 0),      // Allow
+            (0, 0.5, 1, 2),   // root: feature 0
+            (1, 0.3, 3, 4),   // left: feature 1
+            (2, 0.7, 5, 6),   // right: feature 2
+            (255, 0.0, 0, 0), // Allow
+            (255, 0.5, 0, 0), // Defer
+            (255, 1.0, 0, 0), // Block
+            (255, 0.0, 0, 0), // Allow
         ];
         // feature 0=0.2 (<=0.5→left=1), feature 1=0.1 (<=0.3→left=3) → Allow
-        assert_eq!(tree_predict(&tree, &[0.2, 0.1, 0.0, 0.0]), TreeDecision::Allow);
+        assert_eq!(
+            tree_predict(&tree, &[0.2, 0.1, 0.0, 0.0]),
+            TreeDecision::Allow
+        );
         // feature 0=0.2 (<=0.5→left=1), feature 1=0.5 (>0.3→right=4) → Defer
-        assert_eq!(tree_predict(&tree, &[0.2, 0.5, 0.0, 0.0]), TreeDecision::Defer);
+        assert_eq!(
+            tree_predict(&tree, &[0.2, 0.5, 0.0, 0.0]),
+            TreeDecision::Defer
+        );
         // feature 0=0.8 (>0.5→right=2), feature 2=0.3 (<=0.7→left=5) → Block
-        assert_eq!(tree_predict(&tree, &[0.8, 0.0, 0.3, 0.0]), TreeDecision::Block);
+        assert_eq!(
+            tree_predict(&tree, &[0.8, 0.0, 0.3, 0.0]),
+            TreeDecision::Block
+        );
         // feature 0=0.8 (>0.5→right=2), feature 2=0.9 (>0.7→right=6) → Allow
-        assert_eq!(tree_predict(&tree, &[0.8, 0.0, 0.9, 0.0]), TreeDecision::Allow);
+        assert_eq!(
+            tree_predict(&tree, &[0.8, 0.0, 0.9, 0.0]),
+            TreeDecision::Allow
+        );
     }
 }
 

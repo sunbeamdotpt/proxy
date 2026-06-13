@@ -105,7 +105,10 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
             .collect();
         let modsec_scanner =
             entries_to_scanner_samples(&entries_with_host, DataSource::OwaspModSec, 0.8)?;
-        eprintln!("  ModSec injected: {} scanner samples", modsec_scanner.len());
+        eprintln!(
+            "  ModSec injected: {} scanner samples",
+            modsec_scanner.len()
+        );
         scanner_samples.extend(modsec_scanner);
     }
 
@@ -246,8 +249,7 @@ fn parse_production_logs(
     input: &str,
     heuristics: &HeuristicThresholds,
 ) -> Result<(Vec<TrainingSample>, Vec<TrainingSample>)> {
-    let file = std::fs::File::open(input)
-        .with_context(|| format!("opening {input}"))?;
+    let file = std::fs::File::open(input).with_context(|| format!("opening {input}"))?;
     let reader = std::io::BufReader::new(file);
 
     let mut scanner_samples = Vec::new();
@@ -288,7 +290,8 @@ fn parse_production_logs(
     for (fields, host_prefix) in &parsed_entries {
         let has_cookies = fields.has_cookies;
         let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+        let has_accept_language =
+            !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -378,9 +381,7 @@ fn extract_ddos_samples_from_entries(
         state.methods.push(method_to_u8(&fields.method));
         state.path_hashes.push(fx_hash(&fields.path));
         state.host_hashes.push(fx_hash(&fields.host));
-        state
-            .user_agent_hashes
-            .push(fx_hash(&fields.user_agent));
+        state.user_agent_hashes.push(fx_hash(&fields.user_agent));
         state.statuses.push(fields.status);
         state
             .durations
@@ -388,18 +389,16 @@ fn extract_ddos_samples_from_entries(
         state
             .content_lengths
             .push(fields.content_length.min(u32::MAX as u64) as u32);
+        state.has_cookies.push(fields.has_cookies);
         state
-            .has_cookies
-            .push(fields.has_cookies);
-        state.has_referer.push(
-            !fields.referer.is_empty() && fields.referer != "-",
-        );
-        state.has_accept_language.push(
-            !fields.accept_language.is_empty() && fields.accept_language != "-",
-        );
-        state.suspicious_paths.push(
-            crate::ddos::features::is_suspicious_path(&fields.path),
-        );
+            .has_referer
+            .push(!fields.referer.is_empty() && fields.referer != "-");
+        state
+            .has_accept_language
+            .push(!fields.accept_language.is_empty() && fields.accept_language != "-");
+        state
+            .suspicious_paths
+            .push(crate::ddos::features::is_suspicious_path(&fields.path));
 
         // Track label per IP if available.
         if let Some(ref label_str) = fields.label {
@@ -449,7 +448,11 @@ fn extract_ddos_samples_from_entries(
                     || fv[13] > heuristics.suspicious_path_ratio
                     || (fv[10] < heuristics.no_cookies_threshold
                         && fv[1] > heuristics.no_cookies_path_count);
-                if is_attack { 1.0f32 } else { 0.0f32 }
+                if is_attack {
+                    1.0f32
+                } else {
+                    0.0f32
+                }
             });
 
             samples.push(TrainingSample {
@@ -494,7 +497,8 @@ fn entries_to_scanner_samples(
     for (fields, host_prefix) in entries {
         let has_cookies = fields.has_cookies;
         let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+        let has_accept_language =
+            !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -582,8 +586,7 @@ mod tests {
             make_test_entry("GET", "/", "5.6.7.8", 200, "normal"),
             make_test_entry("GET", "/page", "9.10.11.12", 200, "unknown_label"),
         ];
-        let samples =
-            entries_to_scanner_samples(&entries, DataSource::Csic2010, 0.8).unwrap();
+        let samples = entries_to_scanner_samples(&entries, DataSource::Csic2010, 0.8).unwrap();
         // "unknown_label" should be skipped.
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].label, 1.0);
@@ -617,5 +620,258 @@ mod tests {
             ..AuditFields::default()
         };
         (fields, "test".to_string())
+    }
+
+    fn make_audit_log_json(fields: &AuditFields) -> String {
+        let line = crate::audit::AuditLogLine {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            level: "INFO".to_string(),
+            fields: fields.clone(),
+            span: None,
+            spans: None,
+        };
+        serde_json::to_string(&line).unwrap()
+    }
+
+    #[test]
+    fn test_parse_production_logs_scanner_attack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let attack = AuditFields {
+            method: "GET".to_string(),
+            host: "test.sunbeam.pt".to_string(),
+            path: "/.env".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 404,
+            user_agent: "curl/7.0".to_string(),
+            has_cookies: false,
+            referer: "-".to_string(),
+            accept_language: "-".to_string(),
+            ..AuditFields::default()
+        };
+        std::fs::write(&path, make_audit_log_json(&attack)).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 10);
+        let (scanner_samples, ddos_samples) =
+            parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert_eq!(scanner_samples.len(), 1);
+        assert_eq!(scanner_samples[0].label, 1.0);
+        assert_eq!(scanner_samples[0].source, DataSource::ProductionLogs);
+        assert!(ddos_samples.is_empty());
+    }
+
+    #[test]
+    fn test_parse_production_logs_scanner_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let normal = AuditFields {
+            method: "GET".to_string(),
+            host: "test.sunbeam.pt".to_string(),
+            path: "/index.html".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 200,
+            user_agent: "Mozilla/5.0".to_string(),
+            has_cookies: true,
+            referer: "https://test.sunbeam.pt".to_string(),
+            accept_language: "en-US".to_string(),
+            ..AuditFields::default()
+        };
+        std::fs::write(&path, make_audit_log_json(&normal)).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 10);
+        let (scanner_samples, _ddos) =
+            parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert_eq!(scanner_samples.len(), 1);
+        assert_eq!(scanner_samples[0].label, 0.0);
+    }
+
+    #[test]
+    fn test_parse_production_logs_ignores_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        // Status 200 but missing browser indicators => ambiguous.
+        let ambiguous = AuditFields {
+            method: "GET".to_string(),
+            host: "test.sunbeam.pt".to_string(),
+            path: "/api/health".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 200,
+            user_agent: "bot/1.0".to_string(),
+            has_cookies: false,
+            referer: "-".to_string(),
+            accept_language: "-".to_string(),
+            ..AuditFields::default()
+        };
+        std::fs::write(&path, make_audit_log_json(&ambiguous)).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 10);
+        let (scanner, _ddos) = parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert!(scanner.is_empty());
+    }
+
+    #[test]
+    fn test_parse_production_logs_ddos_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let mut lines = String::new();
+        for i in 0..10 {
+            let fields = AuditFields {
+                method: "GET".to_string(),
+                host: "test.sunbeam.pt".to_string(),
+                path: format!("/page{i}"),
+                client_ip: "1.2.3.4".to_string(),
+                status: 200,
+                user_agent: "Mozilla/5.0".to_string(),
+                has_cookies: true,
+                referer: "https://test.sunbeam.pt".to_string(),
+                accept_language: "en-US".to_string(),
+                ..AuditFields::default()
+            };
+            lines.push_str(&make_audit_log_json(&fields));
+            lines.push('\n');
+        }
+        std::fs::write(&path, lines).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 5);
+        let (_scanner, ddos) = parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert!(!ddos.is_empty());
+        for s in &ddos {
+            assert_eq!(s.features.len(), NUM_FEATURES);
+        }
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_entries_gt_label() {
+        let mut entries = Vec::new();
+        for _ in 0..10 {
+            entries.push(make_test_entry("GET", "/", "1.2.3.4", 200, "attack"));
+        }
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 5);
+        let samples = extract_ddos_samples_from_entries(&entries, &heuristics).unwrap();
+        assert!(!samples.is_empty());
+        assert!(samples.iter().all(|s| s.label > 0.5));
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_entries_below_min_events() {
+        let entries = vec![make_test_entry("GET", "/", "1.2.3.4", 200, "normal")];
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 10);
+        let samples = extract_ddos_samples_from_entries(&entries, &heuristics).unwrap();
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_entries_empty() {
+        let entries: Vec<(AuditFields, String)> = Vec::new();
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 5);
+        let samples = extract_ddos_samples_from_entries(&entries, &heuristics).unwrap();
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn test_entries_to_scanner_samples_empty() {
+        let entries: Vec<(AuditFields, String)> = Vec::new();
+        let samples = entries_to_scanner_samples(&entries, DataSource::OwaspModSec, 0.8).unwrap();
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn test_parse_production_logs_explicit_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let attack = make_test_entry("GET", "/.env", "1.2.3.4", 200, "attack");
+        let normal = make_test_entry("GET", "/", "5.6.7.8", 500, "normal");
+        // 401 with browser indicators is ambiguous, so "unknown" label should be skipped.
+        let unknown = make_test_entry("GET", "/", "9.10.11.12", 401, "unknown");
+        let lines = format!(
+            "{}\n{}\n{}\n",
+            make_audit_log_json(&attack.0),
+            make_audit_log_json(&normal.0),
+            make_audit_log_json(&unknown.0)
+        );
+        std::fs::write(&path, lines).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 10);
+        let (scanner, _ddos) = parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert_eq!(scanner.len(), 2);
+        assert!(scanner.iter().any(|s| s.label > 0.5));
+        assert!(scanner.iter().any(|s| s.label < 0.5));
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_entries_heuristic_attack() {
+        // Many requests to the same path from one IP with high rate heuristic thresholds.
+        let mut entries = Vec::new();
+        for _ in 0..20 {
+            entries.push(make_test_entry("GET", "/api", "1.2.3.4", 500, ""));
+        }
+        let heuristics = HeuristicThresholds::new(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5);
+        let samples = extract_ddos_samples_from_entries(&entries, &heuristics).unwrap();
+        assert!(!samples.is_empty());
+    }
+
+    #[test]
+    fn test_extract_ddos_samples_from_entries_heuristic_normal() {
+        // Few requests with high thresholds → heuristic labels as normal.
+        let mut entries = Vec::new();
+        for i in 0..5 {
+            entries.push(make_test_entry(
+                "GET",
+                &format!("/page{i}"),
+                "1.2.3.4",
+                200,
+                "",
+            ));
+        }
+        let heuristics = HeuristicThresholds::new(1000.0, 1.0, 1.0, 1.0, 0.0, 1000.0, 5);
+        let samples = extract_ddos_samples_from_entries(&entries, &heuristics).unwrap();
+        assert!(!samples.is_empty());
+        assert!(samples.iter().all(|s| s.label < 0.5));
+    }
+
+    #[test]
+    fn test_parse_production_logs_mixed_scanner_and_ddos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let mut lines = String::new();
+        // One scanner attack.
+        let attack = AuditFields {
+            method: "GET".to_string(),
+            host: "test.sunbeam.pt".to_string(),
+            path: "/.env".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 404,
+            user_agent: "curl/7.0".to_string(),
+            has_cookies: false,
+            referer: "-".to_string(),
+            accept_language: "-".to_string(),
+            ..AuditFields::default()
+        };
+        lines.push_str(&make_audit_log_json(&attack));
+        lines.push('\n');
+        // Several DDoS-like requests from another IP without browser indicators
+        // so they are not picked up as scanner normal samples.
+        for i in 0..10 {
+            let fields = AuditFields {
+                method: "GET".to_string(),
+                host: "test.sunbeam.pt".to_string(),
+                path: format!("/api/{i}"),
+                client_ip: "5.6.7.8".to_string(),
+                status: 200,
+                user_agent: "bot/1.0".to_string(),
+                has_cookies: false,
+                referer: "-".to_string(),
+                accept_language: "-".to_string(),
+                ..AuditFields::default()
+            };
+            lines.push_str(&make_audit_log_json(&fields));
+            lines.push('\n');
+        }
+        std::fs::write(&path, lines).unwrap();
+
+        let heuristics = HeuristicThresholds::new(10.0, 0.85, 0.7, 0.3, 0.05, 20.0, 5);
+        let (scanner, ddos) = parse_production_logs(path.to_str().unwrap(), &heuristics).unwrap();
+        assert_eq!(scanner.len(), 1);
+        assert!(!ddos.is_empty());
     }
 }

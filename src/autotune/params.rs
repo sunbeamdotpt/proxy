@@ -69,17 +69,29 @@ impl ParamSpace {
             .zip(values.iter())
             .map(|(p, &v)| match &p.param_type {
                 ParamType::Continuous { min, max } => {
-                    if (max - min).abs() < 1e-15 { 0.5 } else { (v - min) / (max - min) }
+                    if (max - min).abs() < 1e-15 {
+                        0.5
+                    } else {
+                        (v - min) / (max - min)
+                    }
                 }
                 ParamType::Integer { min, max } => {
                     let range = (*max - *min) as f64;
-                    if range.abs() < 1e-15 { 0.5 } else { (v - *min as f64) / range }
+                    if range.abs() < 1e-15 {
+                        0.5
+                    } else {
+                        (v - *min as f64) / range
+                    }
                 }
                 ParamType::LogScale { min, max } => {
                     let log_min = min.ln();
                     let log_max = max.ln();
                     let log_range = log_max - log_min;
-                    if log_range.abs() < 1e-15 { 0.5 } else { (v.ln() - log_min) / log_range }
+                    if log_range.abs() < 1e-15 {
+                        0.5
+                    } else {
+                        (v.ln() - log_min) / log_range
+                    }
                 }
             })
             .collect()
@@ -101,9 +113,9 @@ impl ParamSpace {
                 let k = rng.random_range(0..=i);
                 perm.swap(i, k);
             }
-            for i in 0..n {
+            for (sample, &p) in samples.iter_mut().zip(perm.iter()) {
                 let u: f64 = rng.random();
-                samples[i][j] = (perm[i] as f64 + u) / n as f64;
+                sample[j] = (p as f64 + u) / n as f64;
             }
         }
         samples
@@ -121,9 +133,24 @@ mod tests {
 
     fn test_space() -> ParamSpace {
         ParamSpace::new(vec![
-            ParamDef { name: "x".into(), param_type: ParamType::Continuous { min: 0.0, max: 10.0 } },
-            ParamDef { name: "n".into(), param_type: ParamType::Integer { min: 1, max: 20 } },
-            ParamDef { name: "lr".into(), param_type: ParamType::LogScale { min: 0.001, max: 0.1 } },
+            ParamDef {
+                name: "x".into(),
+                param_type: ParamType::Continuous {
+                    min: 0.0,
+                    max: 10.0,
+                },
+            },
+            ParamDef {
+                name: "n".into(),
+                param_type: ParamType::Integer { min: 1, max: 20 },
+            },
+            ParamDef {
+                name: "lr".into(),
+                param_type: ParamType::LogScale {
+                    min: 0.001,
+                    max: 0.1,
+                },
+            },
         ])
     }
 

@@ -1,7 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ddos::audit_log::{AuditLog, AuditFields};
+use crate::ddos::audit_log::{AuditFields, AuditLog};
 use crate::scanner::features::{
     self, fx_hash_bytes, ScannerFeatureVector, ScannerNormParams, NUM_SCANNER_FEATURES,
     NUM_SCANNER_WEIGHTS,
@@ -50,14 +50,33 @@ pub struct TrainScannerArgs {
 
 /// Default suspicious fragments — matches the DDoS feature list plus extras.
 pub const DEFAULT_FRAGMENTS: &[&str] = &[
-    ".env", ".git", ".bak", ".sql", ".tar", ".zip",
-    "wp-admin", "wp-login", "wp-includes", "wp-content", "xmlrpc",
-    "phpinfo", "phpmyadmin", "php-info",
-    "cgi-bin", "shell", "eval-stdin",
-    ".htaccess", ".htpasswd",
-    "config.", "admin",
-    "yarn.lock", "package.json", "composer.json",
-    "telescope", "actuator", "debug",
+    ".env",
+    ".git",
+    ".bak",
+    ".sql",
+    ".tar",
+    ".zip",
+    "wp-admin",
+    "wp-login",
+    "wp-includes",
+    "wp-content",
+    "xmlrpc",
+    "phpinfo",
+    "phpmyadmin",
+    "php-info",
+    "cgi-bin",
+    "shell",
+    "eval-stdin",
+    ".htaccess",
+    ".htpasswd",
+    "config.",
+    "admin",
+    "yarn.lock",
+    "package.json",
+    "composer.json",
+    "telescope",
+    "actuator",
+    "debug",
 ];
 
 const ATTACK_EXTENSIONS: &[&str] = &[".env", ".sql", ".bak", ".git/config"];
@@ -99,8 +118,8 @@ pub fn train_and_evaluate(
         .collect();
 
     let mut samples: Vec<LabeledSample> = Vec::new();
-    let file = std::fs::File::open(&args.input)
-        .with_context(|| format!("opening {}", args.input))?;
+    let file =
+        std::fs::File::open(&args.input).with_context(|| format!("opening {}", args.input))?;
     let reader = std::io::BufReader::new(file);
     let mut log_hosts: FxHashSet<u64> = FxHashSet::default();
     let mut parsed_entries: Vec<(AuditFields, String)> = Vec::new();
@@ -128,7 +147,8 @@ pub fn train_and_evaluate(
     for (fields, host_prefix) in &parsed_entries {
         let has_cookies = fields.has_cookies;
         let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+        let has_accept_language =
+            !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -181,7 +201,8 @@ pub fn train_and_evaluate(
         for (fields, host_prefix) in &csic_entries {
             let has_cookies = fields.has_cookies;
             let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-            let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+            let has_accept_language =
+                !fields.accept_language.is_empty() && fields.accept_language != "-";
 
             let feats = features::extract_features(
                 &fields.method,
@@ -234,8 +255,10 @@ pub fn train_and_evaluate(
         train_samples.iter().map(|s| s.features).collect();
     let norm_params = ScannerNormParams::from_data(&train_feature_vecs);
 
-    let train_normalized: Vec<ScannerFeatureVector> =
-        train_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let train_normalized: Vec<ScannerFeatureVector> = train_feature_vecs
+        .iter()
+        .map(|v| norm_params.normalize(v))
+        .collect();
 
     // Train logistic regression with configurable params
     let weights = train_logistic_regression_weighted(
@@ -257,8 +280,10 @@ pub fn train_and_evaluate(
 
     let test_feature_vecs: Vec<ScannerFeatureVector> =
         test_samples.iter().map(|s| s.features).collect();
-    let test_normalized: Vec<ScannerFeatureVector> =
-        test_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let test_normalized: Vec<ScannerFeatureVector> = test_feature_vecs
+        .iter()
+        .map(|v| norm_params.normalize(v))
+        .collect();
     let test_metrics = evaluate(&test_normalized, &test_samples, &weights, args.threshold);
 
     Ok(ScannerTrainResult {
@@ -284,8 +309,8 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
 
     // 1. Parse JSONL audit logs and label each request
     let mut samples: Vec<LabeledSample> = Vec::new();
-    let file = std::fs::File::open(&args.input)
-        .with_context(|| format!("opening {}", args.input))?;
+    let file =
+        std::fs::File::open(&args.input).with_context(|| format!("opening {}", args.input))?;
     let reader = std::io::BufReader::new(file);
     let mut log_hosts: FxHashSet<u64> = FxHashSet::default();
     let mut parsed_entries: Vec<(AuditFields, String)> = Vec::new();
@@ -313,7 +338,8 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     for (fields, host_prefix) in &parsed_entries {
         let has_cookies = fields.has_cookies;
         let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-        let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+        let has_accept_language =
+            !fields.accept_language.is_empty() && fields.accept_language != "-";
 
         let feats = features::extract_features(
             &fields.method,
@@ -369,7 +395,8 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
         for (fields, host_prefix) in &csic_entries {
             let has_cookies = fields.has_cookies;
             let has_referer = !fields.referer.is_empty() && fields.referer != "-";
-            let has_accept_language = !fields.accept_language.is_empty() && fields.accept_language != "-";
+            let has_accept_language =
+                !fields.accept_language.is_empty() && fields.accept_language != "-";
 
             let feats = features::extract_features(
                 &fields.method,
@@ -456,8 +483,10 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     let norm_params = ScannerNormParams::from_data(&train_feature_vecs);
 
     // 5. Normalize training features
-    let train_normalized: Vec<ScannerFeatureVector> =
-        train_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let train_normalized: Vec<ScannerFeatureVector> = train_feature_vecs
+        .iter()
+        .map(|v| norm_params.normalize(v))
+        .collect();
 
     // 6. Train logistic regression
     let weights = train_logistic_regression(&train_normalized, &train_samples, 1000, 0.01);
@@ -502,8 +531,10 @@ pub fn run(args: TrainScannerArgs) -> Result<()> {
     // 9. Evaluate on held-out test set
     let test_feature_vecs: Vec<ScannerFeatureVector> =
         test_samples.iter().map(|s| s.features).collect();
-    let test_normalized: Vec<ScannerFeatureVector> =
-        test_feature_vecs.iter().map(|v| norm_params.normalize(v)).collect();
+    let test_normalized: Vec<ScannerFeatureVector> = test_feature_vecs
+        .iter()
+        .map(|v| norm_params.normalize(v))
+        .collect();
     let test_metrics = evaluate(&test_normalized, &test_samples, &weights, args.threshold);
     eprintln!("\n--- test set (held-out 20%) ---");
     test_metrics.print(test_samples.len());
@@ -525,10 +556,18 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn precision(&self) -> f64 {
-        if self.tp + self.fp > 0 { self.tp as f64 / (self.tp + self.fp) as f64 } else { 0.0 }
+        if self.tp + self.fp > 0 {
+            self.tp as f64 / (self.tp + self.fp) as f64
+        } else {
+            0.0
+        }
     }
     pub fn recall(&self) -> f64 {
-        if self.tp + self.fn_ > 0 { self.tp as f64 / (self.tp + self.fn_) as f64 } else { 0.0 }
+        if self.tp + self.fn_ > 0 {
+            self.tp as f64 / (self.tp + self.fn_) as f64
+        } else {
+            0.0
+        }
     }
     pub fn f1(&self) -> f64 {
         self.fbeta(1.0)
@@ -537,7 +576,11 @@ impl Metrics {
         let p = self.precision();
         let r = self.recall();
         let b2 = beta * beta;
-        if p + r > 0.0 { (1.0 + b2) * p * r / (b2 * p + r) } else { 0.0 }
+        if p + r > 0.0 {
+            (1.0 + b2) * p * r / (b2 * p + r)
+        } else {
+            0.0
+        }
     }
     fn print(&self, total: usize) {
         let acc = (self.tp + self.tn) as f64 / total as f64 * 100.0;
@@ -547,7 +590,9 @@ impl Metrics {
         );
         eprintln!(
             "precision={:.3} recall={:.3} f1={:.3}",
-            self.precision(), self.recall(), self.f1(),
+            self.precision(),
+            self.recall(),
+            self.f1(),
         );
     }
 }
@@ -558,7 +603,12 @@ fn evaluate(
     weights: &[f64; NUM_SCANNER_WEIGHTS],
     threshold: f64,
 ) -> Metrics {
-    let mut m = Metrics { tp: 0, fp: 0, tn: 0, fn_: 0 };
+    let mut m = Metrics {
+        tp: 0,
+        fp: 0,
+        tn: 0,
+        fn_: 0,
+    };
     for (i, sample) in samples.iter().enumerate() {
         let f = &normalized[i];
         let mut score = weights[NUM_SCANNER_FEATURES + 2];
@@ -590,14 +640,20 @@ fn stratified_split(
     let mut attacks: Vec<LabeledSample> = Vec::new();
     let mut normals: Vec<LabeledSample> = Vec::new();
     for s in samples.drain(..) {
-        if s.label > 0.5 { attacks.push(s); } else { normals.push(s); }
+        if s.label > 0.5 {
+            attacks.push(s);
+        } else {
+            normals.push(s);
+        }
     }
 
     // Deterministic Fisher-Yates shuffle using LCG
     fn lcg_shuffle(v: &mut [LabeledSample], seed: u64) {
         let mut state = seed;
         for i in (1..v.len()).rev() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (state >> 33) as usize % (i + 1);
             v.swap(i, j);
         }
@@ -661,7 +717,11 @@ fn train_logistic_regression(
             let error = prediction - sample.label;
 
             // Apply class weight
-            let cw = if sample.label > 0.5 { w_attack } else { w_normal };
+            let cw = if sample.label > 0.5 {
+                w_attack
+            } else {
+                w_normal
+            };
             let weighted_error = error * cw;
 
             // Accumulate gradients
@@ -697,7 +757,10 @@ fn train_logistic_regression_weighted(
     let n_attack = samples.iter().filter(|s| s.label > 0.5).count() as f64;
     let n_normal = n - n_attack;
     let (w_attack, w_normal) = if n_attack > 0.0 && n_normal > 0.0 {
-        (n / (2.0 * n_attack) * class_weight_multiplier, n / (2.0 * n_normal))
+        (
+            n / (2.0 * n_attack) * class_weight_multiplier,
+            n / (2.0 * n_normal),
+        )
     } else {
         (1.0, 1.0)
     };
@@ -716,7 +779,11 @@ fn train_logistic_regression_weighted(
 
             let prediction = sigmoid(z);
             let error = prediction - sample.label;
-            let cw = if sample.label > 0.5 { w_attack } else { w_normal };
+            let cw = if sample.label > 0.5 {
+                w_attack
+            } else {
+                w_normal
+            };
             let weighted_error = error * cw;
 
             for j in 0..NUM_SCANNER_FEATURES {
@@ -752,9 +819,7 @@ fn label_request(
     let host_known = configured_hosts.contains(&host_hash);
 
     let path_suspicious = is_path_suspicious(&lower_path, fragment_hashes);
-    let has_traversal = TRAVERSAL_MARKERS
-        .iter()
-        .any(|m| lower_path.contains(m));
+    let has_traversal = TRAVERSAL_MARKERS.iter().any(|m| lower_path.contains(m));
 
     // Attack if:
     // - Path matches 2+ suspicious fragments AND (no cookies OR no referer)
@@ -921,10 +986,7 @@ mod tests {
             .collect();
 
         let label = label_request(
-            "/.env",
-            false, false, false,
-            "curl/7.0", "unknown", 404,
-            &hosts, &frags,
+            "/.env", false, false, false, "curl/7.0", "unknown", 404, &hosts, &frags,
         );
         assert_eq!(label, Some(1.0));
     }
@@ -940,9 +1002,14 @@ mod tests {
 
         let label = label_request(
             "/blog/hello",
-            true, true, true,
-            "Mozilla/5.0", "app", 200,
-            &hosts, &frags,
+            true,
+            true,
+            true,
+            "Mozilla/5.0",
+            "app",
+            200,
+            &hosts,
+            &frags,
         );
         assert_eq!(label, Some(0.0));
     }
@@ -953,9 +1020,14 @@ mod tests {
         let frags = FxHashSet::default();
         let label = label_request(
             "/../../etc/passwd",
-            false, false, false,
-            "", "unknown", 404,
-            &hosts, &frags,
+            false,
+            false,
+            false,
+            "",
+            "unknown",
+            404,
+            &hosts,
+            &frags,
         );
         assert_eq!(label, Some(1.0));
     }
@@ -968,18 +1040,661 @@ mod tests {
         for _ in 0..50 {
             let f = [0.9, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.8];
             features.push(f);
-            samples.push(LabeledSample { features: f, label: 1.0 });
+            samples.push(LabeledSample {
+                features: f,
+                label: 1.0,
+            });
         }
         for _ in 0..50 {
             let f = [0.1, 0.2, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0];
             features.push(f);
-            samples.push(LabeledSample { features: f, label: 0.0 });
+            samples.push(LabeledSample {
+                features: f,
+                label: 0.0,
+            });
         }
 
         let weights = train_logistic_regression(&features, &samples, 500, 0.1);
 
         // Verify attack weight is positive, cookie weight is negative
-        assert!(weights[0] > 0.0, "suspicious_path weight should be positive");
+        assert!(
+            weights[0] > 0.0,
+            "suspicious_path weight should be positive"
+        );
         assert!(weights[3] < 0.0, "has_cookies weight should be negative");
+    }
+
+    #[test]
+    fn test_logistic_regression_weighted_converges() {
+        let mut samples = Vec::new();
+        let mut features = Vec::new();
+        for _ in 0..50 {
+            let f = [0.9, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.8];
+            features.push(f);
+            samples.push(LabeledSample {
+                features: f,
+                label: 1.0,
+            });
+        }
+        for _ in 0..50 {
+            let f = [0.1, 0.2, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+            features.push(f);
+            samples.push(LabeledSample {
+                features: f,
+                label: 0.0,
+            });
+        }
+
+        let weights = train_logistic_regression_weighted(&features, &samples, 500, 0.1, 2.0);
+        assert!(weights[0] > 0.0);
+        assert!(weights[3] < 0.0);
+    }
+
+    #[test]
+    fn test_metrics_methods() {
+        let m = Metrics {
+            tp: 8,
+            fp: 2,
+            tn: 7,
+            fn_: 3,
+        };
+        assert!((m.precision() - 0.8).abs() < 1e-10);
+        assert!((m.recall() - 8.0 / 11.0).abs() < 1e-10);
+        assert!(m.f1() > 0.0);
+        assert!(m.fbeta(2.0) > 0.0);
+    }
+
+    #[test]
+    fn test_metrics_edge_cases() {
+        let m = Metrics {
+            tp: 0,
+            fp: 0,
+            tn: 0,
+            fn_: 0,
+        };
+        assert_eq!(m.precision(), 0.0);
+        assert_eq!(m.recall(), 0.0);
+        assert_eq!(m.f1(), 0.0);
+        assert_eq!(m.fbeta(1.0), 0.0);
+
+        let m2 = Metrics {
+            tp: 0,
+            fp: 5,
+            tn: 0,
+            fn_: 0,
+        };
+        assert_eq!(m2.precision(), 0.0);
+
+        let m3 = Metrics {
+            tp: 0,
+            fp: 0,
+            tn: 0,
+            fn_: 5,
+        };
+        assert_eq!(m3.recall(), 0.0);
+    }
+
+    #[test]
+    fn test_evaluate() {
+        let samples = vec![
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+        ];
+        let normalized: Vec<ScannerFeatureVector> = samples.iter().map(|s| s.features).collect();
+        // Weights: bias 0, feature weights 0, interaction weights 0 → score = 0.
+        // threshold = 0.5 predicts false for all.
+        let weights = [0.0; NUM_SCANNER_WEIGHTS];
+        let m = evaluate(&normalized, &samples, &weights, 0.5);
+        assert_eq!(m.tp, 0);
+        assert_eq!(m.fp, 0);
+        assert_eq!(m.tn, 2);
+        assert_eq!(m.fn_, 2);
+
+        // High weight on f[0] pushes attack-like samples above threshold.
+        let mut weights = [0.0; NUM_SCANNER_WEIGHTS];
+        weights[0] = 10.0;
+        weights[NUM_SCANNER_FEATURES + 2] = -2.0;
+        let m = evaluate(&normalized, &samples, &weights, 0.5);
+        assert_eq!(m.tp, 1);
+        assert_eq!(m.fp, 1);
+        assert_eq!(m.tn, 1);
+        assert_eq!(m.fn_, 1);
+    }
+
+    #[test]
+    fn test_stratified_split_mixed() {
+        let mut samples = vec![
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+            LabeledSample {
+                features: [0.0; NUM_SCANNER_FEATURES],
+                label: 0.0,
+            },
+        ];
+        let (train, test) = stratified_split(&mut samples, 0.5, 42);
+        assert_eq!(train.len(), 4);
+        assert_eq!(test.len(), 4);
+        let train_attacks = train.iter().filter(|s| s.label > 0.5).count();
+        let test_attacks = test.iter().filter(|s| s.label > 0.5).count();
+        assert_eq!(train_attacks + test_attacks, 4);
+    }
+
+    #[test]
+    fn test_stratified_split_all_same_class() {
+        let mut samples = vec![
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+            LabeledSample {
+                features: [1.0; NUM_SCANNER_FEATURES],
+                label: 1.0,
+            },
+        ];
+        let (train, test) = stratified_split(&mut samples, 0.5, 1);
+        assert_eq!(train.len() + test.len(), 3);
+    }
+
+    #[test]
+    fn test_is_path_suspicious() {
+        let frags: FxHashSet<u64> = ["wp-admin", ".env"]
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        // The function expects an already-lowercased path.
+        assert_eq!(is_path_suspicious("/wp-admin/edit.php", &frags), 1);
+        assert_eq!(is_path_suspicious("/.env", &frags), 1);
+        assert_eq!(is_path_suspicious("/wp-admin/.env", &frags), 2);
+        assert_eq!(is_path_suspicious("/safe", &frags), 0);
+        assert_eq!(is_path_suspicious("", &frags), 0);
+        assert_eq!(is_path_suspicious("/wp-admin", &frags), 1);
+    }
+
+    #[test]
+    fn test_label_request_suspicious_path_count() {
+        let hosts = FxHashSet::default();
+        let frags: FxHashSet<u64> = ["wp-admin", ".env"]
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        // Two suspicious fragments and no cookies → attack.
+        let label = label_request(
+            "/wp-admin/.env",
+            false,
+            true,
+            true,
+            "Mozilla/5.0",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_label_request_bad_extension_without_cookies() {
+        let hosts = FxHashSet::default();
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/backup.sql",
+            false,
+            true,
+            true,
+            "Mozilla/5.0",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_label_request_unknown_host_suspicious_ua() {
+        let hosts = FxHashSet::default();
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/",
+            false,
+            false,
+            false,
+            "python-requests/2.0",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_label_request_empty_ua_suspicious_path() {
+        let hosts = FxHashSet::default();
+        let frags: FxHashSet<u64> = [".env"]
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        let label = label_request(
+            "/.env", false, false, false, "", "unknown", 404, &hosts, &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_label_request_normal_by_status() {
+        let hosts = FxHashSet::default();
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/api/data",
+            true,
+            true,
+            false,
+            "Mozilla/5.0",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(0.0));
+    }
+
+    #[test]
+    fn test_label_request_ambiguous() {
+        let hosts = FxHashSet::default();
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/api/data",
+            false,
+            false,
+            false,
+            "Mozilla/5.0",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, None);
+    }
+
+    #[test]
+    fn test_ingest_wordlists_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paths.txt");
+        std::fs::write(&path, "wp-config.php\n# comment\n\nadmin/login\n").unwrap();
+
+        let fragment_hashes: FxHashSet<u64> = DEFAULT_FRAGMENTS
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        let extension_hashes: FxHashSet<u64> = features::SUSPICIOUS_EXTENSIONS_LIST
+            .iter()
+            .map(|e| fx_hash_bytes(e.as_bytes()))
+            .collect();
+        let hosts = FxHashSet::default();
+
+        let mut samples = Vec::new();
+        let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
+        let count = ingest_wordlists(
+            path.to_str().unwrap(),
+            &mut samples,
+            &mut fragments,
+            &fragment_hashes,
+            &extension_hashes,
+            &hosts,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert!(samples.iter().all(|s| s.label > 0.5));
+    }
+
+    #[test]
+    fn test_ingest_wordlists_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "/admin\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "/config\n").unwrap();
+
+        let fragment_hashes: FxHashSet<u64> = DEFAULT_FRAGMENTS
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        let extension_hashes: FxHashSet<u64> = features::SUSPICIOUS_EXTENSIONS_LIST
+            .iter()
+            .map(|e| fx_hash_bytes(e.as_bytes()))
+            .collect();
+        let hosts = FxHashSet::default();
+
+        let mut samples = Vec::new();
+        let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
+        let count = ingest_wordlists(
+            dir.path().to_str().unwrap(),
+            &mut samples,
+            &mut fragments,
+            &fragment_hashes,
+            &extension_hashes,
+            &hosts,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_ingest_wordlists_missing_dir() {
+        let mut samples = Vec::new();
+        let mut fragments = Vec::new();
+        let result = ingest_wordlists(
+            "/nonexistent/wordlist/dir",
+            &mut samples,
+            &mut fragments,
+            &FxHashSet::default(),
+            &FxHashSet::default(),
+            &FxHashSet::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    fn make_audit_log_line(fields: &AuditFields) -> String {
+        let line = crate::audit::AuditLogLine {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            level: "INFO".to_string(),
+            fields: fields.clone(),
+            span: None,
+            spans: None,
+        };
+        serde_json::to_string(&line).unwrap()
+    }
+
+    #[test]
+    fn test_train_and_evaluate() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("train.jsonl");
+        let output_path = dir.path().join("model.bin");
+
+        let attack = AuditFields {
+            method: "GET".to_string(),
+            host: "app.sunbeam.pt".to_string(),
+            path: "/.env".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 404,
+            user_agent: "curl/7.0".to_string(),
+            has_cookies: false,
+            referer: "-".to_string(),
+            accept_language: "-".to_string(),
+            ..AuditFields::default()
+        };
+        let normal = AuditFields {
+            method: "GET".to_string(),
+            host: "app.sunbeam.pt".to_string(),
+            path: "/index.html".to_string(),
+            client_ip: "5.6.7.8".to_string(),
+            status: 200,
+            user_agent: "Mozilla/5.0".to_string(),
+            has_cookies: true,
+            referer: "https://app.sunbeam.pt".to_string(),
+            accept_language: "en-US".to_string(),
+            ..AuditFields::default()
+        };
+
+        let mut lines = String::new();
+        for _ in 0..10 {
+            lines.push_str(&make_audit_log_line(&attack));
+            lines.push('\n');
+            lines.push_str(&make_audit_log_line(&normal));
+            lines.push('\n');
+        }
+        std::fs::write(&input_path, lines).unwrap();
+
+        let args = TrainScannerArgs {
+            input: input_path.to_str().unwrap().to_string(),
+            output: output_path.to_str().unwrap().to_string(),
+            wordlists: None,
+            threshold: 0.5,
+            csic: false,
+        };
+
+        let result = train_and_evaluate(&args, 0.1, 50, 1.0).unwrap();
+        assert!(result.train_metrics.tp + result.train_metrics.fn_ > 0);
+        assert!(result.test_metrics.tp + result.test_metrics.fn_ > 0);
+    }
+
+    #[test]
+    fn test_scanner_model_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.bin");
+        let model = ScannerModel {
+            weights: [1.0; NUM_SCANNER_WEIGHTS],
+            threshold: 0.5,
+            norm_params: ScannerNormParams::from_data(&[]),
+            fragments: vec![".env".to_string()],
+        };
+        model.save(&path).unwrap();
+        assert!(path.exists());
+
+        let data = std::fs::read(&path).unwrap();
+        let loaded: ScannerModel = bincode::deserialize(&data).unwrap();
+        assert_eq!(loaded.threshold, 0.5);
+        assert_eq!(loaded.fragments, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn test_stratified_split_empty() {
+        let mut samples: Vec<LabeledSample> = Vec::new();
+        let (train, test) = stratified_split(&mut samples, 0.8, 1);
+        assert!(train.is_empty());
+        assert!(test.is_empty());
+    }
+
+    #[test]
+    fn test_train_logistic_regression_single_class() {
+        // All normal samples: class weights should fall back to (1.0, 1.0).
+        let mut samples = Vec::new();
+        let mut features = Vec::new();
+        for _ in 0..10 {
+            let f = [0.1; NUM_SCANNER_FEATURES];
+            features.push(f);
+            samples.push(LabeledSample {
+                features: f,
+                label: 0.0,
+            });
+        }
+        let weights = train_logistic_regression(&features, &samples, 50, 0.1);
+        // Weights should be finite and not NaN.
+        assert!(weights.iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn test_label_request_go_http_ua() {
+        let hosts = FxHashSet::default();
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/",
+            false,
+            false,
+            false,
+            "go-http-client/1.1",
+            "unknown",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_label_request_host_known_with_cookies() {
+        let mut hosts = FxHashSet::default();
+        hosts.insert(fx_hash_bytes(b"app"));
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/dashboard",
+            true,
+            false,
+            false,
+            "Mozilla/5.0",
+            "app",
+            500,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(0.0));
+    }
+
+    #[test]
+    fn test_label_request_traversal_overrides_browser_signals() {
+        let mut hosts = FxHashSet::default();
+        hosts.insert(fx_hash_bytes(b"app"));
+        let frags = FxHashSet::default();
+        let label = label_request(
+            "/../etc/passwd",
+            true,
+            true,
+            true,
+            "Mozilla/5.0",
+            "app",
+            200,
+            &hosts,
+            &frags,
+        );
+        assert_eq!(label, Some(1.0));
+    }
+
+    #[test]
+    fn test_is_path_suspicious_short_segments_skipped() {
+        let frags: FxHashSet<u64> = ["ab"]
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        // "a" is not counted as a suspicious segment by train.rs is_path_suspicious
+        // (it does not filter by length, but empty segments are skipped).
+        assert_eq!(is_path_suspicious("/a/b/c", &frags), 0);
+        assert_eq!(is_path_suspicious("/ab", &frags), 1);
+    }
+
+    #[test]
+    fn test_ingest_wordlists_normalizes_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paths.txt");
+        std::fs::write(&path, "admin\n").unwrap();
+
+        let fragment_hashes: FxHashSet<u64> = DEFAULT_FRAGMENTS
+            .iter()
+            .map(|f| fx_hash_bytes(f.to_ascii_lowercase().as_bytes()))
+            .collect();
+        let extension_hashes: FxHashSet<u64> = features::SUSPICIOUS_EXTENSIONS_LIST
+            .iter()
+            .map(|e| fx_hash_bytes(e.as_bytes()))
+            .collect();
+        let hosts = FxHashSet::default();
+
+        let mut samples = Vec::new();
+        let mut fragments: Vec<String> = DEFAULT_FRAGMENTS.iter().map(|s| s.to_string()).collect();
+        let count = ingest_wordlists(
+            path.to_str().unwrap(),
+            &mut samples,
+            &mut fragments,
+            &fragment_hashes,
+            &extension_hashes,
+            &hosts,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        // The normalized path should start with '/'.
+        assert_eq!(samples[0].features[1], 1.0); // path_depth of /admin is 1
+    }
+
+    #[test]
+    fn test_run_trains_and_saves_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("train.jsonl");
+        let output_path = dir.path().join("model.bin");
+
+        let attack = AuditFields {
+            method: "GET".to_string(),
+            host: "app.sunbeam.pt".to_string(),
+            path: "/.env".to_string(),
+            client_ip: "1.2.3.4".to_string(),
+            status: 404,
+            user_agent: "curl/7.0".to_string(),
+            has_cookies: false,
+            referer: "-".to_string(),
+            accept_language: "-".to_string(),
+            ..AuditFields::default()
+        };
+        let normal = AuditFields {
+            method: "GET".to_string(),
+            host: "app.sunbeam.pt".to_string(),
+            path: "/index.html".to_string(),
+            client_ip: "5.6.7.8".to_string(),
+            status: 200,
+            user_agent: "Mozilla/5.0".to_string(),
+            has_cookies: true,
+            referer: "https://app.sunbeam.pt".to_string(),
+            accept_language: "en-US".to_string(),
+            ..AuditFields::default()
+        };
+
+        let mut lines = String::new();
+        for _ in 0..10 {
+            lines.push_str(&make_audit_log_line(&attack));
+            lines.push('\n');
+            lines.push_str(&make_audit_log_line(&normal));
+            lines.push('\n');
+        }
+        std::fs::write(&input_path, lines).unwrap();
+
+        let args = TrainScannerArgs {
+            input: input_path.to_str().unwrap().to_string(),
+            output: output_path.to_str().unwrap().to_string(),
+            wordlists: None,
+            threshold: 0.5,
+            csic: false,
+        };
+
+        run(args).unwrap();
+        assert!(output_path.exists());
     }
 }
