@@ -1,0 +1,424 @@
+#cloud-config
+# Sunbeam bootstrap — Ubuntu 26.04 LTS.
+# Production cloud-init for artemis (merged from base.yaml + apollo.patch.yaml).
+#
+# Hardening source of truth: apollo-hardening.typ.
+
+bootcmd:
+  # cloud-init 26.1's Scaleway datasource probes link-local metadata endpoints
+  # (169.254.42.42) before falling back to the public URL. Scaleway DHCP does
+  # not provide a route to 169.254.0.0/16, so the datasource aborts the boot
+  # before runcmd can execute. Bring up the interface and add the route here
+  # so init-local can reach the metadata service.
+  - ip link set dev eno1 up || true
+  - ip route add 169.254.0.0/16 dev eno1 scope link || true
+  # Pin cloud-init here (not in runcmd) so the hold survives even when
+  # DataSourceScaleway crashes in modules-final.
+  - apt-mark hold cloud-init || true
+
+hostname: sunbeam-proxy-dev
+fqdn: sunbeam-proxy-dev.local
+preserve_hostname: false
+manage_etc_hosts: true
+
+users:
+  - default
+
+  - name: sienna
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_import_id:
+      - gh:siennathesane
+
+  - name: lonni
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEIFS3ieCOXbUOCV5FTFBN2Vl2AxzeWCork5fhanimwL Lonni Faber <lonni@r3t.io>"
+
+  - name: tmckenzie
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICOt4ZBM8uAg7SkVj4h6iw4dsSPRaC4bg+cm48M4hVmr tmckenzie@hekla"
+
+disable_root: true
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - ca-certificates
+  - jq
+  - git
+  - ufw
+  - fail2ban
+  - apparmor
+  - apparmor-utils
+  - auditd
+  - audispd-plugins
+  - aide
+  - aide-common
+  - rkhunter
+  # No unattended-upgrades. An auto-upgrade to openssh-server / pam on the
+  # previous server is suspected of borking SSH auth (see bug-server-borked).
+  # Security patches go through a manual `apt upgrade` + AIDE re-baseline.
+
+write_files:
+  # Host sshd. Port 22 is reserved for the Pingora→Gitea hostPort in prod; the
+  # same drop-in on test VMs just parks host SSH on 2222 consistently.
+  - path: /etc/ssh/sshd_config.d/10-sunbeam.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      Port 22
+      Port 2222
+      PermitRootLogin no
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      AllowUsers sienna lonni tmckenzie ubuntu
+
+      MaxAuthTries 3
+      LoginGraceTime 20
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+      X11Forwarding no
+      KbdInteractiveAuthentication no
+      UsePAM yes
+
+  - path: /etc/sysctl.d/99-hardening.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv6.conf.all.accept_source_route = 0
+      net.ipv4.conf.all.log_martians = 1
+      net.ipv4.tcp_rfc1337 = 1
+      fs.suid_dumpable = 0
+      # k3s + Cilium requirements
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+      net.ipv6.conf.all.forwarding = 1
+
+  - path: /etc/audit/rules.d/hardening.rules
+    owner: root:root
+    permissions: "0640"
+    content: |
+      -w /usr/bin/sudo              -p x  -k sudo_usage
+      -w /etc/sudoers               -p wa -k sudoers_changes
+      -w /etc/sudoers.d             -p wa -k sudoers_changes
+      -w /etc/passwd                -p wa -k passwd_changes
+      -w /etc/shadow                -p wa -k shadow_changes
+      -w /etc/group                 -p wa -k group_changes
+      -w /etc/ssh/sshd_config       -p wa -k sshd_config
+      -w /etc/ssh/sshd_config.d     -p wa -k sshd_config
+      -w /usr/local/bin/kubectl     -p x  -k kubectl_usage
+      -w /etc/rancher               -p wa -k k3s_config
+      -w /tmp                       -p x  -k exec_tmp
+      -w /var/tmp                   -p x  -k exec_var_tmp
+      -w /etc/cron.d                -p wa -k cron_changes
+      -w /var/spool/cron            -p wa -k cron_changes
+
+  - path: /etc/fail2ban/jail.local
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [DEFAULT]
+      bantime  = 1h
+      findtime = 10m
+      maxretry = 5
+      destemail = sienna@r3t.io
+      sender   = fail2ban@sunbeam
+
+      [sshd]
+      enabled = true
+      port    = 2222
+      mode    = aggressive
+
+  - path: /etc/aide/aide.conf.d/99-k3s-excludes
+    owner: root:root
+    permissions: "0644"
+    content: |
+      !/var/lib/rancher
+      !/var/lib/containerd
+      !/var/lib/kubelet
+      !/var/lib/cilium
+      !/var/lib/longhorn
+      !/run/k3s
+      !/run/containerd
+      !/run/netns
+      !/run/cilium
+      !/var/log
+
+  - path: /etc/rancher/k3s/config.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      cluster-init: true
+      token-file: /etc/rancher/k3s/cluster.token
+      disable:
+        - traefik
+        - servicelb
+        - local-storage
+        - kube-proxy
+      flannel-backend: none
+      disable-network-policy: true
+      cluster-cidr: 10.42.0.0/16
+      service-cidr: 10.43.0.0/16
+      write-kubeconfig-mode: "0640"
+      write-kubeconfig-group: sudo
+      kube-apiserver-arg:
+        - "admission-control-config-file=/etc/rancher/k3s/pss.yaml"
+
+  - path: /etc/rancher/k3s/cluster.token
+    owner: root:root
+    permissions: "0600"
+    content: "REPLACE_ME_K3S_TOKEN"
+
+  - path: /etc/rancher/k3s/pss.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      apiVersion: apiserver.config.k8s.io/v1
+      kind: AdmissionConfiguration
+      plugins:
+        - name: PodSecurity
+          configuration:
+            apiVersion: pod-security.admission.config.k8s.io/v1
+            kind: PodSecurityConfiguration
+            defaults:
+              enforce: "restricted"
+              enforce-version: "latest"
+              audit: "restricted"
+              audit-version: "latest"
+              warn: "restricted"
+              warn-version: "latest"
+            exemptions:
+              usernames: []
+              runtimeClasses: []
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - cilium-secrets
+
+  - path: /etc/aliases
+    owner: root:root
+    permissions: "0644"
+    content: |
+      root: sienna@r3t.io
+      sienna: sienna@r3t.io
+
+  - path: /etc/motd
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ──────────────────────────────────────────────────────────────
+       Sunbeam node. Host SSH on port 2222. 22 → Pingora → Gitea.
+       Hardening runbook: apollo-hardening.typ
+      ──────────────────────────────────────────────────────────────
+
+runcmd:
+  # Ubuntu 26.04's cloud image ships unattended-upgrades preinstalled — omitting
+  # it from `packages:` doesn't uninstall it. Purge + disable the apt-daily
+  # timers so a runaway openssh/pam upgrade can't re-brick the box.
+  - NODE_IP=$(hostname -I | awk '{print $1}')
+  - DEBIAN_FRONTEND=noninteractive apt-get -y purge unattended-upgrades
+  - systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || true
+
+  - sshd -t
+  - systemctl reload ssh || systemctl restart ssh
+
+  - ufw --force reset
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw default allow forward
+  - ufw allow 2222/tcp
+  - ufw logging low
+  - ufw --force enable
+
+  # k3s API access from macOS host (kubectl / sunbeam CLI)
+  - ufw allow 6443/tcp
+
+  # Host firewall — ports needed by the Pingora ingress + Stalwart SMTP + LiveKit.
+  - ufw allow 22/tcp # pingora hostPort → gitea pod :2222
+  - ufw allow 80/tcp # pingora http → redirect
+  - ufw allow 443/tcp # pingora https
+  - ufw allow 25/tcp # stalwart smtp inbound
+  - ufw allow 587/tcp # stalwart smtp submission
+  - ufw allow 8443/tcp # headscale control plane + DERP relay (hostNetwork)
+  - ufw allow 3478/tcp
+  - ufw allow 3478/udp # livekit STUN/TURN
+  - ufw allow 3479/udp # headscale DERP STUN probe (moved off 3478 for LiveKit)
+  - ufw allow 5349/tcp
+  - ufw allow 5349/udp # livekit TURN over TLS
+  - ufw allow 49152:49252/udp # livekit TURN relay range (prod pingora overlay)
+
+  # K3s / Cilium ports
+  - ufw allow 10250/tcp
+  - ufw allow 2379/tcp
+  - ufw allow 2380/tcp
+  - ufw allow 8472/udp
+  - ufw allow 51871/udp
+
+  # # cert-manager
+  # - ufw allow from 10.43.0.0/16 to any port 9402 proto tcp
+
+  # # longhorn-system
+  # - ufw allow from 10.43.0.0/16 to any port 9500 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9502 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9503 proto tcp
+
+  # # K3s / Openbao ports
+  # - ufw allow from 10.43.0.0/16 to any port 8200 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 8201 proto tcp
+
+  # # OpensSearch
+  # - ufw allow from 10.43.0.0/16 to any port 9200 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9300 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9114 proto tcp
+
+  # # Postgres
+  # - ufw allow from 10.43.0.0/16 to any port 5432 proto tcp
+
+  # # valkey
+  # - ufw allow from 10.43.0.0/16 to any port 6379 proto tcp
+
+  # # storage - Seaweedfs
+  # - ufw allow from 10.43.0.0/16 to any port 8888 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 8333 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 18888 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9091 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 9333 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 19333 proto tcp
+  # - ufw allow from 10.43.0.0/16 to any port 18080 proto tcp
+
+  # CRITICAL: allow pod and service CIDRs so intra-cluster traffic works
+  # attempting to deprecate allow all with the above specific allow lists
+  - ufw allow from 10.42.0.0/16
+  - ufw allow from 10.43.0.0/16
+  #- ufw allow from 10.43.0.0/16 to 10.42.0.0/16
+  #- ufw allow from 10.42.0.0/16 to 10.43.0.0/16
+
+  # metrics server requirement
+  - ufw allow from 10.42.0.0/16 to ${NODE_IP}
+
+  # Raise inotify limits (Longhorn CSI sidecars need fsnotify watchers)
+  - |
+    cat > /etc/sysctl.d/99-inotify.conf << 'EOF'
+    fs.inotify.max_user_watches = 524288
+    fs.inotify.max_user_instances = 512
+    EOF
+
+  - sysctl --system
+  - systemctl enable --now apparmor
+  - augenrules --load
+  - systemctl enable --now auditd
+  - systemctl enable --now fail2ban
+
+  - 'nohup bash -c "aideinit -y -f && install -m 0600 /var/lib/aide/aide.db.new /var/lib/aide/aide.db && logger -t sunbeam-firstboot aide-baseline-done" >/var/log/aide-init.log 2>&1 &'
+  - 'nohup bash -c "rkhunter --propupd --nolog && logger -t sunbeam-firstboot rkhunter-baseline-done" >/var/log/rkhunter-init.log 2>&1 &'
+
+  # Cilium BPF requirements
+  - |
+    mount --make-rshared /
+    # Persist across reboots via systemd service that runs before k3s
+    cat > /etc/systemd/system/mount-shared.service << 'EOF'
+    [Unit]
+    Description=Set mount propagation to rshared for Cilium BPF
+    Before=k3s.service
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/mount --make-rshared /
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+
+  - systemctl daemon-reload
+  - systemctl start --now mount-shared
+  - systemctl enable --now mount-shared
+
+  # Dev VM swap — small 2G swap for 6G RAM / 40G disk test VM.
+  - |
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    sysctl -w vm.swappiness=60
+    echo 'vm.swappiness=60' >> /etc/sysctl.d/99-sunbeam.conf
+
+  # Install k3s v1.34.4+k3s1 — kube-proxy disabled in config.yaml
+  - "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.34.4+k3s1 INSTALL_K3S_EXEC=\"--tls-san=${NODE_IP}\" sh -"
+  - "until kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get --raw=/readyz >/dev/null 2>&1; do sleep 3; done"
+
+  # Copy kubeconfig for all users
+  - "install -d -m 0700 -o sienna -g sienna /home/sienna/.kube"
+  - "install -m 0600 -o sienna -g sienna /etc/rancher/k3s/k3s.yaml /home/sienna/.kube/config"
+
+  - "install -d -m 0700 -o lonni -g lonni /home/lonni/.kube"
+  - "install -m 0600 -o lonni -g lonni /etc/rancher/k3s/k3s.yaml /home/lonni/.kube/config"
+
+  - "install -d -m 0700 -o tmckenzie -g tmckenzie /home/tmckenzie/.kube"
+  - "install -m 0600 -o tmckenzie -g tmckenzie /etc/rancher/k3s/k3s.yaml /home/tmckenzie/.kube/config"
+
+  # IP forwarding for the in-cluster subnet-router (tailscale/tailscale
+  # pod advertising 10.42.0.0/16 + 10.43.0.0/16 into the tailnet).
+  - 'printf "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n" > /etc/sysctl.d/99-subnet-router.conf'
+  - "sysctl --system >/dev/null"
+
+  # Install Helm 4 (v4.2.0) — auto-detect architecture
+  - |
+    HELM_VERSION="v4.2.0"
+    case $(uname -m) in
+      aarch64) HELM_ARCH="arm64" ;;
+      x86_64)  HELM_ARCH="amd64" ;;
+      *)       HELM_ARCH="$(uname -m)" ;;
+    esac
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${HELM_ARCH}.tar.gz" -o /tmp/helm.tar.gz
+    tar -xzf /tmp/helm.tar.gz -C /tmp
+    install -m 0755 /tmp/linux-${HELM_ARCH}/helm /usr/local/bin/helm
+    rm -rf /tmp/helm.tar.gz /tmp/linux-${HELM_ARCH}
+
+  # Install Cilium from upstream with kube-proxy replacement
+  - |
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
+    helm install cilium cilium/cilium \
+      --namespace kube-system \
+      --set ipam.mode=kubernetes \
+      --set kubeProxyReplacement=true \
+      --set k8sServiceHost="${NODE_IP}" \
+      --set k8sServicePort=6443 \
+      --set operator.replicas=1 \
+      --set hubble.enabled=true \
+      --set hubble.relay.enabled=true
+
+  # Wait for Cilium operator, then agents
+  - 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && until kubectl wait --for=condition=ready pod -l io.cilium/app=operator -n kube-system --timeout=60s 2>/dev/null; do echo "[cilium] waiting for operator..."; sleep 5; done'
+  - 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && until kubectl wait --for=condition=ready pod -l k8s-app=cilium -n kube-system --timeout=300s 2>/dev/null; do echo "[cilium] waiting for agents..."; sleep 5; done'
+
+  # Verify
+  - "kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml exec -n kube-system ds/cilium -- cilium status --brief || true"
+
+final_message: |
+  Sunbeam node ready after $UPTIME seconds.
+    host SSH   →  ssh -p 2222 sienna@<ip>
+    kubectl    →  KUBECONFIG=~/.kube/config kubectl get nodes
+    next       →  apply infra/sbbb/base kustomizations one at a time.

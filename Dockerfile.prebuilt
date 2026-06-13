@@ -1,0 +1,7 @@
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY target/aarch64-unknown-linux-musl/release/sunbeam-proxy /usr/local/bin/sunbeam-proxy
+RUN chmod +x /usr/local/bin/sunbeam-proxy
+EXPOSE 80 443 8080 8082
+ENTRYPOINT ["/usr/local/bin/sunbeam-proxy"]
+CMD ["serve"]

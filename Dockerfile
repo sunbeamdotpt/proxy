@@ -35,6 +35,9 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 WORKDIR /build
 COPY . .
 
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 RUN cargo build \
       --release \
       --target "$(cat /rust-target)" \

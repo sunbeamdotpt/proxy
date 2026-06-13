@@ -1,0 +1,5 @@
+FROM cgr.dev/chainguard/static:latest
+COPY sunbeam-proxy /usr/local/bin/sunbeam-proxy
+USER root
+EXPOSE 80 443
+ENTRYPOINT ["/usr/local/bin/sunbeam-proxy"]
