@@ -8,11 +8,8 @@
 
 pub mod api;
 pub mod cert;
-pub mod cluster_join;
-pub mod dataplane;
 pub mod election;
 pub mod gossip;
-pub mod listeners;
 pub mod model;
 pub mod reconcile;
 pub mod status;
@@ -27,7 +24,9 @@ pub struct GatewayConfig {
     pub enabled: bool,
 }
 
-fn default_gateway_enabled() -> bool { true }
+fn default_gateway_enabled() -> bool {
+    true
+}
 
 #[cfg(test)]
 mod tests {

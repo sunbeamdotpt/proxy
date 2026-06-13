@@ -5,16 +5,10 @@
 
 pub mod gateway;
 pub mod gatewayclass;
-pub mod grpcroute;
 pub mod httproute;
 pub mod referencegrant;
-pub mod tcproute;
-pub mod tlsroute;
 
 pub use gateway::Gateway;
 pub use gatewayclass::GatewayClass;
-pub use grpcroute::GRPCRoute;
 pub use httproute::HTTPRoute;
 pub use referencegrant::ReferenceGrant;
-pub use tcproute::TCPRoute;
-pub use tlsroute::TLSRoute;
