@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! HTTPRoute reconciler.
 //!
@@ -1389,6 +1389,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         }
     }
@@ -2488,6 +2489,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: Some(Arc::from(hostname)),
+                tls_mode: None,
             }],
         }
     }
@@ -2721,6 +2723,112 @@ mod tests {
         assert_eq!(action, Action::requeue(Duration::from_secs(5)));
     }
 
+    #[test]
+    fn parse_header_and_query_param_matches() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default", "generation": 1 },
+            "spec": {
+                "rules": [{
+                    "matches": [
+                        {
+                            "headers": [
+                                { "name": "X-Version", "value": "v1" },
+                                { "name": "X-Debug", "type": "RegularExpression", "value": "on|off" }
+                            ],
+                            "queryParams": [
+                                { "name": "page", "value": "1" },
+                                { "name": "filter", "type": "RegularExpression", "value": ".*" }
+                            ]
+                        }
+                    ]
+                }]
+            }
+        }))
+        .expect("valid HTTPRoute");
+
+        let state = parse_httproute_state(&route);
+        let m = &state.rules[0].matches[0];
+        assert_eq!(m.headers.len(), 2);
+        assert_eq!(m.headers[0].name.as_ref(), "X-Version");
+        assert_eq!(m.headers[0].value, HeaderMatchValue::Exact(Arc::from("v1")));
+        assert_eq!(m.headers[1].name.as_ref(), "X-Debug");
+        assert_eq!(
+            m.headers[1].value,
+            HeaderMatchValue::Regex(Arc::from("on|off"))
+        );
+
+        assert_eq!(m.query_params.len(), 2);
+        assert_eq!(m.query_params[0].name.as_ref(), "page");
+        assert_eq!(
+            m.query_params[0].value,
+            QueryParamMatchValue::Exact(Arc::from("1"))
+        );
+        assert_eq!(m.query_params[1].name.as_ref(), "filter");
+        assert_eq!(
+            m.query_params[1].value,
+            QueryParamMatchValue::Regex(Arc::from(".*"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_non_leader_returns_requeue() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": { "parentRefs": [] }
+        }))
+        .expect("valid HTTPRoute");
+
+        let gateway_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "GatewayList",
+            "items": []
+        });
+        let grant_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ReferenceGrantList",
+            "items": []
+        });
+        let namespace_list = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "NamespaceList",
+            "items": []
+        });
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path();
+                let body = if path.contains("/namespaces") {
+                    namespace_list.clone()
+                } else if path.contains("/referencegrants") {
+                    grant_list.clone()
+                } else {
+                    gateway_list.clone()
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(false)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
     #[tokio::test]
     async fn run_httproute_controller_returns_handle() {
         let client = kube::Client::new(
@@ -2731,5 +2839,22 @@ mod tests {
         );
         let handle = run_httproute_controller(client, Arc::new(AtomicBool::new(false)));
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn httproute_context_clone_smoke() {
+        let ctx = HTTPRouteContext {
+            client: kube::Client::new(
+                tower::service_fn(|_req| async {
+                    Ok::<_, std::convert::Infallible>(http::Response::new(
+                        kube::client::Body::empty(),
+                    ))
+                }),
+                "default",
+            ),
+            is_leader: Arc::new(AtomicBool::new(false)),
+        };
+        let cloned = ctx.clone();
+        assert!(!cloned.is_leader.load(Ordering::Relaxed));
     }
 }

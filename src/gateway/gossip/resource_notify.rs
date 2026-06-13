@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Resource-change notifier and peer-notification debouncer.
 //!
@@ -354,5 +354,66 @@ mod tests {
 
         drop(notifier);
         let _ = j.await;
+    }
+
+    #[tokio::test]
+    async fn handle_notify_wrapper_emits_broadcast_and_trigger() {
+        let (notifier, handle) = ResourceNotifier::new();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let j = tokio::spawn(async move { handle.run(tx).await });
+
+        let ev = notify("HTTPRoute", "default", "route-1", 1);
+        handle_notify(&notifier, ev.clone()).await;
+
+        let mut got_broadcast = false;
+        let mut got_trigger = false;
+        for _ in 0..2 {
+            let evt = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match evt {
+                NotifyEvent::Broadcast(n) if n == ev => got_broadcast = true,
+                NotifyEvent::TriggerReconcile => got_trigger = true,
+                other => panic!("unexpected event: {:?}", other),
+            }
+        }
+        assert!(got_broadcast);
+        assert!(got_trigger);
+
+        drop(notifier);
+        let _ = j.await;
+    }
+
+    #[tokio::test]
+    async fn resource_notifier_default_is_usable() {
+        let notifier = ResourceNotifier::default();
+        let (notifier2, handle) = ResourceNotifier::new();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let j = tokio::spawn(async move { handle.run(tx).await });
+
+        let ev = notify("Gateway", "default", "gw-1", 1);
+        notifier.on_local_event(ev.clone()).await;
+        notifier2.on_local_event(ev).await;
+
+        let evt = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(evt, NotifyEvent::Broadcast(_)));
+
+        drop(notifier);
+        drop(notifier2);
+        let _ = j.await;
+    }
+
+    #[test]
+    fn resource_notifier_clone_smoke() {
+        let (notifier, _handle) = ResourceNotifier::new();
+        let cloned = notifier.clone();
+        let _ = cloned;
+        let _ = notifier;
     }
 }

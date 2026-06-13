@@ -14,10 +14,10 @@ use crate::config::{
 use crate::gateway::model::{
     GatewayState, GatewayView, HTTPRouteRule, HeaderMatch, HeaderMatchValue, HostnameMatch,
     ListenerState, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
-    RouteMatch,
+    RouteMatch, TlsMode,
 };
 use crate::ir;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -689,6 +689,240 @@ fn translate_rewrite(path: &PathRewrite) -> Option<RewriteRule> {
 // IR translator (new canonical path)
 // ============================================================================
 
+fn to_ir_weighted_backend(b: &crate::gateway::model::WeightedBackend) -> ir::WeightedBackend {
+    ir::WeightedBackend {
+        backend: Arc::clone(&b.backend),
+        weight: b.weight,
+        request_filters: vec![],
+    }
+}
+
+fn listener_protocol_to_ir(protocol: &str) -> Option<ir::Protocol> {
+    match protocol {
+        "HTTP" => Some(ir::Protocol::Http),
+        "HTTPS" => Some(ir::Protocol::Https),
+        "TCP" => Some(ir::Protocol::Tcp),
+        "UDP" => Some(ir::Protocol::Udp),
+        "TLS" => Some(ir::Protocol::Tls),
+        _ => None,
+    }
+}
+
+fn add_l4_listener(
+    listeners: &mut BTreeMap<Arc<str>, ir::ListenerConfig>,
+    gateway: &GatewayState,
+    listener: &ListenerState,
+) {
+    let id: Arc<str> = Arc::from(format!(
+        "{}/{}/{}",
+        gateway.namespace.as_ref(),
+        gateway.name.as_ref(),
+        listener.name.as_ref()
+    ));
+    if listeners.contains_key(&id) {
+        return;
+    }
+    let Some(protocol) = listener_protocol_to_ir(listener.protocol.as_ref()) else {
+        return;
+    };
+    let tls = match protocol {
+        ir::Protocol::Https | ir::Protocol::Tls => Some(ir::TlsConfig::Registry {
+            cert_id: Arc::from("gateway"),
+        }),
+        _ => None,
+    };
+    listeners.insert(
+        Arc::clone(&id),
+        ir::ListenerConfig {
+            id,
+            bind_addr: Arc::from(format!("0.0.0.0:{}", listener.port)),
+            protocol,
+            tls,
+            redirect_http_to_https: false,
+        },
+    );
+}
+
+fn hostnames_to_l4_match(hostnames: &[HostnameMatch]) -> ir::L4Match {
+    if hostnames.is_empty() {
+        return ir::L4Match::Any;
+    }
+    // Use the first hostname match; multiple hostnames on the same route are rare
+    // in L4 and can be expanded by adding one route per hostname.
+    ir::L4Match::Sni(to_ir_hostname(&hostnames[0]))
+}
+
+/// Translate L4 route states into IR listeners and routes.
+fn translate_l4_routes(view: &GatewayView) -> (Vec<ir::ListenerConfig>, Vec<ir::L4Route>) {
+    let mut listeners: BTreeMap<Arc<str>, ir::ListenerConfig> = BTreeMap::new();
+    let mut l4_routes = Vec::new();
+
+    for route in &view.tcp_routes {
+        if !route.programmed {
+            continue;
+        }
+        let backends: Vec<_> = route.backends.iter().map(to_ir_weighted_backend).collect();
+        let match_ = ir::L4Match::Any;
+        add_l4_routes_for_parents(
+            &view.gateways,
+            route,
+            "TCP",
+            &match_,
+            |_listener| ir::L4Action::TcpRelay(backends.clone()),
+            &mut listeners,
+            &mut l4_routes,
+        );
+    }
+
+    for route in &view.udp_routes {
+        if !route.programmed {
+            continue;
+        }
+        let backends: Vec<_> = route.backends.iter().map(to_ir_weighted_backend).collect();
+        let match_ = ir::L4Match::Any;
+        add_l4_routes_for_parents(
+            &view.gateways,
+            route,
+            "UDP",
+            &match_,
+            |_listener| ir::L4Action::UdpRelay(backends.clone()),
+            &mut listeners,
+            &mut l4_routes,
+        );
+    }
+
+    for route in &view.tls_routes {
+        if !route.programmed {
+            continue;
+        }
+        let backends: Vec<_> = route.backends.iter().map(to_ir_weighted_backend).collect();
+        let match_ = hostnames_to_l4_match(&route.hostnames);
+        add_l4_routes_for_parents(
+            &view.gateways,
+            route,
+            "TLS",
+            &match_,
+            |listener| {
+                if listener.tls_mode == Some(TlsMode::Terminate) {
+                    ir::L4Action::TlsTerminate(backends.clone())
+                } else {
+                    ir::L4Action::TlsPassthrough(backends.clone())
+                }
+            },
+            &mut listeners,
+            &mut l4_routes,
+        );
+    }
+
+    // HTTPS listeners terminate TLS and forward decrypted HTTP to the local
+    // Pingora plaintext service. Create a listener and a catch-all route for
+    // every HTTPS listener declared on a Gateway.
+    const HTTPS_HTTP_TARGET: &str = "127.0.0.1:10443";
+    for gateway in &view.gateways {
+        for listener in &gateway.listeners {
+            if listener.protocol.as_ref() != "HTTPS" {
+                continue;
+            }
+            add_l4_listener(&mut listeners, gateway, listener);
+            let id: Arc<str> = Arc::from(format!(
+                "{}/{}/{}",
+                gateway.namespace.as_ref(),
+                gateway.name.as_ref(),
+                listener.name.as_ref()
+            ));
+            l4_routes.push(ir::L4Route {
+                listener_id: id,
+                match_: ir::L4Match::Any,
+                action: ir::L4Action::TerminateAndHttp(Arc::from(HTTPS_HTTP_TARGET)),
+            });
+        }
+    }
+
+    (listeners.into_values().collect(), l4_routes)
+}
+
+fn add_l4_routes_for_parents<S, F>(
+    gateways: &[GatewayState],
+    route: &S,
+    expected_protocol: &str,
+    match_: &ir::L4Match,
+    action_for: F,
+    listeners: &mut BTreeMap<Arc<str>, ir::ListenerConfig>,
+    l4_routes: &mut Vec<ir::L4Route>,
+) where
+    S: L4RouteState,
+    F: Fn(&ListenerState) -> ir::L4Action,
+{
+    for parent in route.parent_refs() {
+        let gw_ns = parent
+            .namespace
+            .as_deref()
+            .unwrap_or_else(|| route.namespace());
+        let Some(gateway) = gateways
+            .iter()
+            .find(|g| g.namespace.as_ref() == gw_ns && g.name.as_ref() == parent.name.as_ref())
+        else {
+            continue;
+        };
+
+        let section_filter = parent.section_name.as_deref();
+        for listener in &gateway.listeners {
+            if listener.protocol.as_ref() != expected_protocol {
+                continue;
+            }
+            if let Some(section) = section_filter {
+                if listener.name.as_ref() != section {
+                    continue;
+                }
+            }
+            add_l4_listener(listeners, gateway, listener);
+            let id: Arc<str> = Arc::from(format!(
+                "{}/{}/{}",
+                gateway.namespace.as_ref(),
+                gateway.name.as_ref(),
+                listener.name.as_ref()
+            ));
+            l4_routes.push(ir::L4Route {
+                listener_id: id,
+                match_: match_.clone(),
+                action: action_for(listener),
+            });
+        }
+    }
+}
+
+trait L4RouteState {
+    fn namespace(&self) -> &str;
+    fn parent_refs(&self) -> &[crate::gateway::model::ParentRef];
+}
+
+impl L4RouteState for crate::gateway::model::TCPRouteState {
+    fn namespace(&self) -> &str {
+        self.namespace.as_ref()
+    }
+    fn parent_refs(&self) -> &[crate::gateway::model::ParentRef] {
+        &self.parent_refs
+    }
+}
+
+impl L4RouteState for crate::gateway::model::UDPRouteState {
+    fn namespace(&self) -> &str {
+        self.namespace.as_ref()
+    }
+    fn parent_refs(&self) -> &[crate::gateway::model::ParentRef] {
+        &self.parent_refs
+    }
+}
+
+impl L4RouteState for crate::gateway::model::TLSRouteState {
+    fn namespace(&self) -> &str {
+        self.namespace.as_ref()
+    }
+    fn parent_refs(&self) -> &[crate::gateway::model::ParentRef] {
+        &self.parent_refs
+    }
+}
+
 /// Translate a reconciled view into the canonical IR.
 pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
     // Key: (listener_hostname_prefix, route_hostname_prefix) — merge rules from
@@ -777,10 +1011,14 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
         }
     }
 
+    let (l4_listeners, l4_routes) = translate_l4_routes(view);
+
     ir::RouteTable {
-        listeners: vec![],
+        listeners: l4_listeners,
         hosts: groups.into_values().collect(),
         acme_routes: std::collections::HashMap::new(),
+        l4_routes,
+        tls_certs: vec![],
     }
 }
 
@@ -951,8 +1189,9 @@ fn build_ir_rule(rule: &HTTPRouteRule, req_match: ir::RequestMatch, rule_idx: us
 mod tests {
     use super::*;
     use crate::gateway::model::{
-        HTTPRouteState, HeaderMatch, HostnameMatch, ParentRef, PathMatch, PathRewrite, RouteFilter,
-        RouteMatch, WeightedBackend,
+        GatewayState, HTTPRouteState, HeaderMatch, HostnameMatch, ListenerState, ParentRef,
+        PathMatch, PathRewrite, RouteFilter, RouteMatch, TCPRouteState, TLSRouteState,
+        UDPRouteState, WeightedBackend,
     };
     use crate::ir::compile::CompiledRouteTable;
     use std::sync::Arc;
@@ -962,6 +1201,9 @@ mod tests {
             gateways: vec![],
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         }
     }
@@ -1579,6 +1821,7 @@ mod tests {
                 hostname: None,
                 port: 80,
                 protocol: Arc::from("HTTP"),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -1609,6 +1852,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -1637,6 +1883,7 @@ mod tests {
                 hostname: None,
                 port: 80,
                 protocol: Arc::from("HTTP"),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -1672,6 +1919,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -1700,6 +1950,7 @@ mod tests {
                 hostname: None,
                 port: 80,
                 protocol: Arc::from("HTTP"),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -1735,6 +1986,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -1759,6 +2013,7 @@ mod tests {
                 hostname: None,
                 port: 80,
                 protocol: Arc::from("HTTP"),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -1798,6 +2053,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -1831,12 +2089,14 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: None,
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("wildcard-example-com"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.example.com")),
+                    tls_mode: None,
                 },
             ],
         };
@@ -1902,6 +2162,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![empty_route, wildcard_route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -1937,12 +2200,14 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: None,
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("wildcard-example-com"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.example.com")),
+                    tls_mode: None,
                 },
             ],
         };
@@ -2008,6 +2273,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![empty_route, wildcard_route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2046,6 +2314,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: Some(Arc::from("*.example.com")),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2081,6 +2350,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2113,6 +2385,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: Some(Arc::from("*.example.com")),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2148,6 +2421,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2248,6 +2524,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: Some(Arc::from("*.example.com")),
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2281,11 +2558,95 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let configs = translate_view(&view);
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].host_prefix, "foo.example.com");
+    }
+
+    #[test]
+    fn translate_query_param_match_to_ir() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+                tls_mode: None,
+            }],
+        };
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("query-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("query.example.com"))],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![RouteMatch {
+                    path: Some(PathMatch::Prefix(Arc::from("/"))),
+                    headers: vec![],
+                    query_params: vec![
+                        QueryParamMatch {
+                            name: Arc::from("page"),
+                            value: QueryParamMatchValue::Exact(Arc::from("1")),
+                        },
+                        QueryParamMatch {
+                            name: Arc::from("filter"),
+                            value: QueryParamMatchValue::Regex(Arc::from(".*")),
+                        },
+                    ],
+                    method: None,
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("svc:80"),
+                    weight: 1,
+
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        let matches = &rule.matches[0];
+        assert_eq!(matches.query_params.len(), 2);
+        assert_eq!(
+            matches.query_params[0],
+            crate::ir::QueryParamMatch {
+                name: Arc::from("page"),
+                value: crate::ir::QueryParamMatchValue::Exact(Arc::from("1")),
+            }
+        );
+        assert_eq!(
+            matches.query_params[1],
+            crate::ir::QueryParamMatch {
+                name: Arc::from("filter"),
+                value: crate::ir::QueryParamMatchValue::Regex(Arc::from(".*")),
+            }
+        );
     }
 
     #[test]
@@ -2299,6 +2660,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2341,6 +2703,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2364,6 +2729,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2397,6 +2763,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2422,6 +2791,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2459,6 +2829,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2484,6 +2857,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -2516,6 +2890,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -2581,24 +2958,28 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("foo.bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-4"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.foo.com")),
+                    tls_mode: None,
                 },
             ],
         };
@@ -2641,6 +3022,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
 
@@ -2687,24 +3071,28 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("foo.bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.bar.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-4"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.foo.com")),
+                    tls_mode: None,
                 },
             ],
         };
@@ -2753,6 +3141,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
 
@@ -2797,18 +3188,21 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("very.specific.com")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.wildcard.io")),
+                    tls_mode: None,
                 },
                 ListenerState {
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: Some(Arc::from("*.anotherwildcard.io")),
+                    tls_mode: None,
                 },
             ],
         };
@@ -2821,6 +3215,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
 
@@ -2930,6 +3325,9 @@ mod tests {
             gateways: vec![specific_gateway, all_gateway],
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
 
@@ -3034,6 +3432,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -3071,6 +3470,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -3099,6 +3501,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let route = HTTPRouteState {
@@ -3135,6 +3538,9 @@ mod tests {
             gateways: vec![gateway],
             routes: vec![],
             http_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let table = translate_view_to_ir(&view);
@@ -3152,5 +3558,303 @@ mod tests {
                 crate::ir::compile::TerminalAction::Redirect(_)
             )
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // L4 route translation
+    // ------------------------------------------------------------------
+
+    fn l4_gateway() -> GatewayState {
+        GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![
+                ListenerState {
+                    name: Arc::from("tcp"),
+                    protocol: Arc::from("TCP"),
+                    port: 9001,
+                    hostname: None,
+                    tls_mode: None,
+                },
+                ListenerState {
+                    name: Arc::from("udp"),
+                    protocol: Arc::from("UDP"),
+                    port: 9002,
+                    hostname: None,
+                    tls_mode: None,
+                },
+                ListenerState {
+                    name: Arc::from("tls"),
+                    protocol: Arc::from("TLS"),
+                    port: 9003,
+                    hostname: None,
+                    tls_mode: None,
+                },
+            ],
+        }
+    }
+
+    fn tcp_route(programmed: bool) -> TCPRouteState {
+        TCPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("tcp-route"),
+            generation: 1,
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            backends: vec![WeightedBackend {
+                backend: Arc::from("10.0.0.1:8080"),
+                weight: 1,
+                filters: vec![],
+            }],
+            programmed,
+        }
+    }
+
+    fn udp_route(programmed: bool) -> UDPRouteState {
+        UDPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("udp-route"),
+            generation: 1,
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            backends: vec![WeightedBackend {
+                backend: Arc::from("10.0.0.2:8080"),
+                weight: 1,
+                filters: vec![],
+            }],
+            programmed,
+        }
+    }
+
+    fn tls_route(programmed: bool, hostnames: Vec<HostnameMatch>) -> TLSRouteState {
+        TLSRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("tls-route"),
+            generation: 1,
+            hostnames,
+            parent_refs: vec![ParentRef {
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+            }],
+            backends: vec![WeightedBackend {
+                backend: Arc::from("10.0.0.3:8443"),
+                weight: 1,
+                filters: vec![],
+            }],
+            programmed,
+        }
+    }
+
+    #[test]
+    fn listener_protocol_to_ir_maps_protocols() {
+        assert_eq!(listener_protocol_to_ir("HTTP"), Some(ir::Protocol::Http));
+        assert_eq!(listener_protocol_to_ir("HTTPS"), Some(ir::Protocol::Https));
+        assert_eq!(listener_protocol_to_ir("TCP"), Some(ir::Protocol::Tcp));
+        assert_eq!(listener_protocol_to_ir("UDP"), Some(ir::Protocol::Udp));
+        assert_eq!(listener_protocol_to_ir("TLS"), Some(ir::Protocol::Tls));
+        assert_eq!(listener_protocol_to_ir("FTP"), None);
+    }
+
+    #[test]
+    fn add_l4_listener_skips_duplicates_and_unknown_protocols() {
+        let gateway = l4_gateway();
+        let mut listeners: std::collections::BTreeMap<Arc<str>, ir::ListenerConfig> =
+            std::collections::BTreeMap::new();
+        add_l4_listener(&mut listeners, &gateway, &gateway.listeners[0]);
+        assert_eq!(listeners.len(), 1);
+        // duplicate is ignored
+        add_l4_listener(&mut listeners, &gateway, &gateway.listeners[0]);
+        assert_eq!(listeners.len(), 1);
+
+        let unknown = ListenerState {
+            name: Arc::from("weird"),
+            protocol: Arc::from("SCTP"),
+            port: 9004,
+            hostname: None,
+            tls_mode: None,
+        };
+        add_l4_listener(&mut listeners, &gateway, &unknown);
+        assert_eq!(listeners.len(), 1);
+    }
+
+    #[test]
+    fn hostnames_to_l4_match() {
+        assert_eq!(super::hostnames_to_l4_match(&[]), ir::L4Match::Any);
+        let exact = vec![HostnameMatch::Exact(Arc::from("foo.example.com"))];
+        assert_eq!(
+            super::hostnames_to_l4_match(&exact),
+            ir::L4Match::Sni(ir::HostnameMatch::Exact(Arc::from("foo.example.com")))
+        );
+    }
+
+    #[test]
+    fn translate_l4_routes_creates_listeners_and_routes() {
+        let view = GatewayView {
+            gateways: vec![l4_gateway()],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![tcp_route(true)],
+            udp_routes: vec![udp_route(true)],
+            tls_routes: vec![tls_route(
+                true,
+                vec![HostnameMatch::Exact(Arc::from("foo.example.com"))],
+            )],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert_eq!(listeners.len(), 3);
+        assert_eq!(routes.len(), 3);
+        let ids: Vec<_> = listeners.iter().map(|l| l.id.as_ref()).collect();
+        assert!(ids.contains(&"default/gw-1/tcp"));
+        assert!(ids.contains(&"default/gw-1/udp"));
+        assert!(ids.contains(&"default/gw-1/tls"));
+        assert!(routes
+            .iter()
+            .any(|r| matches!(r.action, ir::L4Action::TcpRelay(_))));
+        assert!(routes
+            .iter()
+            .any(|r| matches!(r.action, ir::L4Action::UdpRelay(_))));
+        assert!(routes
+            .iter()
+            .any(|r| matches!(r.action, ir::L4Action::TlsPassthrough(_))));
+        assert!(routes
+            .iter()
+            .any(|r| matches!(r.match_, ir::L4Match::Sni(_))));
+    }
+
+    #[test]
+    fn translate_l4_routes_skips_unprogrammed() {
+        let view = GatewayView {
+            gateways: vec![l4_gateway()],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![tcp_route(false)],
+            udp_routes: vec![udp_route(false)],
+            tls_routes: vec![tls_route(false, vec![])],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert!(listeners.is_empty());
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn translate_l4_routes_filters_by_section_name() {
+        let mut route = tcp_route(true);
+        route.parent_refs[0].section_name = Some(Arc::from("tls"));
+        let view = GatewayView {
+            gateways: vec![l4_gateway()],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![route],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert!(listeners.is_empty());
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn translate_l4_routes_skips_when_gateway_not_found() {
+        let mut route = tcp_route(true);
+        route.parent_refs[0].name = Arc::from("missing-gw");
+        let view = GatewayView {
+            gateways: vec![l4_gateway()],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![route],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert!(listeners.is_empty());
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn translate_l4_routes_inherits_parent_namespace() {
+        let mut route = tcp_route(true);
+        route.namespace = Arc::from("other");
+        route.parent_refs[0].namespace = None;
+        let gateway = GatewayState {
+            namespace: Arc::from("other"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("tcp"),
+                protocol: Arc::from("TCP"),
+                port: 9001,
+                hostname: None,
+                tls_mode: None,
+            }],
+        };
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![route],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(listeners[0].id.as_ref(), "other/gw-1/tcp");
+    }
+
+    #[test]
+    fn translate_l4_routes_uses_terminate_action_for_terminate_listener() {
+        let mut gateway = l4_gateway();
+        gateway.listeners.retain(|l| l.protocol.as_ref() == "TLS");
+        gateway.listeners[0].tls_mode = Some(TlsMode::Terminate);
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![tls_route(true, vec![])],
+            reference_grants: vec![],
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(routes.len(), 1);
+        assert!(matches!(
+            listeners[0].tls,
+            Some(ir::TlsConfig::Registry { .. })
+        ));
+        assert!(matches!(routes[0].action, ir::L4Action::TlsTerminate(_)));
+    }
+
+    #[test]
+    fn translate_l4_routes_uses_passthrough_action_for_passthrough_listener() {
+        let mut gateway = l4_gateway();
+        gateway.listeners.retain(|l| l.protocol.as_ref() == "TLS");
+        gateway.listeners[0].tls_mode = Some(TlsMode::Passthrough);
+        let view = GatewayView {
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![tls_route(true, vec![])],
+            reference_grants: vec![],
+        };
+        let (_listeners, routes) = translate_l4_routes(&view);
+        assert!(routes
+            .iter()
+            .any(|r| matches!(r.action, ir::L4Action::TlsPassthrough(_))));
     }
 }

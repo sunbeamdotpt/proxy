@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! GatewayClass reconciler.
 //!
@@ -33,6 +33,12 @@ pub fn supported_features() -> Vec<String> {
         "ReferenceGrant".to_string(),
         // Gateway extended
         "GatewayPort8080".to_string(),
+        // L4 route support
+        "TCPRoute".to_string(),
+        "UDPRoute".to_string(),
+        "TLSRoute".to_string(),
+        "TLSRouteModeTerminate".to_string(),
+        "TLSRouteModeMixed".to_string(),
         // HTTPRoute extended
         "HTTPRouteMethodMatching".to_string(),
         "HTTPRouteQueryParamMatching".to_string(),
@@ -227,6 +233,11 @@ mod tests {
         assert!(features.contains(&"HTTPRoute".to_string()));
         assert!(features.contains(&"HTTPRouteMethodMatching".to_string()));
         assert!(features.contains(&"HTTPRoutePathRedirect".to_string()));
+        assert!(features.contains(&"TCPRoute".to_string()));
+        assert!(features.contains(&"UDPRoute".to_string()));
+        assert!(features.contains(&"TLSRoute".to_string()));
+        assert!(features.contains(&"TLSRouteModeTerminate".to_string()));
+        assert!(features.contains(&"TLSRouteModeMixed".to_string()));
         assert!(!features.is_empty());
     }
 
@@ -387,5 +398,33 @@ mod tests {
         let is_leader = Arc::new(AtomicBool::new(false));
         let handle = run_gatewayclass_controller(client, is_leader);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn gatewayclass_context_clone_smoke() {
+        let ctx = GatewayClassContext {
+            client: kube::Client::new(
+                tower::service_fn(|_req| async {
+                    Ok::<_, std::convert::Infallible>(http::Response::new(
+                        kube::client::Body::empty(),
+                    ))
+                }),
+                "default",
+            ),
+            is_leader: Arc::new(AtomicBool::new(false)),
+        };
+        let cloned = ctx.clone();
+        assert!(!cloned.is_leader.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn gatewayclass_spec_debug_smoke() {
+        let spec = GatewayClassSpec {
+            controller_name: CONTROLLER_NAME.into(),
+            description: Some("test".into()),
+        };
+        let s = format!("{:?}", spec);
+        assert!(s.contains("controller_name"));
+        assert!(s.contains(CONTROLLER_NAME));
     }
 }

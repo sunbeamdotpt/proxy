@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Stable canonical digest of a [`ReconciledView`].
 
@@ -549,12 +549,14 @@ mod tests {
                         protocol: arc("HTTP"),
                         port: 80,
                         hostname: None,
+                        tls_mode: None,
                     },
                     ListenerState {
                         name: arc("https"),
                         protocol: arc("HTTPS"),
                         port: 443,
                         hostname: None,
+                        tls_mode: None,
                     },
                 ],
             }],
@@ -570,6 +572,9 @@ mod tests {
                 }],
             }],
             http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
                 namespace: arc("default"),
                 name: arc("grant-1"),
@@ -679,6 +684,9 @@ mod tests {
             gateways: vec![],
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         }
     }
@@ -1002,6 +1010,9 @@ mod tests {
             gateways: vec![],
             routes: vec![],
             http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
                 namespace: arc("default"),
                 name: arc("g1"),
@@ -1146,5 +1157,47 @@ mod tests {
         let b = a.clone();
         a.http_routes[0].rules[0].matches.swap(0, 1);
         assert_eq!(compute_digest(&a), compute_digest(&b));
+    }
+
+    #[test]
+    fn http_route_filter_reordering_stable() {
+        // Exercise route_filter_ord by putting multiple RouteFilter variants
+        // in a single rule out of canonical order.
+        let filters = vec![
+            RouteFilter::ResponseHeaderRemove { name: arc("X-Old") },
+            RouteFilter::RequestHeaderSet {
+                name: arc("X-In"),
+                value: arc("in"),
+            },
+            RouteFilter::UrlRewrite {
+                hostname: None,
+                path: Some(PathRewrite::PrefixReplace {
+                    prefix: arc("/api"),
+                    replacement: arc("/v2"),
+                }),
+            },
+            RouteFilter::RequestHeaderAdd {
+                name: arc("X-In-Add"),
+                value: arc("in-add"),
+            },
+        ];
+        let base = view_with_http_routes(vec![HTTPRouteState {
+            namespace: arc("default"),
+            name: arc("r1"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                programmed: true,
+                timeout_secs: None,
+                matches: vec![],
+                backends: vec![],
+                filters: filters.clone(),
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        }]);
+        let mut reversed = base.clone();
+        reversed.http_routes[0].rules[0].filters.reverse();
+        assert_eq!(compute_digest(&base), compute_digest(&reversed));
     }
 }

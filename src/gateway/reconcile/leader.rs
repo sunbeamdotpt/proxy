@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Leadership-aware reconcile loop.
 //!
@@ -30,9 +30,13 @@ use crate::gateway::model::ReconciledView;
 use crate::gateway::reconcile::gateway::run_gateway_controller;
 use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
 use crate::gateway::reconcile::httproute::run_httproute_controller;
+use crate::gateway::reconcile::l4route::{
+    maybe_run_tcproute_controller, maybe_run_tlsroute_controller, maybe_run_udproute_controller,
+};
 use crate::gateway::reconcile::reconcile_tick;
 use crate::gateway::translate::translate_view_to_ir;
 use crate::ir;
+use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry};
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -51,8 +55,9 @@ pub async fn run_reconcile_loop(
     client: Client,
     routes_tx: Sender<ir::RouteTable>,
     cluster_handle: Option<Arc<ClusterHandle>>,
-    cert_path: String,
-    key_path: String,
+    tls_registry: Arc<TlsRegistry>,
+    gateway_cert_source: Arc<GatewayCertSource>,
+    disk_cert_source: Arc<DiskCertSource>,
 ) {
     let is_leader = Arc::new(AtomicBool::new(election.state() == LeaderState::Leader));
 
@@ -60,6 +65,9 @@ pub async fn run_reconcile_loop(
     let _gc_handle = run_gatewayclass_controller(client.clone(), is_leader.clone());
     let _gw_handle = run_gateway_controller(client.clone(), is_leader.clone());
     let _hr_handle = run_httproute_controller(client.clone(), is_leader.clone());
+    let _tcp_handle = maybe_run_tcproute_controller(client.clone(), is_leader.clone()).await;
+    let _udp_handle = maybe_run_udproute_controller(client.clone(), is_leader.clone()).await;
+    let _tls_handle = maybe_run_tlsroute_controller(client.clone(), is_leader.clone()).await;
 
     // -- Digest publisher & resource notifier --------------------------------
     let node_id = cluster_handle
@@ -136,7 +144,7 @@ pub async fn run_reconcile_loop(
 
     // -- Main reconcile loop -------------------------------------------------
     let mut token: Option<crate::gateway::election::LeaderToken> = None;
-    let mut tick = interval(Duration::from_secs(5));
+    let mut tick = interval(Duration::from_millis(500));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let force_notify = Arc::new(Notify::new());
@@ -193,23 +201,19 @@ pub async fn run_reconcile_loop(
             }
             prev_view = Some(view.clone());
 
-            // If any Gateway declares an HTTPS listener with valid
-            // certificateRefs, fetch the Secret and write the cert so that
-            // Pingora can serve TLS on the next graceful upgrade.
-            match crate::gateway::cert::maybe_write_gateway_certs(
-                &client, &view, &cert_path, &key_path,
-            )
-            .await
-            {
-                Ok(true) => {
-                    tracing::info!("Gateway TLS certs changed — triggering graceful upgrade");
-                    crate::upgrade::trigger_upgrade();
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "Gateway TLS cert fetch failed");
-                }
+            // Refresh Gateway API certificates and merge them with the disk
+            // certificate into the central TLS registry. L4 termination uses
+            // the registry directly, so no graceful upgrade is required.
+            gateway_cert_source.refresh(&client, &view).await;
+            disk_cert_source.refresh();
+            let mut store = disk_cert_source
+                .snapshot()
+                .map(|s| (*s).clone())
+                .unwrap_or_default();
+            if let Some(gw) = gateway_cert_source.snapshot() {
+                merge_cert_store(&mut store, &gw);
             }
+            tls_registry.apply(store);
 
             // Gateway status (including Programmed=True) is written by the
             // dedicated Gateway controller; the main loop only computes the
@@ -265,6 +269,66 @@ fn diff_view(old: &Option<ReconciledView>, new: &ReconciledView) -> Vec<GatewayR
         }
     }
 
+    for route in &new.tcp_routes {
+        let changed = old.as_ref().is_none_or(|o| {
+            !o.tcp_routes.iter().any(|r| {
+                r.namespace == route.namespace
+                    && r.name == route.name
+                    && r.generation == route.generation
+            })
+        });
+        if changed {
+            notifies.push(GatewayResourceNotify {
+                topic_version: 1,
+                kind: "TCPRoute".into(),
+                namespace: route.namespace.to_string(),
+                name: route.name.to_string(),
+                generation: route.generation,
+                timestamp: now,
+            });
+        }
+    }
+
+    for route in &new.udp_routes {
+        let changed = old.as_ref().is_none_or(|o| {
+            !o.udp_routes.iter().any(|r| {
+                r.namespace == route.namespace
+                    && r.name == route.name
+                    && r.generation == route.generation
+            })
+        });
+        if changed {
+            notifies.push(GatewayResourceNotify {
+                topic_version: 1,
+                kind: "UDPRoute".into(),
+                namespace: route.namespace.to_string(),
+                name: route.name.to_string(),
+                generation: route.generation,
+                timestamp: now,
+            });
+        }
+    }
+
+    for route in &new.tls_routes {
+        let changed = old.as_ref().is_none_or(|o| {
+            !o.tls_routes.iter().any(|r| {
+                r.namespace == route.namespace
+                    && r.name == route.name
+                    && r.generation == route.generation
+            })
+        });
+        if changed {
+            notifies.push(GatewayResourceNotify {
+                topic_version: 1,
+                kind: "TLSRoute".into(),
+                namespace: route.namespace.to_string(),
+                name: route.name.to_string(),
+                generation: route.generation,
+                timestamp: now,
+            });
+        }
+    }
+
     for grant in &new.reference_grants {
         let changed = old.as_ref().is_none_or(|o| {
             !o.reference_grants.iter().any(|g| {
@@ -303,6 +367,7 @@ mod tests {
                 protocol: Arc::from("HTTP"),
                 port: 80,
                 hostname: None,
+                tls_mode: None,
             }],
         }
     }
@@ -338,7 +403,44 @@ mod tests {
             gateways,
             routes: vec![],
             http_routes: routes,
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: grants,
+        }
+    }
+
+    fn tcp_route(ns: &str, name: &str, generation: i64) -> crate::gateway::model::TCPRouteState {
+        crate::gateway::model::TCPRouteState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
+        }
+    }
+
+    fn udp_route(ns: &str, name: &str, generation: i64) -> crate::gateway::model::UDPRouteState {
+        crate::gateway::model::UDPRouteState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
+        }
+    }
+
+    fn tls_route(ns: &str, name: &str, generation: i64) -> crate::gateway::model::TLSRouteState {
+        crate::gateway::model::TLSRouteState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation,
+            hostnames: vec![],
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
         }
     }
 
@@ -427,5 +529,27 @@ mod tests {
         let notifies = diff_view(&Some(old), &new);
         assert_eq!(notifies.len(), 1);
         assert_eq!(notifies[0].namespace, "ns-b");
+    }
+
+    #[test]
+    fn diff_view_emits_l4_route_changes() {
+        let mut old = view(vec![], vec![], vec![]);
+        old.tcp_routes.push(tcp_route("default", "tcp-1", 1));
+        old.udp_routes.push(udp_route("default", "udp-1", 1));
+        old.tls_routes.push(tls_route("default", "tls-1", 1));
+
+        let mut new = view(vec![], vec![], vec![]);
+        new.tcp_routes.push(tcp_route("default", "tcp-1", 2));
+        new.udp_routes.push(udp_route("default", "udp-2", 1));
+        new.tls_routes.push(tls_route("default", "tls-1", 1));
+
+        let notifies = diff_view(&Some(old), &new);
+        assert_eq!(notifies.len(), 2);
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "TCPRoute" && n.name == "tcp-1" && n.generation == 2));
+        assert!(notifies
+            .iter()
+            .any(|n| n.kind == "UDPRoute" && n.name == "udp-2"));
     }
 }

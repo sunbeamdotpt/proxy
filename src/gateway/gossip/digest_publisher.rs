@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Debounced digest publisher and stale-state drift detector.
 //!
@@ -213,6 +213,9 @@ mod tests {
             gateways: vec![],
             routes: vec![],
             http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         }
     }
@@ -355,5 +358,71 @@ mod tests {
 
         drop(publisher);
         let _ = j.await;
+    }
+
+    #[tokio::test]
+    async fn publish_digest_wrapper_emits_broadcast() {
+        let (publisher, handle) = DigestPublisher::new([0xab; 32]);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let j = tokio::spawn(async move { handle.run(tx).await });
+
+        let view = sample_view();
+        publish_digest(&publisher, &view).await;
+
+        let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(matches!(evt, DigestEvent::Broadcast(_)));
+
+        drop(publisher);
+        let _ = j.await;
+    }
+
+    #[tokio::test]
+    async fn on_peer_digest_stores_peer() {
+        let (publisher, handle) = DigestPublisher::new([0xab; 32]);
+        let peers = handle.peers();
+        let (tx, _rx) = mpsc::channel(16);
+        let j = tokio::spawn(async move { handle.run(tx).await });
+
+        let peer_digest = GatewayStateDigest {
+            topic_version: 1,
+            state_hash: [0xcd; 32],
+            term: 7,
+            node_id: [0xef; 32],
+            timestamp: 1_700_000_000,
+        };
+
+        publisher.on_peer_digest(peer_digest.clone()).await;
+
+        // Wait briefly for the background loop to insert the peer digest.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                {
+                    let map = peers.read().await;
+                    if map.contains_key(&[0xef; 32]) {
+                        assert_eq!(map.get(&[0xef; 32]).unwrap().term, 7);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("peer digest not stored");
+
+        drop(publisher);
+        let _ = j.await;
+    }
+
+    #[test]
+    fn digest_publisher_clone_smoke() {
+        let (publisher, _handle) = DigestPublisher::new([0xab; 32]);
+        let cloned = publisher.clone();
+        // Clone copies the channel senders; the handles remain independent.
+        let _ = cloned;
+        let _ = publisher;
     }
 }

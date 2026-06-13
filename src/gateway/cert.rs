@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Fetch TLS certificates referenced by Gateway HTTPS listeners and write
 //! them to disk so that Pingora can load them on the next graceful upgrade.
@@ -196,6 +196,7 @@ mod tests {
                 protocol: Arc::from("HTTPS"),
                 port: 443,
                 hostname: None,
+                tls_mode: None,
             }],
         };
         let _ = gw;
@@ -203,6 +204,9 @@ mod tests {
             gateways: vec![state],
             routes: vec![],
             http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         }
     }
@@ -289,10 +293,14 @@ mod tests {
                     protocol: Arc::from("HTTP"),
                     port: 80,
                     hostname: None,
+                    tls_mode: None,
                 }],
             }],
             routes: vec![],
             http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
             reference_grants: vec![],
         };
         let client = kube::Client::new(

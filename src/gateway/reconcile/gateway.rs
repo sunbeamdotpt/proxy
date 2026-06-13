@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Gateway reconciler.
 //!
@@ -13,8 +13,11 @@ use crate::gateway::api::httproute::HTTPRoute;
 use crate::gateway::api::ReferenceGrant;
 use crate::gateway::model::{
     AllowedRoutes, GatewayState, ListenerState, NamespaceFrom, RouteGroupKind, RouteNamespaces,
+    TlsMode,
 };
-use crate::gateway::reconcile::gatewayclass::{to_k8s_condition, CONTROLLER_NAME};
+use crate::gateway::reconcile::gatewayclass::{
+    supported_features, to_k8s_condition, CONTROLLER_NAME,
+};
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use futures::StreamExt;
@@ -26,6 +29,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Parse the TLS termination mode from a raw listener object.
+///
+/// HTTPS listeners default to `Terminate`. TLS listeners read `tls.mode`
+/// and default to `Passthrough` when the field is absent.
+pub fn parse_tls_mode(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    protocol: &str,
+) -> Option<TlsMode> {
+    match protocol {
+        "HTTPS" => Some(TlsMode::Terminate),
+        "TLS" => {
+            let explicit = obj
+                .get("tls")
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("mode"))
+                .and_then(|v| v.as_str());
+            match explicit {
+                Some("Terminate") => Some(TlsMode::Terminate),
+                Some("Passthrough") => Some(TlsMode::Passthrough),
+                _ => Some(TlsMode::Passthrough),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Build [`ListenerState`] entries from a Gateway's raw `listeners` spec.
 pub fn build_listener_model(gw: &Gateway) -> Vec<ListenerState> {
     let mut listeners = Vec::new();
@@ -36,18 +65,20 @@ pub fn build_listener_model(gw: &Gateway) -> Vec<ListenerState> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .into();
-            let protocol = obj
+            let protocol: Arc<str> = obj
                 .get("protocol")
                 .and_then(|v| v.as_str())
                 .unwrap_or("HTTP")
                 .into();
             let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
             let hostname = obj.get("hostname").and_then(|v| v.as_str()).map(Arc::from);
+            let tls_mode = parse_tls_mode(obj, protocol.as_ref());
             listeners.push(ListenerState {
                 name,
                 protocol,
                 port,
                 hostname,
+                tls_mode,
             });
         }
     }
@@ -159,15 +190,24 @@ pub fn build_listener_status(
     observed_generation: i64,
     cert_errors: &[Option<CertValidation>],
     attached_routes: &[i64],
+    supported_features: &std::collections::HashSet<String>,
 ) -> Vec<serde_json::Value> {
+    let supports_tls_terminate = supported_features.contains("TLSRouteModeTerminate");
+    let supports_tls_mixed = supported_features.contains("TLSRouteModeMixed");
+    let mixed_conflict_names = mixed_tls_conflict_names(&gw.spec.listeners);
+
     let mut statuses = Vec::new();
     for (idx, listener) in gw.spec.listeners.iter().enumerate() {
         let Some(obj) = listener.as_object() else {
             continue;
         };
         let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let protocol = obj
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("HTTP");
         let (
-            supported_kinds,
+            mut supported_kinds,
             mut resolved_refs_status,
             mut resolved_refs_reason,
             mut resolved_refs_message,
@@ -183,6 +223,21 @@ pub fn build_listener_status(
             programmed_reason = "Invalid";
             programmed_message = "Listener has unresolved certificate references";
         }
+
+        let (accepted_status, accepted_reason, accepted_message) = listener_accepted(
+            name,
+            protocol,
+            parse_tls_mode(obj, protocol),
+            &mixed_conflict_names,
+            supports_tls_terminate,
+            supports_tls_mixed,
+        );
+        if accepted_status == "False"
+            && (accepted_reason == "UnsupportedValue" || accepted_reason == "ProtocolConflict")
+        {
+            supported_kinds = Vec::new();
+        }
+
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let status = serde_json::json!({
             "name": name,
@@ -191,9 +246,9 @@ pub fn build_listener_status(
             "conditions": [
                 {
                     "type": "Accepted",
-                    "status": "True",
-                    "reason": "Accepted",
-                    "message": "Listener accepted",
+                    "status": accepted_status,
+                    "reason": accepted_reason,
+                    "message": accepted_message,
                     "observedGeneration": observed_generation,
                     "lastTransitionTime": now,
                 },
@@ -220,6 +275,69 @@ pub fn build_listener_status(
     statuses
 }
 
+/// Return the set of TLS listener names that participate in an unsupported
+/// mixed Terminate/Passthrough configuration on the same port.
+fn mixed_tls_conflict_names(listeners: &[serde_json::Value]) -> std::collections::HashSet<String> {
+    let mut conflicts = std::collections::HashSet::new();
+    let tls: Vec<_> = listeners
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, l)| {
+            let obj = l.as_object()?;
+            if obj.get("protocol").and_then(|v| v.as_str()) != Some("TLS") {
+                return None;
+            }
+            let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mode = parse_tls_mode(obj, "TLS").unwrap_or(TlsMode::Passthrough);
+            Some((idx, name, port, mode))
+        })
+        .collect();
+    for (i, name_i, port_i, mode_i) in &tls {
+        for (j, name_j, port_j, mode_j) in &tls {
+            if i >= j {
+                continue;
+            }
+            if port_i == port_j && mode_i != mode_j {
+                conflicts.insert(name_i.to_string());
+                conflicts.insert(name_j.to_string());
+            }
+        }
+    }
+    conflicts
+}
+
+/// Compute the `Accepted` condition for a listener.
+fn listener_accepted(
+    _name: &str,
+    protocol: &str,
+    tls_mode: Option<TlsMode>,
+    mixed_conflict_names: &std::collections::HashSet<String>,
+    supports_tls_terminate: bool,
+    supports_tls_mixed: bool,
+) -> (&'static str, &'static str, &'static str) {
+    if protocol == "TLS" {
+        if mixed_conflict_names.contains(_name) {
+            if supports_tls_mixed {
+                return ("True", "Accepted", "Listener accepted");
+            }
+            return (
+                "False",
+                "ProtocolConflict",
+                "Mixed TLS termination modes on the same port are not supported",
+            );
+        }
+        if tls_mode == Some(TlsMode::Terminate) && !supports_tls_terminate {
+            return (
+                "False",
+                "UnsupportedValue",
+                "TLS termination mode Terminate is not supported",
+            );
+        }
+    }
+    ("True", "Accepted", "Listener accepted")
+}
+
 fn validate_listener_kinds(
     listener: &serde_json::Map<String, serde_json::Value>,
 ) -> (
@@ -228,9 +346,19 @@ fn validate_listener_kinds(
     &'static str,
     &'static str,
 ) {
+    let protocol = listener
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HTTP");
+    let default_kind_name = match protocol {
+        "TCP" => "TCPRoute",
+        "UDP" => "UDPRoute",
+        "TLS" => "TLSRoute",
+        _ => "HTTPRoute",
+    };
     let default_kind = serde_json::json!({
         "group": "gateway.networking.k8s.io",
-        "kind": "HTTPRoute",
+        "kind": default_kind_name,
     });
     let allowed_kinds = listener
         .get("allowedRoutes")
@@ -249,6 +377,7 @@ fn validate_listener_kinds(
         }
     };
 
+    let supported_kinds: &[&str] = &["HTTPRoute", "TCPRoute", "UDPRoute", "TLSRoute"];
     let mut supported = Vec::new();
     let mut has_invalid = false;
     for entry in kinds {
@@ -257,7 +386,7 @@ fn validate_listener_kinds(
             .and_then(|v| v.as_str())
             .unwrap_or("gateway.networking.k8s.io");
         let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if group == "gateway.networking.k8s.io" && kind == "HTTPRoute" {
+        if group == "gateway.networking.k8s.io" && supported_kinds.contains(&kind) {
             supported.push(serde_json::json!({ "group": group, "kind": kind }));
         } else {
             has_invalid = true;
@@ -453,6 +582,7 @@ async fn count_attached_routes(
                     protocol: Arc::from("HTTP"),
                     port: listener.port,
                     hostname: listener.hostname.as_deref().map(Arc::from),
+                    tls_mode: None,
                 };
                 if listener_accepts_route(
                     &listener_state,
@@ -611,12 +741,15 @@ pub async fn reconcile_gateway(
     if ctx.is_leader.load(Ordering::Relaxed) {
         let k8s_conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> =
             conditions.iter().map(to_k8s_condition).collect();
+        let feature_set: std::collections::HashSet<String> =
+            supported_features().into_iter().collect();
         let listener_statuses = build_listener_status(
             &gw,
             gc.as_ref(),
             observed_generation,
             &cert_errors,
             &attached_routes,
+            &feature_set,
         );
         let addresses = gateway_addresses();
         let new_status = serde_json::json!({
@@ -834,10 +967,14 @@ mod tests {
         assert_eq!(listeners[0].port, 80); // default
     }
 
+    fn empty_features() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     #[test]
     fn listener_status_contains_expected_fields() {
         let gw = sample_gw("test-gc");
-        let statuses = build_listener_status(&gw, None, 3, &[], &[]);
+        let statuses = build_listener_status(&gw, None, 3, &[], &[], &empty_features());
         assert_eq!(statuses.len(), 2);
 
         let http = &statuses[0];
@@ -890,7 +1027,7 @@ mod tests {
                       - kind: InvalidRoute
         "#;
         let gw: Gateway = serde_yaml::from_str(yaml).expect("deserializes");
-        let statuses = build_listener_status(&gw, None, 1, &[], &[]);
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
         let resolved = statuses[0]
             .get("conditions")
             .and_then(|c| c.as_array())
@@ -926,7 +1063,7 @@ mod tests {
                       - kind: HTTPRoute
         "#;
         let gw: Gateway = serde_yaml::from_str(yaml).expect("deserializes");
-        let statuses = build_listener_status(&gw, None, 1, &[], &[]);
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
         let supported = statuses[0]["supportedKinds"].as_array().unwrap();
         assert_eq!(supported.len(), 1);
         assert_eq!(supported[0]["kind"], "HTTPRoute");
@@ -954,7 +1091,7 @@ mod tests {
               listeners: []
         "#;
         let gw: Gateway = serde_yaml::from_str(yaml).expect("deserializes");
-        let statuses = build_listener_status(&gw, None, 1, &[], &[]);
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
         assert!(statuses.is_empty());
     }
 
@@ -1101,6 +1238,23 @@ mod tests {
         let is_leader = Arc::new(AtomicBool::new(false));
         let handle = run_gateway_controller(client, is_leader);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_context_clone_smoke() {
+        let ctx = GatewayContext {
+            client: kube::Client::new(
+                tower::service_fn(|_req| async {
+                    Ok::<_, std::convert::Infallible>(http::Response::new(
+                        kube::client::Body::empty(),
+                    ))
+                }),
+                "default",
+            ),
+            is_leader: Arc::new(AtomicBool::new(false)),
+        };
+        let cloned = ctx.clone();
+        assert!(!cloned.is_leader.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -1278,5 +1432,301 @@ mod tests {
         let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
         assert!(err.is_some());
         assert_eq!(err.unwrap().reason, "InvalidCertificateRef");
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_rejects_missing_name() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {
+                "certificateRefs": [{"kind": "Secret"}]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let client = kube::Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
+        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_rejects_cross_namespace_without_grant() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {
+                "certificateRefs": [{"kind": "Secret", "name": "cert", "namespace": "other"}]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let client = kube::Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
+        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        assert_eq!(err.map(|e| e.reason), Some("RefNotPermitted"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_rejects_missing_secret() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {
+                "certificateRefs": [{"kind": "Secret", "name": "missing"}]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let client = kube::Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
+        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCertificateRef"));
+    }
+
+    fn tls_gateway_yaml(mode_a: &str, mode_b: Option<&str>) -> Gateway {
+        let listeners = match mode_b {
+            Some(mode_b) => serde_yaml::from_str(&format!(
+                r#"
+                apiVersion: gateway.networking.k8s.io/v1
+                kind: Gateway
+                metadata:
+                  name: tls-gw
+                  namespace: default
+                  generation: 1
+                spec:
+                  gatewayClassName: test-gc
+                  listeners:
+                    - name: tls-a
+                      protocol: TLS
+                      port: 8443
+                      tls:
+                        mode: {mode_a}
+                        certificateRefs: [{{kind: Secret, name: cert-a}}]
+                    - name: tls-b
+                      protocol: TLS
+                      port: 8443
+                      tls:
+                        mode: {mode_b}
+                        certificateRefs: [{{kind: Secret, name: cert-b}}]
+                "#
+            )),
+            None => serde_yaml::from_str(&format!(
+                r#"
+                apiVersion: gateway.networking.k8s.io/v1
+                kind: Gateway
+                metadata:
+                  name: tls-gw
+                  namespace: default
+                  generation: 1
+                spec:
+                  gatewayClassName: test-gc
+                  listeners:
+                    - name: tls-a
+                      protocol: TLS
+                      port: 8443
+                      tls:
+                        mode: {mode_a}
+                        certificateRefs: [{{kind: Secret, name: cert-a}}]
+                "#
+            )),
+        };
+        listeners.expect("deserializes")
+    }
+
+    fn accepted_reason(statuses: &[serde_json::Value], name: &str) -> Option<String> {
+        statuses
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some(name))
+            .and_then(|s| s.get("conditions").and_then(|v| v.as_array()))
+            .and_then(|conds| {
+                conds
+                    .iter()
+                    .find(|c| c.get("type").and_then(|v| v.as_str()) == Some("Accepted"))
+            })
+            .and_then(|c| c.get("reason").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn listener_status_accepts_tls_terminate_when_supported() {
+        let gw = tls_gateway_yaml("Terminate", None);
+        let mut features = empty_features();
+        features.insert("TLSRouteModeTerminate".to_string());
+        let statuses = build_listener_status(&gw, None, 1, &[], &[0], &features);
+        assert_eq!(
+            accepted_reason(&statuses, "tls-a"),
+            Some("Accepted".to_string())
+        );
+    }
+
+    #[test]
+    fn listener_status_rejects_tls_terminate_when_unsupported() {
+        let gw = tls_gateway_yaml("Terminate", None);
+        let statuses = build_listener_status(&gw, None, 1, &[], &[0], &empty_features());
+        assert_eq!(
+            accepted_reason(&statuses, "tls-a"),
+            Some("UnsupportedValue".to_string())
+        );
+    }
+
+    #[test]
+    fn listener_status_rejects_mixed_tls_modes_when_unsupported() {
+        let gw = tls_gateway_yaml("Terminate", Some("Passthrough"));
+        let mut features = empty_features();
+        features.insert("TLSRouteModeTerminate".to_string());
+        let statuses = build_listener_status(&gw, None, 1, &[], &[0, 0], &features);
+        assert_eq!(
+            accepted_reason(&statuses, "tls-a"),
+            Some("ProtocolConflict".to_string())
+        );
+        assert_eq!(
+            accepted_reason(&statuses, "tls-b"),
+            Some("ProtocolConflict".to_string())
+        );
+    }
+
+    #[test]
+    fn listener_status_accepts_mixed_tls_modes_when_supported() {
+        let gw = tls_gateway_yaml("Terminate", Some("Passthrough"));
+        let mut features = empty_features();
+        features.insert("TLSRouteModeTerminate".to_string());
+        features.insert("TLSRouteModeMixed".to_string());
+        let statuses = build_listener_status(&gw, None, 1, &[], &[0, 0], &features);
+        assert_eq!(
+            accepted_reason(&statuses, "tls-a"),
+            Some("Accepted".to_string())
+        );
+        assert_eq!(
+            accepted_reason(&statuses, "tls-b"),
+            Some("Accepted".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_allowed_routes_defaults_when_missing() {
+        let obj = serde_json::Map::new();
+        let allowed = parse_allowed_routes(&obj);
+        assert!(allowed.kinds.is_empty());
+        assert_eq!(allowed.namespaces.from, NamespaceFrom::Same);
+        assert!(allowed.namespaces.selector.is_none());
+    }
+
+    #[test]
+    fn parse_allowed_routes_reads_kinds_and_namespaces() {
+        let obj = serde_json::json!({
+            "allowedRoutes": {
+                "kinds": [
+                    {"group": "gateway.networking.k8s.io", "kind": "HTTPRoute"},
+                    {"group": "", "kind": "TCPRoute"},
+                    {"kind": ""}
+                ],
+                "namespaces": {
+                    "from": "All",
+                    "selector": {
+                        "matchLabels": {"env": "prod"}
+                    }
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let allowed = parse_allowed_routes(&obj);
+        assert_eq!(allowed.kinds.len(), 2);
+        assert_eq!(allowed.kinds[0].kind.as_ref(), "HTTPRoute");
+        assert_eq!(allowed.kinds[1].group.as_ref(), "");
+        assert_eq!(allowed.namespaces.from, NamespaceFrom::All);
+        assert_eq!(
+            allowed.namespaces.selector,
+            Some(std::collections::BTreeMap::from([(
+                "env".to_string(),
+                "prod".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn parse_allowed_routes_selector_falls_back_to_same() {
+        let obj = serde_json::json!({
+            "allowedRoutes": {
+                "namespaces": {
+                    "from": "Selector"
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let allowed = parse_allowed_routes(&obj);
+        assert_eq!(allowed.namespaces.from, NamespaceFrom::Selector);
+        assert!(allowed.namespaces.selector.is_none());
+    }
+
+    #[test]
+    fn build_listener_allowed_map_populates_per_listener() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 80
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+        "#,
+        )
+        .unwrap();
+        let map = build_listener_allowed_map(&[gw]);
+        let key = (
+            "default".to_string(),
+            "gw-1".to_string(),
+            "http".to_string(),
+        );
+        assert_eq!(map.get(&key).unwrap().namespaces.from, NamespaceFrom::All);
     }
 }

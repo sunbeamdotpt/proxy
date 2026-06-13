@@ -1,5 +1,5 @@
 // Copyright Sunbeam Studios 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Lease-based leader election for the gateway reconciler.
 //!
@@ -274,6 +274,9 @@ mod tests {
 
         let client = kube::Client::new(MockSvc, "default");
         let election = Election::new(client, "default".into(), "test".into(), "pod-1".into());
+
+        // Give the background lease task time to call the mock service.
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Before the background task acquires leadership, state is NotLeader.
         assert_eq!(election.state(), LeaderState::NotLeader);
