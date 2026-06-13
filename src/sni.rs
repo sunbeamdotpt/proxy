@@ -130,7 +130,7 @@ mod tests {
             let name_bytes = hostname.as_bytes();
             let name_len = name_bytes.len() as u16;
             let entry_len = 1 + 2 + name_len; // type(1) + name_len(2) + name
-            let sni_data_len = 2 + entry_len;  // list_len field + entry
+            let sni_data_len = 2 + entry_len; // list_len field + entry
 
             exts.extend_from_slice(&[0x00, 0x00]); // ext type = SNI
             exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes()); // ext data length

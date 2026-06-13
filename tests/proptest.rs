@@ -36,7 +36,7 @@ fn make_route(
         request_headers_add: vec![],
         request_headers_remove: vec![],
         cache: None,
-            cors: None,
+        cors: None,
         timeout_secs: None,
         listener_hostname: None,
         gateway_api: false,
@@ -95,10 +95,7 @@ fn backend_url_strategy() -> impl Strategy<Value = String> {
 }
 
 fn find_replace_strategy() -> impl Strategy<Value = (String, String)> {
-    (
-        "[a-zA-Z0-9./_-]{1,50}",
-        "[a-zA-Z0-9./_-]{0,50}",
-    )
+    ("[a-zA-Z0-9./_-]{1,50}", "[a-zA-Z0-9./_-]{0,50}")
 }
 
 fn body_content_strategy() -> impl Strategy<Value = String> {
@@ -364,10 +361,7 @@ proptest! {
 
 /// Simulate the body rewrite logic from response_body_filter without needing
 /// a Pingora session. This mirrors the exact algorithm in proxy.rs.
-fn simulate_body_rewrite(
-    chunks: &[&[u8]],
-    rules: &[(String, String)],
-) -> Vec<u8> {
+fn simulate_body_rewrite(chunks: &[&[u8]], rules: &[(String, String)]) -> Vec<u8> {
     let mut buffer = Vec::new();
     for chunk in chunks {
         buffer.extend_from_slice(chunk);
@@ -893,7 +887,7 @@ upstream_path_prefix = "{prefix}"
 // ─── Cluster bandwidth meter ────────────────────────────────────────────────
 
 use sunbeam_proxy::cluster::bandwidth::{
-    gbps_to_bytes_per_sec, BandwidthLimiter, BandwidthLimitResult, BandwidthMeter,
+    gbps_to_bytes_per_sec, BandwidthLimitResult, BandwidthLimiter, BandwidthMeter,
     BandwidthTracker, ClusterBandwidthState,
 };
 

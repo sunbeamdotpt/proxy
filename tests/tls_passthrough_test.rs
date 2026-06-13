@@ -165,7 +165,10 @@ async fn passthrough_route_relays_raw_tls_to_backend() {
         .unwrap();
 
     // The backend should have received our exact ClientHello bytes
-    assert_eq!(received, client_hello, "backend should receive raw ClientHello");
+    assert_eq!(
+        received, client_hello,
+        "backend should receive raw ClientHello"
+    );
 
     // Verify the ClientHello is parseable
     assert_eq!(

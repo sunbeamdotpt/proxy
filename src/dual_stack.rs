@@ -12,8 +12,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use tokio::net::{TcpListener, TcpStream};
 use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpStream};
 
 pin_project_lite::pin_project! {
     /// Future returned by [`DualStackTcpListener::accept`].
@@ -29,9 +29,9 @@ pin_project_lite::pin_project! {
 }
 
 impl<
-    F: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
-    F2: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
-> std::future::Future for AcceptFut<F, F2>
+        F: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
+        F2: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
+    > std::future::Future for AcceptFut<F, F2>
 {
     type Output = Result<(TcpStream, SocketAddr)>;
 
@@ -86,17 +86,17 @@ impl DualStackTcpListener {
                 );
             }
         }
-        let v6_addr: SocketAddr = ipv6_addr.parse().map_err(|e| {
-            Error::new(ErrorKind::InvalidInput, format!("bad v6 addr: {e}"))
-        })?;
+        let v6_addr: SocketAddr = ipv6_addr
+            .parse()
+            .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("bad v6 addr: {e}")))?;
         v6_sock.bind(v6_addr)?;
         let ip6 = v6_sock.listen(1024)?;
 
         let v4_sock = TcpSocket::new_v4()?;
         v4_sock.set_reuseaddr(true)?;
-        let v4_addr: SocketAddr = ipv4_addr.parse().map_err(|e| {
-            Error::new(ErrorKind::InvalidInput, format!("bad v4 addr: {e}"))
-        })?;
+        let v4_addr: SocketAddr = ipv4_addr
+            .parse()
+            .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("bad v4 addr: {e}")))?;
         v4_sock.bind(v4_addr)?;
         let ip4 = v4_sock.listen(1024)?;
 
@@ -132,7 +132,7 @@ impl DualStackTcpListener {
     pub fn local_addr(&self) -> Result<(SocketAddrV6, SocketAddrV4)> {
         let ip6_addr = self.ip6.local_addr()?;
         let ip4_addr = self.ip4.local_addr()?;
-        
+
         match (ip6_addr, ip4_addr) {
             (SocketAddr::V6(ip6), SocketAddr::V4(ip4)) => Ok((ip6, ip4)),
             _ => Err(Error::new(
@@ -165,5 +165,44 @@ impl DualStackBind for str {
         ipv4_addr: &str,
     ) -> impl std::future::Future<Output = Result<DualStackTcpListener>> + Send {
         DualStackTcpListener::bind(ipv6_addr, ipv4_addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn bind_and_accept_ipv4() {
+        let listener = DualStackTcpListener::bind("[::1]:0", "127.0.0.1:0")
+            .await
+            .unwrap();
+        let (v6_addr, v4_addr) = listener.local_addr().unwrap();
+        assert_eq!(v6_addr.ip(), &std::net::Ipv6Addr::LOCALHOST);
+        assert_eq!(*v4_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
+
+        let _connect = tokio::spawn(async move { TcpStream::connect(v4_addr).await });
+        let (conn, _) = listener.accept().await.unwrap();
+        assert!(conn.peer_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn bind_and_accept_ipv6() {
+        let listener = DualStackTcpListener::bind("[::1]:0", "127.0.0.1:0")
+            .await
+            .unwrap();
+        let (v6_addr, _) = listener.local_addr().unwrap();
+
+        let _connect = tokio::spawn(async move { TcpStream::connect(v6_addr).await });
+        let (conn, _) = listener.accept().await.unwrap();
+        assert!(conn.peer_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn bind_bad_address_returns_error() {
+        assert!(DualStackTcpListener::bind("not-an-addr", "127.0.0.1:0")
+            .await
+            .is_err());
     }
 }

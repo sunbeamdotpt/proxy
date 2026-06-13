@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 //! sunbeam-proxy — Pingora-based reverse proxy with ML-powered DDoS/scanner detection,
 //! rate limiting, gossip clustering, and ACME TLS support.
 // Copyright Sunbeam Studios 2026
@@ -16,6 +16,8 @@ pub mod audit;
 pub mod autotune;
 /// Cache.
 pub mod cache;
+/// Cert.
+pub mod cert;
 /// Cluster.
 pub mod cluster;
 /// Config.
@@ -29,12 +31,16 @@ pub mod dual_stack;
 /// Ensemble.
 pub mod ensemble;
 pub mod gateway;
+/// Intermediate representation for routing.
+pub mod ir;
 /// Metrics.
 pub mod metrics;
 /// Proxy.
 pub mod proxy;
 /// Rate limit.
 pub mod rate_limit;
+/// Route manager.
+pub mod route_manager;
 /// Scanner.
 pub mod scanner;
 /// Sni.
@@ -43,12 +49,10 @@ pub mod sni;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
-/// Cert.
-pub mod cert;
 /// Tls passthrough.
 pub mod tls_passthrough;
-/// Upgrade.
-pub mod upgrade;
 #[cfg(feature = "training")]
 /// Training.
 pub mod training;
+/// Upgrade.
+pub mod upgrade;

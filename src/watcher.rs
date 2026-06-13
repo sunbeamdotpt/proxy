@@ -31,7 +31,13 @@ pub async fn run_watcher(
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
     let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
 
-    tokio::spawn(watch_secret(secret_api, tls_secret, cert_path, key_path, tx.clone()));
+    tokio::spawn(watch_secret(
+        secret_api,
+        tls_secret,
+        cert_path,
+        key_path,
+        tx.clone(),
+    ));
     tokio::spawn(watch_configmap(cm_api, config_configmap, tx));
 
     if rx.recv().await.is_some() {

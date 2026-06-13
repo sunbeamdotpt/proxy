@@ -9,7 +9,6 @@
 //! `run_forever()` never returns, which is fine — the OS cleans everything up
 //! when the test binary exits).
 
-use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -50,7 +49,7 @@ fn start_echo_backend() -> (u16, std::sync::mpsc::Receiver<HashMap<String, Strin
             if reader.read_line(&mut line).unwrap_or(0) == 0 {
                 break; // EOF before blank line
             }
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim_end_matches(['\r', '\n']);
             if skip_first {
                 skip_first = false;
                 continue;
@@ -64,8 +63,8 @@ fn start_echo_backend() -> (u16, std::sync::mpsc::Receiver<HashMap<String, Strin
         }
 
         let _ = tx.send(headers);
-        let _ = stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ =
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     });
 
     (port, rx)
@@ -120,9 +119,11 @@ fn start_proxy_once(backend_port: u16) {
             gateway_api: false,
         }];
         let acme_routes: AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
-        let compiled_rewrites = SunbeamProxy::compile_rewrites(&routes);
+        let ir = sunbeam_proxy::ir::from_config::from_route_configs(&routes);
+        let table = sunbeam_proxy::ir::compile::CompiledRouteTable::compile(ir).expect("compile");
+        let compiled_rewrites = SunbeamProxy::compile_rewrites_from_ir(&table);
         let proxy = SunbeamProxy {
-            routes: Arc::new(arc_swap::ArcSwap::from_pointee(routes)),
+            routes: Arc::new(arc_swap::ArcSwap::from_pointee(table)),
             acme_routes,
             ddos_detector: None,
             scanner_detector: None,
@@ -169,8 +170,7 @@ fn test_plain_http_request_carries_x_forwarded_proto() {
 
     // Send a minimal HTTP/1.1 request.  `Host: test.local` → prefix "test"
     // matches the route configured above.
-    let mut conn =
-        TcpStream::connect(("127.0.0.1", PROXY_PORT)).expect("connect to proxy");
+    let mut conn = TcpStream::connect(("127.0.0.1", PROXY_PORT)).expect("connect to proxy");
     conn.write_all(b"GET / HTTP/1.1\r\nHost: test.local\r\nConnection: close\r\n\r\n")
         .expect("write request");
 

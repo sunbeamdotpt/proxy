@@ -28,7 +28,10 @@ pub fn trigger_upgrade() {
         }
     };
 
-    match std::process::Command::new(&exe).args(["serve", "--upgrade"]).spawn() {
+    match std::process::Command::new(&exe)
+        .args(["serve", "--upgrade"])
+        .spawn()
+    {
         Ok(child) => tracing::info!(pid = child.id(), "upgrade process spawned"),
         Err(e) => {
             tracing::error!(error = %e, "failed to spawn upgrade process; upgrade aborted");
@@ -38,4 +41,18 @@ pub fn trigger_upgrade() {
 
     // SAFETY: kill(getpid(), SIGQUIT) is always safe; we're only signalling ourselves.
     unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_upgrade_returns_when_disabled() {
+        // SAFETY: test-only mutation of an env var that no other test uses.
+        unsafe { std::env::set_var("SUNBEAM_DISABLE_GRACEFUL_UPGRADE", "1") };
+        trigger_upgrade();
+        // Cleanup so other tests are not affected.
+        unsafe { std::env::remove_var("SUNBEAM_DISABLE_GRACEFUL_UPGRADE") };
+    }
 }
