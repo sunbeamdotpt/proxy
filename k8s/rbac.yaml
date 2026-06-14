@@ -31,8 +31,8 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Core resources for backend resolution, namespace selectors, and pod/Svc endpoints.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "endpoints", "pods"]
-    verbs: ["get", "list", "watch"]
+    resources: ["namespaces", "services", "endpoints", "pods", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Secrets may be referenced cross-namespace by Gateway certificateRefs when
   # permitted by a ReferenceGrant. Limiting this to named resources is not
   # practical for dynamic Gateway API usage; restrict to read-only verbs.

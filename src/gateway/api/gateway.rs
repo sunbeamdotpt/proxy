@@ -34,6 +34,10 @@ pub struct GatewaySpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub allowed_listeners: Option<serde_json::Value>,
+    /// Infrastructure defines infrastructure level attributes about this Gateway
+    /// instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infrastructure: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

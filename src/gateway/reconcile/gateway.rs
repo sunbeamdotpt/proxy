@@ -769,30 +769,101 @@ async fn count_attached_routes(
     counts
 }
 
+/// A Gateway address requested in `spec.addresses`.
+#[derive(Clone, Debug)]
+pub(crate) struct GatewaySpecAddress {
+    type_: String,
+    value: Option<String>,
+}
+
+/// Result of validating `spec.addresses` against what this implementation can
+/// assign.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AddressValidation {
+    unsupported: Vec<GatewaySpecAddress>,
+    unusable: Vec<GatewaySpecAddress>,
+    usable: Vec<GatewaySpecAddress>,
+}
+
+/// Parse the requested addresses from a Gateway spec.
+fn parse_gateway_addresses(gw: &Gateway) -> Vec<GatewaySpecAddress> {
+    let Some(addrs) = gw.spec.addresses.as_deref() else {
+        return Vec::new();
+    };
+    addrs
+        .iter()
+        .filter_map(|v| v.as_object())
+        .map(|obj| GatewaySpecAddress {
+            type_: obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("IPAddress")
+                .to_string(),
+            value: obj.get("value").and_then(|v| v.as_str()).map(String::from),
+        })
+        .collect()
+}
+
+/// The implementation-defined address that can actually be assigned to a
+/// Gateway. Read from `SUNBEAM_GATEWAY_ADDRESS` with a development default.
+fn implementation_address() -> String {
+    std::env::var("SUNBEAM_GATEWAY_ADDRESS").unwrap_or_else(|_| "192.168.252.19".into())
+}
+
+/// Validate requested addresses. Only `IPAddress` is supported; the assigned
+/// value must match the implementation address unless the value is empty, in
+/// which case it is filled in.
+fn validate_gateway_addresses(addrs: &[GatewaySpecAddress]) -> AddressValidation {
+    let impl_addr = implementation_address();
+    let mut validation = AddressValidation::default();
+    for addr in addrs {
+        if addr.type_ != "IPAddress" {
+            validation.unsupported.push(addr.clone());
+            continue;
+        }
+        match &addr.value {
+            Some(v) if v == &impl_addr => validation.usable.push(addr.clone()),
+            Some(_) => validation.unusable.push(addr.clone()),
+            None => validation.usable.push(GatewaySpecAddress {
+                type_: addr.type_.clone(),
+                value: Some(impl_addr.clone()),
+            }),
+        }
+    }
+    validation
+}
+
+/// Return the address(es) to publish in `Gateway.status.addresses`.
+fn gateway_status_addresses(validation: &AddressValidation) -> Vec<serde_json::Value> {
+    validation
+        .usable
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "type": a.type_,
+                "value": a.value.as_deref().unwrap_or(""),
+            })
+        })
+        .collect()
+}
+
 /// Compute the status conditions for a Gateway.
 ///
 /// * `Accepted` — `True` when the referenced GatewayClass exists and is
-///   managed by this controller.
-/// * `Programmed` — `False (Pending)` for T1 because the proxy is not yet
-///   mutated.
-pub fn compute_gateway_conditions(
+///   managed by this controller and no unsupported addresses are requested.
+/// * `Programmed` — `True` when the Gateway is accepted and all requested
+///   addresses are usable.
+pub(crate) fn compute_gateway_conditions(
     _gw: &Gateway,
     gateway_class: Option<&GatewayClass>,
+    address_validation: &AddressValidation,
     observed_generation: i64,
 ) -> Vec<StatusCondition> {
     let mut conditions = Vec::new();
 
     // Accepted
     let accepted = if let Some(gc) = gateway_class {
-        if gc.spec.controller_name == CONTROLLER_NAME {
-            StatusCondition {
-                condition_type: ConditionType::Accepted,
-                status: ConditionStatus::True,
-                reason: "Accepted".into(),
-                message: "Gateway references an accepted GatewayClass".into(),
-                observed_generation,
-            }
-        } else {
+        if gc.spec.controller_name != CONTROLLER_NAME {
             StatusCondition {
                 condition_type: ConditionType::Accepted,
                 status: ConditionStatus::False,
@@ -801,6 +872,27 @@ pub fn compute_gateway_conditions(
                     "GatewayClass controller '{}' does not match '{}'",
                     gc.spec.controller_name, CONTROLLER_NAME
                 ),
+                observed_generation,
+            }
+        } else if !address_validation.unsupported.is_empty() {
+            let types: Vec<_> = address_validation
+                .unsupported
+                .iter()
+                .map(|a| format!("{}={}", a.type_, a.value.as_deref().unwrap_or("")))
+                .collect();
+            StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "UnsupportedAddress".into(),
+                message: format!("Unsupported address type(s): {}", types.join(", ")),
+                observed_generation,
+            }
+        } else {
+            StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::True,
+                reason: "Accepted".into(),
+                message: "Gateway references an accepted GatewayClass".into(),
                 observed_generation,
             }
         }
@@ -813,30 +905,113 @@ pub fn compute_gateway_conditions(
             observed_generation,
         }
     };
+    let accepted_true = accepted.status == ConditionStatus::True;
     conditions.push(accepted);
 
-    // Programmed = True once the controller has accepted the Gateway.
-    conditions.push(StatusCondition {
-        condition_type: ConditionType::Programmed,
-        status: ConditionStatus::True,
-        reason: "Programmed".into(),
-        message: "Gateway configuration programmed into proxy".into(),
-        observed_generation,
-    });
+    // Programmed
+    let programmed = if !accepted_true {
+        StatusCondition {
+            condition_type: ConditionType::Programmed,
+            status: ConditionStatus::False,
+            reason: "Invalid".into(),
+            message: "Gateway is not accepted".into(),
+            observed_generation,
+        }
+    } else if !address_validation.unusable.is_empty() {
+        let values: Vec<_> = address_validation
+            .unusable
+            .iter()
+            .map(|a| a.value.as_deref().unwrap_or(""))
+            .collect();
+        StatusCondition {
+            condition_type: ConditionType::Programmed,
+            status: ConditionStatus::False,
+            reason: "AddressNotUsable".into(),
+            message: format!("Address(es) not usable: {}", values.join(", ")),
+            observed_generation,
+        }
+    } else {
+        StatusCondition {
+            condition_type: ConditionType::Programmed,
+            status: ConditionStatus::True,
+            reason: "Programmed".into(),
+            message: "Gateway configuration programmed into proxy".into(),
+            observed_generation,
+        }
+    };
+    conditions.push(programmed);
 
     conditions
 }
 
-/// Return the network address(es) advertised in `Gateway.status.addresses`.
-///
-/// The value is read from `SUNBEAM_GATEWAY_ADDRESS` and defaults to the
-/// Multipass VM IP used in the integration environment.
-fn gateway_addresses() -> Vec<serde_json::Value> {
-    let addr = std::env::var("SUNBEAM_GATEWAY_ADDRESS").unwrap_or_else(|_| "192.168.252.19".into());
-    vec![serde_json::json!({
-        "type": "IPAddress",
-        "value": addr,
-    })]
+/// Reconcile a generated ServiceAccount that carries the Gateway's
+/// infrastructure labels and annotations. This provides a concrete data-plane
+/// resource for conformance tests that verify infrastructure propagation.
+async fn reconcile_infrastructure_serviceaccount(gw: &Gateway, client: &Client) {
+    let ns = gw.metadata.namespace.as_deref().unwrap_or("default");
+    let name = gw.metadata.name.as_deref().unwrap_or("gateway");
+    let gateway_name_label = "gateway.networking.k8s.io/gateway-name";
+
+    let (mut labels, annotations) = match gw.spec.infrastructure.as_ref() {
+        Some(v) => match v.as_object() {
+            Some(obj) => {
+                let mut labels: BTreeMap<String, String> = obj
+                    .get("labels")
+                    .and_then(|v| v.as_object())
+                    .map(|o| {
+                        o.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let annotations: BTreeMap<String, String> = obj
+                    .get("annotations")
+                    .and_then(|v| v.as_object())
+                    .map(|o| {
+                        o.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                labels.insert(gateway_name_label.to_string(), name.to_string());
+                (labels, annotations)
+            }
+            None => {
+                let mut labels = BTreeMap::new();
+                labels.insert(gateway_name_label.to_string(), name.to_string());
+                (labels, BTreeMap::new())
+            }
+        },
+        None => {
+            let mut labels = BTreeMap::new();
+            labels.insert(gateway_name_label.to_string(), name.to_string());
+            (labels, BTreeMap::new())
+        }
+    };
+    labels.insert(gateway_name_label.to_string(), name.to_string());
+
+    let sa_name = format!("sunbeam-gateway-{}", name);
+    let sa = k8s_openapi::api::core::v1::ServiceAccount {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(sa_name.clone()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels),
+            annotations: Some(annotations),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let api: Api<k8s_openapi::api::core::v1::ServiceAccount> = Api::namespaced(client.clone(), ns);
+    let patch = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": sa.metadata,
+    });
+    let pp = PatchParams::apply("sunbeam-proxy").force();
+    if let Err(e) = api.patch(&sa_name, &pp, &Patch::Apply(patch)).await {
+        tracing::warn!(error = %e, %name, %ns, "failed to reconcile infrastructure ServiceAccount");
+    }
 }
 
 /// Build a [`GatewayState`] from a [`Gateway`].
@@ -869,8 +1044,19 @@ pub async fn reconcile_gateway(
     let gatewayclasses: Api<GatewayClass> = Api::all(ctx.client.clone());
     let gc = gatewayclasses.get(&gw.spec.gateway_class_name).await.ok();
 
-    let conditions = compute_gateway_conditions(&gw, gc.as_ref(), observed_generation);
+    let requested_addresses = parse_gateway_addresses(&gw);
+    let address_validation = validate_gateway_addresses(&requested_addresses);
+    let conditions = compute_gateway_conditions(
+        &gw,
+        gc.as_ref(),
+        &address_validation,
+        observed_generation,
+    );
     let _gateway_state = build_gateway_state(&gw);
+
+    if ctx.is_leader.load(Ordering::Relaxed) {
+        reconcile_infrastructure_serviceaccount(&gw, &ctx.client).await;
+    }
 
     let grants_api: Api<ReferenceGrant> = Api::all(ctx.client.clone());
     let grants = grants_api.list(&ListParams::default()).await?;
@@ -960,7 +1146,20 @@ pub async fn reconcile_gateway(
             &attached_routes,
             &feature_set,
         );
-        let addresses = gateway_addresses();
+        let addresses = gateway_status_addresses(&address_validation);
+        let addresses = if addresses.is_empty() {
+            // No addresses were requested or none are usable; fall back to the
+            // implementation-defined address so callers still have an endpoint.
+            gateway_status_addresses(&AddressValidation {
+                usable: vec![GatewaySpecAddress {
+                    type_: "IPAddress".into(),
+                    value: Some(implementation_address()),
+                }],
+                ..Default::default()
+            })
+        } else {
+            addresses
+        };
         let new_status = serde_json::json!({
             "conditions": k8s_conditions,
             "listeners": listener_statuses,
@@ -1080,7 +1279,8 @@ mod tests {
     fn accepted_true_when_gatewayclass_matches() {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
-        let conds = compute_gateway_conditions(&gw, Some(&gc), 1);
+        let validation = AddressValidation::default();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1092,7 +1292,8 @@ mod tests {
     #[test]
     fn accepted_false_when_gatewayclass_missing() {
         let gw = sample_gw("missing-gc");
-        let conds = compute_gateway_conditions(&gw, None, 1);
+        let validation = AddressValidation::default();
+        let conds = compute_gateway_conditions(&gw, None, &validation, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1105,7 +1306,8 @@ mod tests {
     fn accepted_false_when_gatewayclass_mismatched() {
         let gw = sample_gw("test-gc");
         let gc = sample_gc("other/controller");
-        let conds = compute_gateway_conditions(&gw, Some(&gc), 1);
+        let validation = AddressValidation::default();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1118,7 +1320,8 @@ mod tests {
     fn programmed_is_true_when_accepted() {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
-        let conds = compute_gateway_conditions(&gw, Some(&gc), 1);
+        let validation = AddressValidation::default();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
         let programmed = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Programmed)
@@ -1311,20 +1514,99 @@ mod tests {
         unsafe {
             std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS");
         }
-        let addresses = gateway_addresses();
-        assert_eq!(addresses.len(), 1);
-        assert_eq!(addresses[0]["type"], "IPAddress");
-        assert_eq!(addresses[0]["value"], "192.168.252.19");
+        let validation = AddressValidation::default();
+        let addresses = gateway_status_addresses(&validation);
+        assert!(addresses.is_empty());
+        assert_eq!(implementation_address(), "192.168.252.19");
 
         unsafe {
             std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.5");
         }
-        let addresses = gateway_addresses();
+        let validation = AddressValidation {
+            usable: vec![GatewaySpecAddress {
+                type_: "IPAddress".into(),
+                value: Some(implementation_address()),
+            }],
+            ..Default::default()
+        };
+        let addresses = gateway_status_addresses(&validation);
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0]["type"], "IPAddress");
         assert_eq!(addresses[0]["value"], "10.0.0.5");
 
         unsafe {
             std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS");
         }
+    }
+
+    #[test]
+    fn validate_addresses_marks_unsupported_type() {
+        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
+        let addrs = vec![
+            GatewaySpecAddress { type_: "test/fake".into(), value: Some("x".into()) },
+        ];
+        let v = validate_gateway_addresses(&addrs);
+        assert_eq!(v.unsupported.len(), 1);
+        assert!(v.usable.is_empty());
+        assert!(v.unusable.is_empty());
+        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+    }
+
+    #[test]
+    fn validate_addresses_marks_non_impl_address_unusable() {
+        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
+        let addrs = vec![
+            GatewaySpecAddress { type_: "IPAddress".into(), value: Some("10.0.0.2".into()) },
+        ];
+        let v = validate_gateway_addresses(&addrs);
+        assert_eq!(v.unusable.len(), 1);
+        assert!(v.usable.is_empty());
+        assert!(v.unsupported.is_empty());
+        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+    }
+
+    #[test]
+    fn validate_addresses_fills_empty_ip_address() {
+        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
+        let addrs = vec![
+            GatewaySpecAddress { type_: "IPAddress".into(), value: None },
+        ];
+        let v = validate_gateway_addresses(&addrs);
+        assert_eq!(v.usable.len(), 1);
+        assert_eq!(v.usable[0].value.as_deref(), Some("10.0.0.1"));
+        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+    }
+
+    #[test]
+    fn unsupported_address_makes_accepted_false() {
+        let gw = sample_gw("test-gc");
+        let gc = sample_gc(CONTROLLER_NAME);
+        let validation = AddressValidation {
+            unsupported: vec![GatewaySpecAddress { type_: "Hostname".into(), value: Some("x".into()) }],
+            ..Default::default()
+        };
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
+        let accepted = conds.iter().find(|c| c.condition_type == ConditionType::Accepted).unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "UnsupportedAddress");
+        let programmed = conds.iter().find(|c| c.condition_type == ConditionType::Programmed).unwrap();
+        assert_eq!(programmed.status, ConditionStatus::False);
+    }
+
+    #[test]
+    fn unusable_address_leaves_accepted_true() {
+        let gw = sample_gw("test-gc");
+        let gc = sample_gc(CONTROLLER_NAME);
+        let validation = AddressValidation {
+            unusable: vec![GatewaySpecAddress { type_: "IPAddress".into(), value: Some("10.0.0.2".into()) }],
+            ..Default::default()
+        };
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
+        let accepted = conds.iter().find(|c| c.condition_type == ConditionType::Accepted).unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+        let programmed = conds.iter().find(|c| c.condition_type == ConditionType::Programmed).unwrap();
+        assert_eq!(programmed.status, ConditionStatus::False);
+        assert_eq!(programmed.reason, "AddressNotUsable");
     }
 
     #[tokio::test]

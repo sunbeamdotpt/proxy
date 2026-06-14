@@ -65,6 +65,9 @@ pub fn supported_features() -> Vec<String> {
         "HTTPRouteDestinationPortMatching".to_string(),
         "HTTPRouteNamedRouteRule".to_string(),
         "GatewayHTTPSListenerDetectMisdirectedRequests".to_string(),
+        "GatewayStaticAddresses".to_string(),
+        "GatewayAddressEmpty".to_string(),
+        "GatewayInfrastructurePropagation".to_string(),
     ]
 }
 

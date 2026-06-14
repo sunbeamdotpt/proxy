@@ -19,8 +19,8 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["namespaces", "services", "endpoints", "pods"]
-    verbs: ["get", "list", "watch"]
+    resources: ["namespaces", "services", "endpoints", "pods", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Secrets may be referenced by Gateway certificateRefs in other namespaces when
   # permitted by a ReferenceGrant. Limiting to named resources is impractical for
   # dynamic Gateway API usage, so this is scoped to read-only verbs.
