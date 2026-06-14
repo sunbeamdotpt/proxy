@@ -11,7 +11,7 @@
 //! avoids the classic headless-service pitfall where the service port is
 //! different from the pod target port.
 
-use crate::gateway::model::{HTTPRouteRule, HTTPRouteState, WeightedBackend};
+use crate::gateway::model::{GRPCRouteRule, GRPCRouteState, HTTPRouteRule, HTTPRouteState, WeightedBackend};
 use k8s_openapi::api::core::v1::{Service, ServicePort};
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointPort, EndpointSlice};
 use kube::api::Api;
@@ -50,9 +50,49 @@ struct EndpointInfo {
     ports: Vec<EndpointPort>,
 }
 
+/// Rule types that expose a mutable backend list for endpoint expansion.
+pub trait RuleWithBackends {
+    fn backends_mut(&mut self) -> &mut Vec<WeightedBackend>;
+}
+
+impl RuleWithBackends for HTTPRouteRule {
+    fn backends_mut(&mut self) -> &mut Vec<WeightedBackend> {
+        &mut self.backends
+    }
+}
+
+impl RuleWithBackends for GRPCRouteRule {
+    fn backends_mut(&mut self) -> &mut Vec<WeightedBackend> {
+        &mut self.backends
+    }
+}
+
+/// Route types whose rules contain backends that may need endpoint expansion.
+pub trait RouteWithBackends {
+    type Rule: RuleWithBackends;
+    fn rules_mut(&mut self) -> &mut [Self::Rule];
+}
+
+impl RouteWithBackends for HTTPRouteState {
+    type Rule = HTTPRouteRule;
+    fn rules_mut(&mut self) -> &mut [Self::Rule] {
+        &mut self.rules
+    }
+}
+
+impl RouteWithBackends for GRPCRouteState {
+    type Rule = GRPCRouteRule;
+    fn rules_mut(&mut self) -> &mut [Self::Rule] {
+        &mut self.rules
+    }
+}
+
 /// Resolve Service backend references into concrete endpoint addresses where
-/// required, mutating `http_routes` in place.
-pub async fn resolve_service_endpoints(client: &kube::Client, http_routes: &mut [HTTPRouteState]) {
+/// required, mutating `routes` in place.
+pub async fn resolve_service_endpoints<R: RouteWithBackends>(
+    client: &kube::Client,
+    routes: &mut [R],
+) {
     let services: Api<Service> = Api::all(client.clone());
     let endpoint_slices: Api<EndpointSlice> = Api::all(client.clone());
 
@@ -75,8 +115,8 @@ pub async fn resolve_service_endpoints(client: &kube::Client, http_routes: &mut 
     let service_map = build_service_map(service_list.items);
     let endpoint_map = build_endpoint_map(endpoint_list.items);
 
-    for route in http_routes {
-        for rule in route.rules.iter_mut() {
+    for route in routes {
+        for rule in route.rules_mut() {
             expand_rule_backends(rule, &service_map, &endpoint_map);
         }
     }
@@ -135,13 +175,14 @@ fn endpoint_is_ready(ep: &Endpoint) -> bool {
     ready && !terminating
 }
 
-fn expand_rule_backends(
-    rule: &mut HTTPRouteRule,
+fn expand_rule_backends<R: RuleWithBackends>(
+    rule: &mut R,
     service_map: &HashMap<(String, String), ServiceInfo>,
     endpoint_map: &HashMap<(String, String), Vec<EndpointInfo>>,
 ) {
-    let mut expanded = Vec::with_capacity(rule.backends.len());
-    for backend in rule.backends.drain(..) {
+    let backends = rule.backends_mut();
+    let mut expanded = Vec::with_capacity(backends.len());
+    for backend in backends.drain(..) {
         let Some(target) = parse_service_target(&backend.backend) else {
             expanded.push(backend);
             continue;
@@ -199,7 +240,7 @@ fn expand_rule_backends(
             });
         }
     }
-    rule.backends = expanded;
+    *rule.backends_mut() = expanded;
 }
 
 fn needs_endpoint_resolution(info: &ServiceInfo) -> bool {

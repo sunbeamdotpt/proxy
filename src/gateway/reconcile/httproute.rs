@@ -128,6 +128,7 @@ pub fn reconcile_single(
             namespace_labels,
             listener_allowed,
             listener_set_allowed,
+            "HTTPRoute",
         );
         let status_parent_ref = resolved.clone().unwrap_or_else(|| ParentRef {
             group: Arc::from(parsed.group.clone()),
@@ -238,7 +239,7 @@ pub struct BackendResolution {
 }
 
 impl BackendResolution {
-    fn ok() -> Self {
+    pub fn ok() -> Self {
         Self {
             overall: BackendResolutionStatus::Ok,
             rules: Vec::new(),
@@ -523,7 +524,7 @@ pub(crate) fn listener_hostname_intersects(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_parent_ref(
+pub(crate) fn resolve_parent_ref(
     parsed: &ParsedParentRef,
     route_ns: &str,
     observed_generation: i64,
@@ -533,9 +534,10 @@ fn resolve_parent_ref(
     namespace_labels: &HashMap<String, HashMap<String, String>>,
     listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
     listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    route_kind: &str,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     if parsed.group != "gateway.networking.k8s.io" {
-        return unsupported_parent(parsed, observed_generation);
+        return unsupported_parent(parsed, observed_generation, route_kind);
     }
 
     match parsed.kind.as_str() {
@@ -547,6 +549,7 @@ fn resolve_parent_ref(
             gateways,
             namespace_labels,
             listener_allowed,
+            route_kind,
         ),
         "ListenerSet" => resolve_listenerset_parent(
             parsed,
@@ -556,28 +559,31 @@ fn resolve_parent_ref(
             listener_sets,
             namespace_labels,
             listener_set_allowed,
+            route_kind,
         ),
-        _ => unsupported_parent(parsed, observed_generation),
+        _ => unsupported_parent(parsed, observed_generation, route_kind),
     }
 }
 
 fn unsupported_parent(
     parsed: &ParsedParentRef,
     observed_generation: i64,
+    route_kind: &str,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let conditions = vec![StatusCondition {
         condition_type: ConditionType::Accepted,
         status: ConditionStatus::False,
         reason: "UnsupportedValue".to_string(),
         message: format!(
-            "parentRef group {} kind {} is not supported",
-            parsed.group, parsed.kind
+            "parentRef group {} kind {} is not supported for {}",
+            parsed.group, parsed.kind, route_kind
         ),
         observed_generation,
     }];
     (None, conditions)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_gateway_parent(
     parsed: &ParsedParentRef,
     route_ns: &str,
@@ -586,6 +592,7 @@ fn resolve_gateway_parent(
     gateways: &[GatewayState],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
     listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    route_kind: &str,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let target_ns = parsed.namespace.as_deref().unwrap_or(route_ns);
 
@@ -619,9 +626,11 @@ fn resolve_gateway_parent(
         &parsed.name,
         "Gateway",
         &no_conflicts,
+        route_kind,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_listenerset_parent(
     parsed: &ParsedParentRef,
     route_ns: &str,
@@ -630,6 +639,7 @@ fn resolve_listenerset_parent(
     listener_sets: &[ListenerSetState],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
     listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    route_kind: &str,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let target_ns = parsed.namespace.as_deref().unwrap_or(route_ns);
 
@@ -662,6 +672,7 @@ fn resolve_listenerset_parent(
         &parsed.name,
         "ListenerSet",
         &ls.conflicts,
+        route_kind,
     )
 }
 
@@ -678,6 +689,7 @@ fn resolve_listener_parent(
     owner_name: &str,
     owner_kind: &str,
     conflicts: &std::collections::BTreeMap<Arc<str>, Arc<str>>,
+    route_kind: &str,
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let matching_listeners: Vec<&ListenerState> = listeners
         .iter()
@@ -747,7 +759,7 @@ fn resolve_listener_parent(
             ))
             .cloned()
             .unwrap_or_default();
-        if !listener_allows_kind(&allowed, "gateway.networking.k8s.io", "HTTPRoute") {
+        if !listener_allows_kind(&allowed, "gateway.networking.k8s.io", route_kind) {
             continue;
         }
         kind_allowed = true;

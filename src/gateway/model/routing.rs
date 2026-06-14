@@ -225,3 +225,68 @@ pub struct TLSRouteState {
     pub backends: Vec<WeightedBackend>,
     pub programmed: bool,
 }
+
+/// gRPC method match type.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MethodMatchType {
+    /// Match the exact service/method string.
+    Exact,
+    /// Match any method within the service.
+    Regular,
+}
+
+/// gRPC method match criteria.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MethodMatch {
+    pub match_type: MethodMatchType,
+    /// Fully qualified gRPC service name.
+    pub service: Arc<str>,
+    /// Method name within the service. None matches any method when type is
+    /// Regular; required for Exact.
+    pub method: Option<Arc<str>>,
+    pub case_sensitive: bool,
+}
+
+impl MethodMatch {
+    /// Render the match as an exact `:path` pseudo-header value for the proxy.
+    /// Returns `None` for non-exact matches.
+    pub fn exact_path(&self) -> Option<Arc<str>> {
+        if !matches!(self.match_type, MethodMatchType::Exact) {
+            return None;
+        }
+        let method = self.method.as_deref()?;
+        Some(Arc::from(format!("/{}/{}", self.service, method)))
+    }
+}
+
+/// GRPC route state produced by the reconciler.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GRPCRouteState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    pub hostnames: Vec<HostnameMatch>,
+    pub rules: Vec<GRPCRouteRule>,
+    pub parent_refs: Vec<crate::gateway::model::ParentRef>,
+    /// True only when the route is accepted and all backend references resolve.
+    pub programmed: bool,
+}
+
+/// A rule from a GRPCRoute CRD, pre-parsed but not yet compiled into the
+/// proxy's `RouteTable`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GRPCRouteRule {
+    pub name: Option<Arc<str>>,
+    pub matches: Vec<GRPCRouteMatch>,
+    pub backends: Vec<WeightedBackend>,
+    pub filters: Vec<RouteFilter>,
+    /// False when one or more backendRefs for this rule could not be resolved.
+    pub programmed: bool,
+}
+
+/// Match criteria for a single GRPCRoute rule.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct GRPCRouteMatch {
+    pub method: Option<MethodMatch>,
+    pub headers: Vec<HeaderMatch>,
+}

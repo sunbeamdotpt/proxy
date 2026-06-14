@@ -5,6 +5,7 @@
 
 pub mod gateway;
 pub mod gatewayclass;
+pub mod grpcroute;
 pub mod httproute;
 pub mod listenerset;
 pub mod referencegrant;
@@ -14,6 +15,7 @@ pub mod udproute;
 
 pub use gateway::Gateway;
 pub use gatewayclass::GatewayClass;
+pub use grpcroute::GRPCRoute;
 pub use httproute::HTTPRoute;
 pub use listenerset::ListenerSet;
 pub use referencegrant::ReferenceGrant;

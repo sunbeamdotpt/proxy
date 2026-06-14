@@ -10,10 +10,10 @@ pub mod view;
 
 pub use digest::compute_digest;
 pub use routing::{
-    Fraction, HTTPRouteRule, HTTPRouteState, HeaderMatch, HeaderMatchValue, HostRoute,
-    HostnameMatch, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
-    RouteMatch, RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState,
-    WeightedBackend,
+    Fraction, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HTTPRouteRule, HTTPRouteState,
+    HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, MethodMatch, MethodMatchType,
+    PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
+    RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState, WeightedBackend,
 };
 pub use types::{
     BackendTarget, ListenerKey, RefResolution, ResolvedRoute, RouteTableDigest, StatusPatch,

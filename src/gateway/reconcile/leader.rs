@@ -29,6 +29,7 @@ use crate::gateway::gossip::resource_notify::{handle_notify, NotifyEvent, Resour
 use crate::gateway::model::ReconciledView;
 use crate::gateway::reconcile::gateway::run_gateway_controller;
 use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
+use crate::gateway::reconcile::grpcroute::run_grpcroute_controller;
 use crate::gateway::reconcile::httproute::run_httproute_controller;
 use crate::gateway::reconcile::l4route::{
     maybe_run_tcproute_controller, maybe_run_tlsroute_controller, maybe_run_udproute_controller,
@@ -66,6 +67,7 @@ pub async fn run_reconcile_loop(
     let _gc_handle = run_gatewayclass_controller(client.clone(), is_leader.clone());
     let _gw_handle = run_gateway_controller(client.clone(), is_leader.clone());
     let _hr_handle = run_httproute_controller(client.clone(), is_leader.clone());
+    let _gr_handle = run_grpcroute_controller(client.clone(), is_leader.clone());
     let _ls_handle = run_listenerset_controller(client.clone(), is_leader.clone());
     let _tcp_handle = maybe_run_tcproute_controller(client.clone(), is_leader.clone()).await;
     let _udp_handle = maybe_run_udproute_controller(client.clone(), is_leader.clone()).await;
@@ -267,6 +269,26 @@ fn diff_view(old: &Option<ReconciledView>, new: &ReconciledView) -> Vec<GatewayR
             notifies.push(GatewayResourceNotify {
                 topic_version: 1,
                 kind: "HTTPRoute".into(),
+                namespace: route.namespace.to_string(),
+                name: route.name.to_string(),
+                generation: route.generation,
+                timestamp: now,
+            });
+        }
+    }
+
+    for route in &new.grpc_routes {
+        let changed = old.as_ref().is_none_or(|o| {
+            !o.grpc_routes.iter().any(|r| {
+                r.namespace == route.namespace
+                    && r.name == route.name
+                    && r.generation == route.generation
+            })
+        });
+        if changed {
+            notifies.push(GatewayResourceNotify {
+                topic_version: 1,
+                kind: "GRPCRoute".into(),
                 namespace: route.namespace.to_string(),
                 name: route.name.to_string(),
                 generation: route.generation,

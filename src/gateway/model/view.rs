@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::routing::{HTTPRouteState, TCPRouteState, TLSRouteState, UDPRouteState};
+use super::routing::{GRPCRouteState, HTTPRouteState, TCPRouteState, TLSRouteState, UDPRouteState};
 
 /// Alias used by the reconcile and translate modules.
 pub type GatewayView = ReconciledView;
@@ -29,6 +29,7 @@ pub struct ReconciledView {
     pub listener_sets: Vec<ListenerSetState>,
     pub routes: Vec<RouteState>,
     pub http_routes: Vec<HTTPRouteState>,
+    pub grpc_routes: Vec<GRPCRouteState>,
     pub tcp_routes: Vec<TCPRouteState>,
     pub udp_routes: Vec<UDPRouteState>,
     pub tls_routes: Vec<TLSRouteState>,

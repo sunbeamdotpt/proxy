@@ -12,14 +12,46 @@ use crate::config::{
     QueryParamMatchValueConfig, RedirectRule, RewriteRule, RouteConfig, WeightedBackendConfig,
 };
 use crate::gateway::model::{
-    GatewayState, GatewayView, HTTPRouteRule, HeaderMatch, HeaderMatchValue, HostnameMatch,
-    ListenerState, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
-    RouteMatch, TlsMode,
+    GatewayState, GatewayView, GRPCRouteMatch, GRPCRouteRule, HTTPRouteRule, HeaderMatch,
+    HeaderMatchValue, HostnameMatch, ListenerState, MethodMatchType, PathMatch, PathRewrite,
+    QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch, TlsMode,
 };
 use crate::ir;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Minimal trait used to share hostname/parent computation between
+/// HTTPRoute and GRPCRoute.
+pub(crate) trait RouteHostnames {
+    fn route_namespace(&self) -> &Arc<str>;
+    fn route_parent_refs(&self) -> &[crate::gateway::model::ParentRef];
+    fn route_hostnames(&self) -> &[HostnameMatch];
+}
+
+impl RouteHostnames for crate::gateway::model::HTTPRouteState {
+    fn route_namespace(&self) -> &Arc<str> {
+        &self.namespace
+    }
+    fn route_parent_refs(&self) -> &[crate::gateway::model::ParentRef] {
+        &self.parent_refs
+    }
+    fn route_hostnames(&self) -> &[HostnameMatch] {
+        &self.hostnames
+    }
+}
+
+impl RouteHostnames for crate::gateway::model::GRPCRouteState {
+    fn route_namespace(&self) -> &Arc<str> {
+        &self.namespace
+    }
+    fn route_parent_refs(&self) -> &[crate::gateway::model::ParentRef] {
+        &self.parent_refs
+    }
+    fn route_hostnames(&self) -> &[HostnameMatch] {
+        &self.hostnames
+    }
+}
 
 /// Check if `child` hostname is a subset of `parent` hostname.
 pub fn is_hostname_subset(child: &HostnameMatch, parent: &HostnameMatch) -> bool {
@@ -113,20 +145,22 @@ fn namespace_allowed(
     }
 }
 
-/// Compute effective hostnames for an HTTPRoute, considering listener hostname intersection.
-fn compute_effective_hostnames(
-    route: &crate::gateway::model::HTTPRouteState,
+/// Compute effective hostnames for an HTTPRoute or GRPCRoute, considering
+/// listener hostname intersection.
+fn compute_effective_hostnames<R: RouteHostnames>(
+    route: &R,
     view: &GatewayView,
+    route_kind: &str,
 ) -> Vec<EffectiveHostname> {
     use crate::gateway::reconcile::httproute::listener_allows_kind;
 
     let mut result = Vec::new();
 
-    for parent in &route.parent_refs {
+    for parent in route.route_parent_refs() {
         let parent_ns = parent
             .namespace
             .as_deref()
-            .unwrap_or(route.namespace.as_ref());
+            .unwrap_or(route.route_namespace().as_ref());
         let parent_name = parent.name.as_ref();
         let kind = parent.kind.as_ref();
 
@@ -220,7 +254,7 @@ fn compute_effective_hostnames(
                 }
             };
 
-        let route_ns = route.namespace.as_ref();
+        let route_ns = route.route_namespace().as_ref();
 
         let attached_listeners: Vec<&ListenerState> = if found {
             listeners
@@ -228,7 +262,7 @@ fn compute_effective_hostnames(
                 .filter(|l| {
                     let key = (Arc::from(parent_ns), Arc::from(parent_name), l.name.clone());
                     let allowed = allowed_map.get(&key).cloned().unwrap_or_default();
-                    listener_allows_kind(&allowed, "gateway.networking.k8s.io", "HTTPRoute")
+                    listener_allows_kind(&allowed, "gateway.networking.k8s.io", route_kind)
                         && namespace_allowed(
                             &allowed.namespaces,
                             route_ns,
@@ -237,7 +271,7 @@ fn compute_effective_hostnames(
                         )
                         && crate::gateway::reconcile::httproute::listener_hostname_intersects(
                             l.hostname.as_deref(),
-                            &route.hostnames,
+                            route.route_hostnames(),
                         )
                 })
                 .collect()
@@ -245,7 +279,7 @@ fn compute_effective_hostnames(
             Vec::new()
         };
 
-        if route.hostnames.is_empty() {
+        if route.route_hostnames().is_empty() {
             if !found || attached_listeners.is_empty() {
                 result.push(EffectiveHostname {
                     route_hostname: HostnameMatch::Any,
@@ -281,7 +315,7 @@ fn compute_effective_hostnames(
                         .map(parse_listener_hostname)
                         .unwrap_or_else(|| HostnameMatch::Exact(Arc::from("")));
                     let route_hostnames =
-                        intersect_hostnames(&route.hostnames, listener.hostname.as_deref());
+                        intersect_hostnames(route.route_hostnames(), listener.hostname.as_deref());
                     for hostname in route_hostnames {
                         result.push(EffectiveHostname {
                             route_hostname: hostname,
@@ -291,7 +325,7 @@ fn compute_effective_hostnames(
                     }
                 }
             } else {
-                for hostname in &route.hostnames {
+                for hostname in route.route_hostnames() {
                     result.push(EffectiveHostname {
                         route_hostname: hostname.clone(),
                         listener_hostname: HostnameMatch::Any,
@@ -328,7 +362,7 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
         // requests receive HTTP 500 rather than falling through to another route.
         let unprogrammed = !http_route.programmed && !http_route.parent_refs.is_empty();
 
-        let effective = compute_effective_hostnames(http_route, view);
+        let effective = compute_effective_hostnames(http_route, view, "HTTPRoute");
 
         for eff in effective {
             let host_prefix = hostname_to_prefix(&eff.route_hostname);
@@ -1144,7 +1178,7 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
             continue;
         }
 
-        let effective = compute_effective_hostnames(http_route, view);
+        let effective = compute_effective_hostnames(http_route, view, "HTTPRoute");
 
         for eff in effective {
             let mut rules: Vec<ir::Rule> = Vec::new();
@@ -1178,6 +1212,89 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
                                 body_rewrites: vec![],
                                 auth: None,
                                 websocket,
+                                disable_https_redirect: true,
+                            }),
+                            rule_order: 0,
+                        });
+                    }
+                } else {
+                    rules.push(ir::Rule {
+                        matches: vec![ir::RequestMatch::default()],
+                        action: unprogrammed_action(),
+                        rule_order: 0,
+                    });
+                }
+            }
+
+            let hostname = to_ir_hostname(&eff.route_hostname);
+            let listener_id = hostname_to_prefix(&eff.listener_hostname);
+            let listener_hostname = match &eff.listener_hostname {
+                HostnameMatch::Any => None,
+                HostnameMatch::Exact(s) if s.is_empty() => {
+                    Some(ir::HostnameMatch::Exact(Arc::clone(s)))
+                }
+                _ => Some(to_ir_hostname(&eff.listener_hostname)),
+            };
+
+            let key = (
+                hostname_to_prefix(&eff.listener_hostname),
+                hostname_to_prefix(&eff.route_hostname),
+                eff.listener_port,
+            );
+            match groups.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    e.get_mut().rules.extend(rules);
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(ir::HostRoute {
+                        hostname,
+                        listener_ids: if listener_id.is_empty() {
+                            vec![]
+                        } else {
+                            vec![Arc::from(listener_id)]
+                        },
+                        listener_hostname,
+                        listener_port: eff.listener_port,
+                        gateway_api: true,
+                        disable_secure_redirection: true,
+                        rules,
+                    });
+                }
+            }
+        }
+    }
+
+    for grpc_route in &view.grpc_routes {
+        if grpc_route.parent_refs.is_empty() {
+            continue;
+        }
+
+        let effective = compute_effective_hostnames(grpc_route, view, "GRPCRoute");
+
+        for eff in effective {
+            let mut rules: Vec<ir::Rule> = Vec::new();
+
+            for (rule_idx, rule) in grpc_route.rules.iter().enumerate() {
+                let ir_rules = translate_grpc_rule_to_ir(rule, rule_idx, rule.programmed);
+                rules.extend(ir_rules);
+            }
+
+            if rules.is_empty() && !grpc_route.rules.is_empty() {
+                if grpc_route.programmed {
+                    if let Some(first_backend) = grpc_route.rules[0].backends.first() {
+                        rules.push(ir::Rule {
+                            matches: vec![ir::RequestMatch::default()],
+                            action: ir::Action::Route(ir::RouteAction {
+                                backends: vec![ir::WeightedBackend::from(first_backend)],
+                                timeout: None,
+                                request_filters: vec![],
+                                response_filters: vec![],
+                                mirror_backends: vec![],
+                                mirror_fractions: vec![],
+                                cache: None,
+                                body_rewrites: vec![],
+                                auth: None,
+                                websocket: false,
                                 disable_https_redirect: true,
                             }),
                             rule_order: 0,
@@ -1420,11 +1537,142 @@ fn build_ir_rule(rule: &HTTPRouteRule, req_match: ir::RequestMatch, rule_idx: us
     }
 }
 
+fn grpc_match_to_route_match(m: &GRPCRouteMatch) -> RouteMatch {
+    let path = m.method.as_ref().and_then(|method| match method.match_type {
+        MethodMatchType::Exact => method.exact_path().map(PathMatch::Exact),
+        MethodMatchType::Regular => {
+            if method.service.is_empty() {
+                None
+            } else {
+                Some(PathMatch::Prefix(Arc::from(format!(
+                    "/{}/",
+                    method.service
+                ))))
+            }
+        }
+    });
+    RouteMatch {
+        path,
+        headers: m.headers.clone(),
+        query_params: vec![],
+        method: None,
+    }
+}
+
+fn translate_grpc_rule_to_ir(
+    rule: &GRPCRouteRule,
+    rule_idx: usize,
+    programmed: bool,
+) -> Vec<ir::Rule> {
+    let mut result: Vec<ir::Rule> = Vec::new();
+
+    if !programmed {
+        let matches = if rule.matches.is_empty() {
+            vec![ir::RequestMatch::default()]
+        } else {
+            rule.matches
+                .iter()
+                .map(|m| ir::RequestMatch::from(&grpc_match_to_route_match(m)))
+                .collect()
+        };
+        for m in matches {
+            result.push(ir::Rule {
+                matches: vec![m],
+                action: unprogrammed_action(),
+                rule_order: rule_idx,
+            });
+        }
+        return result;
+    }
+
+    if rule.matches.is_empty() {
+        result.push(build_ir_rule_from_grpc(rule, ir::RequestMatch::default(), rule_idx));
+        return result;
+    }
+
+    for m in &rule.matches {
+        let route_match = grpc_match_to_route_match(m);
+        result.push(build_ir_rule_from_grpc(
+            rule,
+            ir::RequestMatch::from(&route_match),
+            rule_idx,
+        ));
+    }
+
+    result
+}
+
+fn build_ir_rule_from_grpc(
+    rule: &GRPCRouteRule,
+    req_match: ir::RequestMatch,
+    rule_idx: usize,
+) -> ir::Rule {
+    let mut request_filters: Vec<ir::RequestFilter> = Vec::new();
+    let mut response_filters: Vec<ir::ResponseFilter> = Vec::new();
+
+    for filter in &rule.filters {
+        match filter {
+            RouteFilter::RequestHeaderSet { name, value } => {
+                request_filters.push(ir::RequestFilter::SetHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::RequestHeaderAdd { name, value } => {
+                request_filters.push(ir::RequestFilter::AddHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::RequestHeaderRemove { name } => {
+                request_filters.push(ir::RequestFilter::RemoveHeader(Arc::clone(name)));
+            }
+            RouteFilter::ResponseHeaderSet { name, value } => {
+                response_filters.push(ir::ResponseFilter::SetHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::ResponseHeaderAdd { name, value } => {
+                response_filters.push(ir::ResponseFilter::AddHeader {
+                    name: Arc::clone(name),
+                    value: Arc::clone(value),
+                });
+            }
+            RouteFilter::ResponseHeaderRemove { name } => {
+                response_filters.push(ir::ResponseFilter::RemoveHeader(Arc::clone(name)));
+            }
+            _ => {}
+        }
+    }
+
+    let action = ir::Action::Route(ir::RouteAction {
+        backends: rule.backends.iter().map(ir::WeightedBackend::from).collect(),
+        timeout: None,
+        request_filters,
+        response_filters,
+        mirror_backends: vec![],
+        mirror_fractions: vec![],
+        cache: None,
+        body_rewrites: vec![],
+        auth: None,
+        websocket: false,
+        disable_https_redirect: true,
+    });
+
+    ir::Rule {
+        matches: vec![req_match],
+        action,
+        rule_order: rule_idx,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gateway::model::{
-        GatewayState, HTTPRouteState, HeaderMatch, HostnameMatch, ListenerState, ParentRef,
+        GatewayState, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HTTPRouteState, HeaderMatch,
+        HeaderMatchValue, HostnameMatch, ListenerState, MethodMatch, MethodMatchType, ParentRef,
         PathMatch, PathRewrite, RouteFilter, RouteMatch, TCPRouteState, TLSRouteState,
         UDPRouteState, WeightedBackend,
     };
@@ -4415,5 +4663,154 @@ mod tests {
         } else {
             panic!("expected Route action");
         }
+    }
+
+    #[test]
+    fn translate_view_to_ir_grpc_exact_method_match() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+                tls_mode: None,
+            }],
+        };
+        let route = GRPCRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("grpc-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("grpc.example.com"))],
+            rules: vec![GRPCRouteRule {
+                name: None,
+                programmed: true,
+                matches: vec![GRPCRouteMatch {
+                    method: Some(MethodMatch {
+                        match_type: MethodMatchType::Exact,
+                        service: Arc::from("foo.bar"),
+                        method: Some(Arc::from("Baz")),
+                        case_sensitive: true,
+                    }),
+                    headers: vec![],
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("grpc-svc:50051"),
+                    weight: 1,
+                    protocol: crate::ir::BackendProtocol::Http,
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+                port: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            listener_sets: vec![],
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![],
+            grpc_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+            ..Default::default()
+        };
+        let table = translate_view_to_ir(&view);
+        assert_eq!(table.hosts.len(), 1);
+        let rule = &table.hosts[0].rules[0];
+        if let crate::ir::Action::Route(action) = &rule.action {
+            assert_eq!(action.backends[0].backend.as_ref(), "grpc-svc:50051");
+        } else {
+            panic!("expected Route action");
+        }
+        assert!(rule.matches.iter().any(|m| matches!(
+            m.path,
+            Some(crate::ir::PathMatch::Exact(ref p)) if p.as_ref() == "/foo.bar/Baz"
+        )));
+    }
+
+    #[test]
+    fn translate_view_to_ir_grpc_header_match() {
+        let gateway = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-1"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+                tls_mode: None,
+            }],
+        };
+        let route = GRPCRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("grpc-route"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(Arc::from("grpc.example.com"))],
+            rules: vec![GRPCRouteRule {
+                name: Some(Arc::from("named-rule")),
+                programmed: true,
+                matches: vec![GRPCRouteMatch {
+                    method: Some(MethodMatch {
+                        match_type: MethodMatchType::Exact,
+                        service: Arc::from("foo.bar"),
+                        method: Some(Arc::from("Baz")),
+                        case_sensitive: true,
+                    }),
+                    headers: vec![HeaderMatch {
+                        name: Arc::from("x-version"),
+                        value: HeaderMatchValue::Exact(Arc::from("v1")),
+                    }],
+                }],
+                backends: vec![WeightedBackend {
+                    backend: Arc::from("grpc-svc:50051"),
+                    weight: 1,
+                    protocol: crate::ir::BackendProtocol::Http,
+                    filters: vec![],
+                }],
+                filters: vec![],
+            }],
+            parent_refs: vec![ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: None,
+                name: Arc::from("gw-1"),
+                section_name: None,
+                port: None,
+            }],
+            programmed: true,
+        };
+        let view = GatewayView {
+            listener_sets: vec![],
+            gateways: vec![gateway],
+            routes: vec![],
+            http_routes: vec![],
+            grpc_routes: vec![route],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+            ..Default::default()
+        };
+        let table = translate_view_to_ir(&view);
+        let rule = &table.hosts[0].rules[0];
+        assert!(rule.matches.iter().any(|m| {
+            m.headers.iter().any(|h| {
+                h.name.as_ref() == "x-version"
+                    && matches!(h.value, crate::ir::HeaderMatchValue::Exact(ref v) if v.as_ref() == "v1")
+            })
+        }));
     }
 }

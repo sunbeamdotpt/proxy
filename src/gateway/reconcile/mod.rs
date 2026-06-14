@@ -10,6 +10,7 @@
 pub mod endpoints;
 pub mod gateway;
 pub mod gatewayclass;
+pub mod grpcroute;
 pub mod httproute;
 pub mod l4route;
 pub mod leader;
@@ -40,10 +41,13 @@ pub fn strip_last_transition_time(v: &Value) -> Value {
 }
 
 use crate::gateway::api::{
-    Gateway, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
+    Gateway, GRPCRoute, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
 };
 use crate::gateway::model::{GatewayView, ListenerSetState, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
+use crate::gateway::reconcile::grpcroute::{
+    parse_grpcroute_state, reconcile_grpcroutes_with_context, resolve_backend_refs_async as resolve_grpc_backend_refs_async,
+};
 use crate::gateway::reconcile::httproute::{
     parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
 };
@@ -92,6 +96,7 @@ pub async fn reconcile_tick_with_leader(
 ) -> Option<GatewayView> {
     let gateways: Api<Gateway> = Api::all(client.clone());
     let httproutes: Api<HTTPRoute> = Api::all(client.clone());
+    let grpcroutes: Api<GRPCRoute> = Api::all(client.clone());
     let grants: Api<ReferenceGrant> = Api::all(client.clone());
     let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
 
@@ -127,6 +132,24 @@ pub async fn reconcile_tick_with_leader(
         Err(e) => {
             tracing::warn!(error = %e, "failed to list HTTPRoutes");
             return None;
+        }
+    };
+
+    let grpcroute_list = match grpcroutes.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            let is_missing = matches!(&e, kube::Error::Api(s) if s.code == 404);
+            if is_missing {
+                tracing::debug!("GRPCRoute CRD is not installed; treating as empty");
+                kube::core::object::ObjectList {
+                    types: kube::core::TypeMeta::default(),
+                    metadata: kube::core::ListMeta::default(),
+                    items: vec![],
+                }
+            } else {
+                tracing::warn!(error = %e, "failed to list GRPCRoutes; skipping tick");
+                return None;
+            }
         }
     };
 
@@ -218,7 +241,36 @@ pub async fn reconcile_tick_with_leader(
         http_routes.push(state);
     }
 
+    let reconciled_grpc_routes = reconcile_grpcroutes_with_context(
+        &grpcroute_list.items,
+        &gateway_states,
+        &listener_set_states,
+        &namespace_labels,
+        &listener_allowed,
+        &listener_set_allowed,
+        &grant_index,
+    );
+
+    let mut grpc_routes = Vec::new();
+    for (raw, reconciled) in grpcroute_list.items.iter().zip(reconciled_grpc_routes.iter()) {
+        let mut state = parse_grpcroute_state(raw);
+        state.parent_refs = reconciled.route_state.parent_refs.clone();
+        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
+        let backend_resolution =
+            resolve_grpc_backend_refs_async(client, raw, route_ns, &grant_index).await;
+        state.programmed = !state.parent_refs.is_empty()
+            && matches!(
+                backend_resolution.overall,
+                crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok
+            );
+        for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
+            rule.programmed = rule.programmed && res.ok;
+        }
+        grpc_routes.push(state);
+    }
+
     crate::gateway::reconcile::endpoints::resolve_service_endpoints(client, &mut http_routes).await;
+    crate::gateway::reconcile::endpoints::resolve_service_endpoints(client, &mut grpc_routes).await;
 
     let routes: Vec<RouteState> = reconciled_routes
         .into_iter()
@@ -398,6 +450,7 @@ pub async fn reconcile_tick_with_leader(
         listener_sets: listener_set_states,
         routes,
         http_routes,
+        grpc_routes,
         tcp_routes,
         udp_routes,
         tls_routes,
