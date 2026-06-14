@@ -136,14 +136,11 @@ impl TlsRegistry {
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no rustls crypto provider installed"))?;
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        let config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|e| anyhow::anyhow!("protocol versions: {e}"))?
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(self.clone()));
-        // L4 TLS termination forwards decrypted bytes to a local plaintext
-        // HTTP/1.1 service, so only offer HTTP/1.1 to the client.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(config)
     }
 }
