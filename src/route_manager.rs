@@ -307,6 +307,7 @@ mod tests {
                 weight: 1,
                 protocol: BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }],
             timeout: None,
             request_filters: vec![],
@@ -318,6 +319,8 @@ mod tests {
             auth: None,
             websocket: false,
             disable_https_redirect: false,
+            client_cert_id: None,
+
         }
     }
 
@@ -445,6 +448,7 @@ mod tests {
                 weight: 1,
                 protocol: BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }],
             ..simple_backend()
         });
@@ -458,6 +462,7 @@ mod tests {
                 weight: 1,
                 protocol: BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }],
             ..simple_backend()
         });
@@ -508,6 +513,8 @@ mod tests {
             protocol: crate::ir::Protocol::Tcp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
         table.l4_routes.push(crate::ir::L4Route {
             listener_id: "tcp-l".into(),
@@ -536,6 +543,8 @@ mod tests {
             protocol: crate::ir::Protocol::Tcp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
 
         let mut high = route_table_for_host("high.test");
@@ -545,6 +554,8 @@ mod tests {
             protocol: crate::ir::Protocol::Udp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
 
         mgr.apply("gateway-api", low).unwrap();
@@ -604,6 +615,8 @@ mod tests {
             protocol: crate::ir::Protocol::Tcp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
         mgr.apply("gateway-api", first).unwrap();
 
@@ -614,6 +627,8 @@ mod tests {
             protocol: crate::ir::Protocol::Udp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
         mgr.apply("gateway-api", second).unwrap();
 

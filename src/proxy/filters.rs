@@ -683,6 +683,8 @@ mod tests {
             body_rewrites: vec![],
             cache: None,
             websocket: false,
+            client_cert_id: None,
+
         }
     }
 
@@ -731,6 +733,7 @@ mod tests {
             ))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            tls_registry: None,
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -743,6 +746,7 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+
         }
     }
 
@@ -840,6 +844,7 @@ mod tests {
                 weight: 1,
                 protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }],
             timeout: None,
             mirror: vec![],

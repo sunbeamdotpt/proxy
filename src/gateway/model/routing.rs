@@ -101,6 +101,20 @@ pub struct WeightedBackend {
     pub filters: Vec<RouteFilter>,
     /// Protocol to use when communicating with the backend.
     pub protocol: crate::ir::BackendProtocol,
+    /// TLS configuration attached by a BackendTLSPolicy or Gateway backend
+    /// client certificate.
+    pub tls: Option<BackendTlsAttachment>,
+}
+
+/// TLS configuration attached to a model backend before translation to IR.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BackendTlsAttachment {
+    /// SNI / validation hostname.
+    pub hostname: Arc<str>,
+    /// PEM-encoded CA bundle used to verify the backend certificate.
+    pub ca_bundle_pem: Arc<str>,
+    /// Allowed Subject Alternative Names.
+    pub subject_alt_names: Vec<Arc<str>>,
 }
 
 /// A fractional value (numerator / denominator) used by RequestMirror.

@@ -22,6 +22,16 @@ pub struct L4Context {
     pub sni: Option<Arc<str>>,
 }
 
+/// Context propagated from the L4 HTTP relay to the internal HTTP proxy so that
+/// the proxy can recover the public listener that accepted the connection.
+#[derive(Clone, Debug)]
+pub struct HttpRelayContext {
+    /// Compiled listener identifier the connection arrived on.
+    pub listener_id: Arc<str>,
+    /// Public listener port (e.g. 80 or 8080).
+    pub listener_port: u16,
+}
+
 impl L4Context {
     /// Build a context for an accepted TCP stream.
     pub fn from_tcp_stream(

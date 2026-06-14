@@ -218,6 +218,8 @@ mod tests {
                 max_file_size,
             }),
             websocket: false,
+            client_cert_id: None,
+
         })
     }
 
@@ -261,6 +263,7 @@ mod tests {
             ))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            tls_registry: None,
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -273,6 +276,7 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+
         }
     }
 

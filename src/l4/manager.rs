@@ -94,6 +94,12 @@ async fn run_manager<R: L4Router>(
         }
         current = latest;
         shared.config.store(Arc::clone(&current));
+        tracing::info!(
+            listeners = current.listeners.len(),
+            http_routes = current.http_routes.len(),
+            https_routes = current.https_routes.len(),
+            "l4 manager: applied compiled config"
+        );
 
         let desired: HashSet<Arc<str>> = current
             .listeners
@@ -351,6 +357,8 @@ mod tests {
             protocol: Protocol::Tcp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         }
     }
 
@@ -361,6 +369,8 @@ mod tests {
             protocol: Protocol::Udp,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         }
     }
 
@@ -431,6 +441,8 @@ mod tests {
             protocol: Protocol::Http,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         }
     }
 
@@ -476,6 +488,8 @@ mod tests {
                     protocol: Protocol::Https,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
             ],
             ..Default::default()
@@ -509,6 +523,8 @@ mod tests {
                     protocol: Protocol::Tcp,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
                 CompiledListener {
                     id: "bad-udp".into(),
@@ -516,6 +532,8 @@ mod tests {
                     protocol: Protocol::Udp,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
             ],
             ..Default::default()

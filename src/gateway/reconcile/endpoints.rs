@@ -11,12 +11,18 @@
 //! avoids the classic headless-service pitfall where the service port is
 //! different from the pod target port.
 
-use crate::gateway::model::{GRPCRouteRule, GRPCRouteState, HTTPRouteRule, HTTPRouteState, WeightedBackend};
+use crate::gateway::model::{
+    BackendTLSPolicyState, BackendTlsAttachment, GRPCRouteRule, GRPCRouteState, HTTPRouteRule,
+    HTTPRouteState, WeightedBackend,
+};
 use k8s_openapi::api::core::v1::{Service, ServicePort};
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointPort, EndpointSlice};
 use kube::api::Api;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Key used to look up a `BackendTLSPolicy` for a Service backend.
+type TlsPolicyKey = (Arc<str>, Arc<str>, Option<Arc<str>>);
 
 /// Parsed cluster-internal service address produced by [`parse_backend_ref`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +98,7 @@ impl RouteWithBackends for GRPCRouteState {
 pub async fn resolve_service_endpoints<R: RouteWithBackends>(
     client: &kube::Client,
     routes: &mut [R],
+    backend_tls_policies: &[BackendTLSPolicyState],
 ) {
     let services: Api<Service> = Api::all(client.clone());
     let endpoint_slices: Api<EndpointSlice> = Api::all(client.clone());
@@ -114,10 +121,11 @@ pub async fn resolve_service_endpoints<R: RouteWithBackends>(
 
     let service_map = build_service_map(service_list.items);
     let endpoint_map = build_endpoint_map(endpoint_list.items);
+    let tls_policy_map = build_tls_policy_map(backend_tls_policies);
 
     for route in routes {
         for rule in route.rules_mut() {
-            expand_rule_backends(rule, &service_map, &endpoint_map);
+            expand_rule_backends(rule, &service_map, &endpoint_map, &tls_policy_map);
         }
     }
 }
@@ -175,10 +183,44 @@ fn endpoint_is_ready(ep: &Endpoint) -> bool {
     ready && !terminating
 }
 
+fn build_tls_policy_map(
+    policies: &[BackendTLSPolicyState],
+) -> HashMap<TlsPolicyKey, BackendTlsAttachment> {
+    let mut map = HashMap::new();
+    for policy in policies {
+        if !policy.accepted || !policy.programmed {
+            continue;
+        }
+        let attachment = BackendTlsAttachment {
+            hostname: Arc::clone(&policy.hostname),
+            ca_bundle_pem: policy
+                .ca_certificate_refs
+                .first()
+                .map(|_| Arc::from(""))
+                .unwrap_or_default(),
+            subject_alt_names: policy
+                .subject_alt_names
+                .iter()
+                .map(|s| Arc::clone(&s.value))
+                .collect(),
+        };
+        map.insert(
+            (
+                Arc::clone(&policy.target.namespace),
+                Arc::clone(&policy.target.name),
+                policy.target.section_name.clone(),
+            ),
+            attachment,
+        );
+    }
+    map
+}
+
 fn expand_rule_backends<R: RuleWithBackends>(
     rule: &mut R,
     service_map: &HashMap<(String, String), ServiceInfo>,
     endpoint_map: &HashMap<(String, String), Vec<EndpointInfo>>,
+    tls_policy_map: &HashMap<TlsPolicyKey, BackendTlsAttachment>,
 ) {
     let backends = rule.backends_mut();
     let mut expanded = Vec::with_capacity(backends.len());
@@ -193,16 +235,39 @@ fn expand_rule_backends<R: RuleWithBackends>(
             continue;
         };
 
-        let protocol = info
+        let port_name = info
             .ports
             .iter()
             .find(|p| p.port == target.port)
-            .map(service_port_protocol)
-            .unwrap_or(crate::ir::BackendProtocol::Http);
+            .and_then(|p| p.name.as_deref());
+        let tls_attachment = tls_policy_map
+            .get(&(
+                Arc::clone(&target.namespace),
+                Arc::clone(&target.name),
+                None,
+            ))
+            .cloned()
+            .or_else(|| {
+                let name = Arc::from(port_name.unwrap_or(""));
+                tls_policy_map
+                    .get(&(Arc::clone(&target.namespace), Arc::clone(&target.name), Some(name)))
+                    .cloned()
+            });
+
+        let protocol = if tls_attachment.is_some() {
+            crate::ir::BackendProtocol::Https
+        } else {
+            info.ports
+                .iter()
+                .find(|p| p.port == target.port)
+                .map(service_port_protocol)
+                .unwrap_or(crate::ir::BackendProtocol::Http)
+        };
 
         if !needs_endpoint_resolution(info) {
             expanded.push(WeightedBackend {
                 protocol,
+                tls: tls_attachment.clone().or_else(|| backend.tls.clone()),
                 ..backend
             });
             continue;
@@ -211,6 +276,7 @@ fn expand_rule_backends<R: RuleWithBackends>(
         let Some(endpoints) = endpoint_map.get(&key) else {
             expanded.push(WeightedBackend {
                 protocol,
+                tls: tls_attachment.clone().or_else(|| backend.tls.clone()),
                 ..backend
             });
             continue;
@@ -227,6 +293,7 @@ fn expand_rule_backends<R: RuleWithBackends>(
                 weight: backend.weight,
                 filters: backend.filters.clone(),
                 protocol,
+                tls: tls_attachment.clone(),
             });
             added = true;
         }
@@ -236,6 +303,7 @@ fn expand_rule_backends<R: RuleWithBackends>(
         if !added {
             expanded.push(WeightedBackend {
                 protocol,
+                tls: tls_attachment.clone().or_else(|| backend.tls.clone()),
                 ..backend
             });
         }
@@ -451,6 +519,7 @@ mod tests {
                 weight: 1,
                 protocol: crate::ir::BackendProtocol::Http,
                 filters: vec![],
+                tls: None,
             }],
             filters: vec![],
             timeout_ms: None,
@@ -513,7 +582,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 2);
         let addrs: Vec<&str> = rule.backends.iter().map(|b| b.backend.as_ref()).collect();
@@ -536,7 +605,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(rule.backends[0].backend.as_ref(), "10.42.0.20:3000");
@@ -557,7 +626,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(
@@ -581,7 +650,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(
@@ -605,7 +674,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends[0].backend.as_ref(), "[2001:db8::1]:3000");
     }
@@ -619,7 +688,7 @@ mod tests {
         let services = build_service_map(vec![svc]);
         let endpoints = build_endpoint_map(vec![]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(
@@ -650,7 +719,7 @@ mod tests {
             }],
         )]);
 
-        expand_rule_backends(&mut rule, &services, &endpoints);
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
 
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(rule.backends[0].backend.as_ref(), "10.42.0.10:3000");

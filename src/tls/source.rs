@@ -8,7 +8,7 @@
 //! more than one certificate.
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
-use crate::tls::registry::{certified_key_from_pem, CertStore, WildcardPattern};
+use crate::tls::registry::{cert_key_from_secret, certified_key_from_pem, CertStore, WildcardPattern};
 use arc_swap::ArcSwap;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::Api;
@@ -176,7 +176,8 @@ impl std::fmt::Debug for CompositeCertSource {
 }
 
 /// Scan all Gateway listeners with `certificateRefs`, fetch the referenced
-/// Secrets, and build a `CertStore` keyed by listener hostname.
+/// Secrets, and build a `CertStore` keyed by listener hostname. Also loads
+/// Gateway-wide backend client certificates.
 async fn build_gateway_cert_store(
     client: &kube::Client,
     view: &crate::gateway::model::GatewayView,
@@ -320,7 +321,95 @@ async fn build_gateway_cert_store(
                 );
             }
         }
+
+        // Load Gateway-wide backend client certificate, if configured.
+        if let Some(id) = &gw_state.backend_client_cert_id {
+            load_gateway_backend_client_cert(
+                client,
+                &grant_index,
+                &gw_state.namespace,
+                &gw_state.name,
+                id,
+                &mut store,
+            )
+            .await;
+        }
     }
 
     Ok(store)
+}
+
+/// Load a Gateway backend client certificate into the store.
+async fn load_gateway_backend_client_cert(
+    client: &kube::Client,
+    grant_index: &GrantIndex,
+    gw_ns: &str,
+    gw_name: &str,
+    id: &str,
+    store: &mut CertStore,
+) {
+    // The identifier is `gateway/{namespace}/{secret_name}`.
+    let parts: Vec<&str> = id.split('/').collect();
+    if parts.len() != 3 {
+        return;
+    }
+    let ns = parts[1];
+    let name = parts[2];
+
+    if ns != gw_ns
+        && !grant_index.is_permitted(
+            gw_ns,
+            "gateway.networking.k8s.io",
+            "Gateway",
+            ns,
+            "",
+            "Secret",
+            name,
+        )
+    {
+        tracing::warn!(
+            gateway = %gw_name,
+            namespace = %gw_ns,
+            %name,
+            %ns,
+            "cross-namespace Gateway backend clientCertificateRef denied by ReferenceGrant"
+        );
+        return;
+    }
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let secret = match secret_api.get(name).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                %name,
+                %ns,
+                error = %e,
+                "Gateway backend client certificate Secret not found yet"
+            );
+            return;
+        }
+    };
+    let cert_key = match cert_key_from_secret(&secret) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(
+                %name,
+                %ns,
+                error = %e,
+                "failed to parse Gateway backend client certificate Secret"
+            );
+            return;
+        }
+    };
+    store
+        .client_certs
+        .insert(Arc::from(id), Arc::new(cert_key));
+    tracing::info!(
+        gateway = %gw_name,
+        namespace = %gw_ns,
+        %name,
+        %ns,
+        "loaded Gateway backend client certificate"
+    );
 }

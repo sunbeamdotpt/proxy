@@ -15,6 +15,7 @@ use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerState, NamespaceFrom, RouteGroupKind,
     RouteNamespaces, TlsMode,
 };
+use crate::gateway::model::view::FrontendValidation;
 use crate::gateway::reconcile::gatewayclass::{
     supported_features, to_k8s_condition, CONTROLLER_NAME,
 };
@@ -24,6 +25,7 @@ use crate::gateway::reconcile::httproute::{
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
@@ -82,6 +84,7 @@ pub fn build_listener_model(gw: &Gateway) -> Vec<ListenerState> {
                 port,
                 hostname,
                 tls_mode,
+                frontend_validation: None,
             });
         }
     }
@@ -157,6 +160,202 @@ pub fn parse_allowed_routes(
         .unwrap_or_default();
 
     AllowedRoutes { kinds, namespaces }
+}
+
+/// Raw frontend validation configuration parsed from a Gateway listener.
+#[derive(Clone, Debug)]
+struct FrontendValidationSpec {
+    ca_certificate_refs: Vec<(Arc<str>, Arc<str>)>,
+    no_default_validation: bool,
+}
+
+fn parse_frontend_validation_obj(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<FrontendValidationSpec> {
+    let refs = obj.get("caCertificateRefs").and_then(|v| v.as_array())?;
+    let mut ca_certificate_refs = Vec::new();
+    for r in refs {
+        let r = r.as_object()?;
+        let group = r.get("group").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if !group.is_empty() || kind != "ConfigMap" {
+            return None;
+        }
+        let name = r.get("name").and_then(|v| v.as_str())?;
+        if name.is_empty() {
+            return None;
+        }
+        ca_certificate_refs.push((Arc::from(""), Arc::from(name)));
+    }
+    let no_default_validation = obj
+        .get("noDefaultValidation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(FrontendValidationSpec {
+        ca_certificate_refs,
+        no_default_validation,
+    })
+}
+
+/// Return the frontend validation configuration that applies to a listener,
+/// resolving per-port overrides against the Gateway default.
+fn listener_frontend_validation(
+    gw_tls: Option<&serde_json::Value>,
+    port: u16,
+) -> Option<FrontendValidationSpec> {
+    let tls = gw_tls?.as_object()?;
+    if let Some(per_port) = tls.get("perPort").and_then(|v| v.as_array()) {
+        for entry in per_port {
+            let entry_port = entry.get("port").and_then(|v| v.as_u64())? as u16;
+            if entry_port == port {
+                return entry
+                    .get("frontendValidation")
+                    .and_then(|v| v.as_object())
+                    .and_then(parse_frontend_validation_obj);
+            }
+        }
+    }
+    tls.get("default")
+        .and_then(|v| v.as_object())?
+        .get("frontendValidation")
+        .and_then(|v| v.as_object())
+        .and_then(parse_frontend_validation_obj)
+}
+
+fn ca_bundle_valid(pem: &[u8]) -> bool {
+    crate::tls::registry::parse_cert_chain(pem).is_ok()
+}
+
+/// Validate a listener's frontend client-certificate configuration.
+///
+/// Returns `Some(CertValidation)` when the listener references an unsupported
+/// resource kind, a missing ConfigMap, or a ConfigMap that does not contain a
+/// valid `ca.crt` entry.
+pub async fn validate_listener_frontend_validation(
+    client: &Client,
+    gw_ns: &str,
+    listener: &serde_json::Map<String, serde_json::Value>,
+    gw_tls: Option<&serde_json::Value>,
+) -> Option<CertValidation> {
+    let port = listener.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+    let spec = match listener_frontend_validation(gw_tls, port) {
+        Some(s) => s,
+        None => return None,
+    };
+
+    for (ref_ns, name) in &spec.ca_certificate_refs {
+        let ns = if ref_ns.is_empty() {
+            gw_ns
+        } else {
+            ref_ns.as_ref()
+        };
+        if ns != gw_ns {
+            return Some(CertValidation {
+                reason: "InvalidFrontendClientCertificateValidation",
+                message: "Frontend CA certificate reference must be in the Gateway namespace",
+            });
+        }
+        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+        let cm = match cms.get(name.as_ref()).await {
+            Ok(c) => c,
+            Err(_) => {
+                return Some(CertValidation {
+                    reason: "InvalidFrontendClientCertificateValidation",
+                    message: "Frontend CA certificate ConfigMap not found",
+                })
+            }
+        };
+        let data = match cm.data.as_ref() {
+            Some(d) => d,
+            None => {
+                return Some(CertValidation {
+                    reason: "InvalidFrontendClientCertificateValidation",
+                    message: "Frontend CA certificate ConfigMap has no data",
+                })
+            }
+        };
+        let ca = match data.get("ca.crt") {
+            Some(v) => v.as_bytes(),
+            None => {
+                return Some(CertValidation {
+                    reason: "InvalidFrontendClientCertificateValidation",
+                    message: "Frontend CA certificate ConfigMap missing ca.crt",
+                })
+            }
+        };
+        if !ca_bundle_valid(ca) {
+            return Some(CertValidation {
+                reason: "InvalidFrontendClientCertificateValidation",
+                message: "Frontend CA certificate is not a valid PEM bundle",
+            });
+        }
+    }
+
+    None
+}
+
+/// Load the PEM CA bundle for each listener's frontend validation and store
+/// it in the corresponding [`ListenerState`]. Invalid or missing references
+/// are left as `None` so the listener is not configured with broken trust.
+pub async fn load_gateway_frontend_validations(
+    client: &Client,
+    gateways: &[Gateway],
+    states: &mut [GatewayState],
+) {
+    for (gw, state) in gateways.iter().zip(states.iter_mut()) {
+        let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
+        let gw_tls = gw.spec.tls.as_ref();
+        for listener in &mut state.listeners {
+            let spec = match listener_frontend_validation(gw_tls, listener.port) {
+                Some(s) => s,
+                None => continue,
+            };
+            let mut bundle = String::new();
+            let mut valid = true;
+            for (ref_ns, name) in &spec.ca_certificate_refs {
+                let ns = if ref_ns.is_empty() {
+                    gw_ns
+                } else {
+                    ref_ns.as_ref()
+                };
+                if ns != gw_ns {
+                    valid = false;
+                    break;
+                }
+                let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+                let cm = match cms.get(name.as_ref()).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        valid = false;
+                        break;
+                    }
+                };
+                let Some(data) = cm.data.as_ref() else {
+                    valid = false;
+                    break;
+                };
+                let Some(ca) = data.get("ca.crt") else {
+                    valid = false;
+                    break;
+                };
+                if !ca_bundle_valid(ca.as_bytes()) {
+                    valid = false;
+                    break;
+                }
+                bundle.push_str(ca);
+                if !bundle.ends_with('\n') {
+                    bundle.push('\n');
+                }
+            }
+            if !valid {
+                continue;
+            }
+            listener.frontend_validation = Some(FrontendValidation {
+                ca_bundle_pem: Arc::from(bundle),
+                allow_insecure_fallback: spec.no_default_validation,
+            });
+        }
+    }
 }
 
 /// Build a map from `(gateway_namespace, gateway_name, listener_name)` to the
@@ -540,6 +739,108 @@ fn secret_data_valid(secret: &k8s_openapi::api::core::v1::Secret) -> bool {
     check_pem("tls.crt") && check_pem("tls.key")
 }
 
+/// Extract a syntactically valid Gateway backend client certificate reference.
+fn gateway_backend_client_cert_ref(gw: &Gateway) -> Option<(Arc<str>, Arc<str>, Arc<str>)> {
+    let tls = gw.spec.tls.as_ref()?.as_object()?;
+    let backend = tls.get("backend")?.as_object()?;
+    let cert_ref = backend.get("clientCertificateRef")?.as_object()?;
+    let group = cert_ref.get("group").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = cert_ref.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if !group.is_empty() || kind != "Secret" {
+        return None;
+    }
+    let name = cert_ref.get("name").and_then(|v| v.as_str())?;
+    if name.is_empty() {
+        return None;
+    }
+    let ns = cert_ref
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| gw.metadata.namespace.as_deref().unwrap_or("default"));
+    Some((Arc::from(ns), Arc::from(name), Arc::from("Secret")))
+}
+
+/// Validate a Gateway's backend TLS client certificate reference.
+pub async fn validate_gateway_backend_tls(
+    client: &Client,
+    gw: &Gateway,
+    grant_index: &GrantIndex,
+) -> Option<CertValidation> {
+    let tls = match gw.spec.tls.as_ref().and_then(|v| v.as_object()) {
+        Some(t) => t,
+        None => return None,
+    };
+    let backend = match tls.get("backend").and_then(|v| v.as_object()) {
+        Some(b) => b,
+        None => return None,
+    };
+    let cert_ref = match backend.get("clientCertificateRef").and_then(|v| v.as_object()) {
+        Some(r) => r,
+        None => return None,
+    };
+
+    let group = cert_ref.get("group").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = cert_ref.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if !group.is_empty() || kind != "Secret" {
+        return Some(CertValidation {
+            reason: "InvalidClientCertificateRef",
+            message: "Gateway backend clientCertificateRef must be a core Secret",
+        });
+    }
+    let name = match cert_ref.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            return Some(CertValidation {
+                reason: "InvalidClientCertificateRef",
+                message: "Gateway backend clientCertificateRef name is required",
+            })
+        }
+    };
+    let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
+    let ns = cert_ref
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or(gw_ns);
+
+    if ns != gw_ns {
+        let permitted = grant_index.is_permitted(
+            gw_ns,
+            "gateway.networking.k8s.io",
+            "Gateway",
+            ns,
+            "",
+            "Secret",
+            name,
+        );
+        if !permitted {
+            return Some(CertValidation {
+                reason: "RefNotPermitted",
+                message: "Cross-namespace Gateway backend clientCertificateRef is not permitted",
+            });
+        }
+    }
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    match secrets.get(name).await {
+        Ok(s) => {
+            if !secret_data_valid(&s) {
+                return Some(CertValidation {
+                    reason: "InvalidClientCertificateRef",
+                    message: "Gateway backend clientCertificateRef Secret does not contain a valid TLS certificate",
+                });
+            }
+        }
+        Err(_) => {
+            return Some(CertValidation {
+                reason: "InvalidClientCertificateRef",
+                message: "Gateway backend clientCertificateRef Secret not found",
+            })
+        }
+    }
+
+    None
+}
+
 /// Listener identifiers and permissions extracted from raw Gateway spec.
 struct ListenerMatch {
     name: String,
@@ -857,6 +1158,7 @@ pub(crate) fn compute_gateway_conditions(
     _gw: &Gateway,
     gateway_class: Option<&GatewayClass>,
     address_validation: &AddressValidation,
+    backend_tls_error: Option<CertValidation>,
     observed_generation: i64,
 ) -> Vec<StatusCondition> {
     let mut conditions = Vec::new();
@@ -941,6 +1243,26 @@ pub(crate) fn compute_gateway_conditions(
     };
     conditions.push(programmed);
 
+    // ResolvedRefs
+    let resolved_refs = if let Some(err) = backend_tls_error {
+        StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::False,
+            reason: err.reason.into(),
+            message: err.message.into(),
+            observed_generation,
+        }
+    } else {
+        StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::True,
+            reason: "ResolvedRefs".into(),
+            message: "All references resolved".into(),
+            observed_generation,
+        }
+    };
+    conditions.push(resolved_refs);
+
     conditions
 }
 
@@ -1016,11 +1338,15 @@ async fn reconcile_infrastructure_serviceaccount(gw: &Gateway, client: &Client) 
 
 /// Build a [`GatewayState`] from a [`Gateway`].
 pub fn build_gateway_state(gw: &Gateway) -> GatewayState {
+    let backend_client_cert_id = gateway_backend_client_cert_ref(gw).map(|(ns, name, _kind)| {
+        Arc::from(format!("gateway/{}/{}", ns, name)) as Arc<str>
+    });
     GatewayState {
         namespace: gw.metadata.namespace.clone().unwrap_or_default().into(),
         name: gw.metadata.name.clone().unwrap_or_default().into(),
         generation: gw.metadata.generation.unwrap_or(0),
         listeners: build_listener_model(gw),
+        backend_client_cert_id,
     }
 }
 
@@ -1044,12 +1370,18 @@ pub async fn reconcile_gateway(
     let gatewayclasses: Api<GatewayClass> = Api::all(ctx.client.clone());
     let gc = gatewayclasses.get(&gw.spec.gateway_class_name).await.ok();
 
+    let grants: Api<ReferenceGrant> = Api::all(ctx.client.clone());
+    let grant_list = grants.list(&ListParams::default()).await?;
+    let grant_index = GrantIndex::new(reconcile_reference_grants(&grant_list.items));
+
     let requested_addresses = parse_gateway_addresses(&gw);
     let address_validation = validate_gateway_addresses(&requested_addresses);
+    let backend_tls_error = validate_gateway_backend_tls(&ctx.client, &gw, &grant_index).await;
     let conditions = compute_gateway_conditions(
         &gw,
         gc.as_ref(),
         &address_validation,
+        backend_tls_error,
         observed_generation,
     );
     let _gateway_state = build_gateway_state(&gw);
@@ -1057,10 +1389,6 @@ pub async fn reconcile_gateway(
     if ctx.is_leader.load(Ordering::Relaxed) {
         reconcile_infrastructure_serviceaccount(&gw, &ctx.client).await;
     }
-
-    let grants_api: Api<ReferenceGrant> = Api::all(ctx.client.clone());
-    let grants = grants_api.list(&ListParams::default()).await?;
-    let grant_index = GrantIndex::new(reconcile_reference_grants(&grants.items));
 
     let namespaces_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client.clone());
     let namespace_list = namespaces_api.list(&ListParams::default()).await?;
@@ -1079,12 +1407,14 @@ pub async fn reconcile_gateway(
         })
         .collect();
 
+    let gw_tls = gw.spec.tls.as_ref();
     let mut cert_errors: Vec<Option<CertValidation>> = Vec::new();
     for listener in &gw.spec.listeners {
         if let Some(obj) = listener.as_object() {
             let err =
                 validate_listener_certificates(&ctx.client, &ns, "Gateway", obj, &grant_index)
-                    .await;
+                    .await
+                    .or(validate_listener_frontend_validation(&ctx.client, &ns, obj, gw_tls).await);
             cert_errors.push(err);
         } else {
             cert_errors.push(None);
@@ -1280,7 +1610,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1293,7 +1623,7 @@ mod tests {
     fn accepted_false_when_gatewayclass_missing() {
         let gw = sample_gw("missing-gc");
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, None, &validation, 1);
+        let conds = compute_gateway_conditions(&gw, None, &validation, None, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1307,7 +1637,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc("other/controller");
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1321,7 +1651,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
         let programmed = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Programmed)
@@ -1541,40 +1871,55 @@ mod tests {
 
     #[test]
     fn validate_addresses_marks_unsupported_type() {
-        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
-        let addrs = vec![
-            GatewaySpecAddress { type_: "test/fake".into(), value: Some("x".into()) },
-        ];
+        unsafe {
+            std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1");
+        }
+        let addrs = vec![GatewaySpecAddress {
+            type_: "test/fake".into(),
+            value: Some("x".into()),
+        }];
         let v = validate_gateway_addresses(&addrs);
         assert_eq!(v.unsupported.len(), 1);
         assert!(v.usable.is_empty());
         assert!(v.unusable.is_empty());
-        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+        unsafe {
+            std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS");
+        }
     }
 
     #[test]
     fn validate_addresses_marks_non_impl_address_unusable() {
-        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
-        let addrs = vec![
-            GatewaySpecAddress { type_: "IPAddress".into(), value: Some("10.0.0.2".into()) },
-        ];
+        unsafe {
+            std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1");
+        }
+        let addrs = vec![GatewaySpecAddress {
+            type_: "IPAddress".into(),
+            value: Some("10.0.0.2".into()),
+        }];
         let v = validate_gateway_addresses(&addrs);
         assert_eq!(v.unusable.len(), 1);
         assert!(v.usable.is_empty());
         assert!(v.unsupported.is_empty());
-        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+        unsafe {
+            std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS");
+        }
     }
 
     #[test]
     fn validate_addresses_fills_empty_ip_address() {
-        unsafe { std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1"); }
-        let addrs = vec![
-            GatewaySpecAddress { type_: "IPAddress".into(), value: None },
-        ];
+        unsafe {
+            std::env::set_var("SUNBEAM_GATEWAY_ADDRESS", "10.0.0.1");
+        }
+        let addrs = vec![GatewaySpecAddress {
+            type_: "IPAddress".into(),
+            value: None,
+        }];
         let v = validate_gateway_addresses(&addrs);
         assert_eq!(v.usable.len(), 1);
         assert_eq!(v.usable[0].value.as_deref(), Some("10.0.0.1"));
-        unsafe { std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS"); }
+        unsafe {
+            std::env::remove_var("SUNBEAM_GATEWAY_ADDRESS");
+        }
     }
 
     #[test]
@@ -1582,14 +1927,23 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation {
-            unsupported: vec![GatewaySpecAddress { type_: "Hostname".into(), value: Some("x".into()) }],
+            unsupported: vec![GatewaySpecAddress {
+                type_: "Hostname".into(),
+                value: Some("x".into()),
+            }],
             ..Default::default()
         };
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
-        let accepted = conds.iter().find(|c| c.condition_type == ConditionType::Accepted).unwrap();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let accepted = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::Accepted)
+            .unwrap();
         assert_eq!(accepted.status, ConditionStatus::False);
         assert_eq!(accepted.reason, "UnsupportedAddress");
-        let programmed = conds.iter().find(|c| c.condition_type == ConditionType::Programmed).unwrap();
+        let programmed = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::Programmed)
+            .unwrap();
         assert_eq!(programmed.status, ConditionStatus::False);
     }
 
@@ -1598,13 +1952,22 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation {
-            unusable: vec![GatewaySpecAddress { type_: "IPAddress".into(), value: Some("10.0.0.2".into()) }],
+            unusable: vec![GatewaySpecAddress {
+                type_: "IPAddress".into(),
+                value: Some("10.0.0.2".into()),
+            }],
             ..Default::default()
         };
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, 1);
-        let accepted = conds.iter().find(|c| c.condition_type == ConditionType::Accepted).unwrap();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let accepted = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::Accepted)
+            .unwrap();
         assert_eq!(accepted.status, ConditionStatus::True);
-        let programmed = conds.iter().find(|c| c.condition_type == ConditionType::Programmed).unwrap();
+        let programmed = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::Programmed)
+            .unwrap();
         assert_eq!(programmed.status, ConditionStatus::False);
         assert_eq!(programmed.reason, "AddressNotUsable");
     }
@@ -2231,5 +2594,126 @@ mod tests {
             "http".to_string(),
         );
         assert_eq!(map.get(&key).unwrap().namespaces.from, NamespaceFrom::All);
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_extracts_configmap_refs() {
+        let obj = serde_json::json!({
+            "caCertificateRefs": [
+                {"group": "", "kind": "ConfigMap", "name": "ca-1"},
+                {"group": "", "kind": "ConfigMap", "name": "ca-2"}
+            ],
+            "noDefaultValidation": true
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = parse_frontend_validation_obj(&obj).unwrap();
+        assert_eq!(spec.ca_certificate_refs.len(), 2);
+        assert_eq!(spec.ca_certificate_refs[0].1.as_ref(), "ca-1");
+        assert!(spec.no_default_validation);
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_rejects_non_configmap_kind() {
+        let obj = serde_json::json!({
+            "caCertificateRefs": [
+                {"group": "", "kind": "Secret", "name": "ca-1"}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(parse_frontend_validation_obj(&obj).is_none());
+    }
+
+    #[test]
+    fn listener_frontend_validation_default_applies_to_listener() {
+        let tls = serde_json::json!({
+            "default": {
+                "frontendValidation": {
+                    "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}],
+                    "noDefaultValidation": false
+                }
+            }
+        });
+        let spec = listener_frontend_validation(Some(&tls), 443).unwrap();
+        assert_eq!(spec.ca_certificate_refs[0].1.as_ref(), "ca");
+        assert!(!spec.no_default_validation);
+    }
+
+    #[test]
+    fn listener_frontend_validation_per_port_overrides_default() {
+        let tls = serde_json::json!({
+            "default": {
+                "frontendValidation": {
+                    "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "default-ca"}]
+                }
+            },
+            "perPort": [
+                {
+                    "port": 8443,
+                    "frontendValidation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "port-ca"}]
+                    }
+                }
+            ]
+        });
+        let default_spec = listener_frontend_validation(Some(&tls), 443).unwrap();
+        assert_eq!(default_spec.ca_certificate_refs[0].1.as_ref(), "default-ca");
+        let port_spec = listener_frontend_validation(Some(&tls), 8443).unwrap();
+        assert_eq!(port_spec.ca_certificate_refs[0].1.as_ref(), "port-ca");
+    }
+
+    #[test]
+    fn listener_frontend_validation_returns_none_without_tls() {
+        assert!(listener_frontend_validation(None, 443).is_none());
+    }
+
+    #[test]
+    fn build_listener_status_marks_invalid_frontend_validation() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let features: std::collections::HashSet<String> = supported_features()
+            .into_iter()
+            .collect();
+        let err = Some(CertValidation {
+            reason: "InvalidFrontendClientCertificateValidation",
+            message: "Frontend CA certificate ConfigMap not found",
+        });
+        let statuses = build_listener_status(&gw, None, 1, &[err], &[0], &features);
+        let resolved = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("ResolvedRefs"))
+            .unwrap();
+        assert_eq!(resolved["status"].as_str(), Some("False"));
+        assert_eq!(
+            resolved["reason"].as_str(),
+            Some("InvalidFrontendClientCertificateValidation")
+        );
+        let programmed = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("Programmed"))
+            .unwrap();
+        assert_eq!(programmed["status"].as_str(), Some("False"));
     }
 }

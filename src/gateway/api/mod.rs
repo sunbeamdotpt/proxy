@@ -22,3 +22,10 @@ pub use referencegrant::ReferenceGrant;
 pub use tcproute::TCPRoute;
 pub use tlsroute::TLSRoute;
 pub use udproute::UDPRoute;
+
+pub use gateway_api::backendtlspolicies::{
+    BackendTLSPolicy, BackendTlsPolicySpec, BackendTlsPolicyStatus,
+    BackendTlsPolicyStatusAncestors, BackendTlsPolicyStatusAncestorsAncestorRef,
+    BackendTlsPolicyTargetRefs, BackendTlsPolicyValidation,
+    BackendTlsPolicyValidationCaCertificateRefs, BackendTlsPolicyValidationSubjectAltNames,
+};

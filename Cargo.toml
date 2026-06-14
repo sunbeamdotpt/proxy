@@ -114,6 +114,7 @@ criterion     = { version = "0.5", features = ["html_reports"] }
 proptest      = { workspace = true }
 tempfile      = { workspace = true }
 reqwest       = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+http-body-util = "0.1"
 
 [[bench]]
 name = "scanner_bench"

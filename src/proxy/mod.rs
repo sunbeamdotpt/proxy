@@ -7,13 +7,14 @@ use crate::config::RouteConfig;
 use crate::ddos::detector::DDoSDetector;
 use crate::ddos::model::DDoSAction;
 use crate::ir::compile::{CompiledL4Config, CompiledPlan, CompiledRouteTable};
-use crate::ir::{BackendProtocol, L4Action, Protocol};
+use crate::ir::{BackendProtocol, BackendTlsConfig, L4Action, Protocol};
 use crate::metrics;
 use crate::rate_limit::key;
 use crate::rate_limit::limiter::{RateLimitResult, RateLimiter};
 use crate::scanner::allowlist::BotAllowlist;
 use crate::scanner::detector::ScannerDetector;
 use crate::scanner::model::ScannerAction;
+use crate::tls::TlsRegistry;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,7 +22,10 @@ use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
 use pingora_cache::{
     CacheKey, CacheMeta, ForcedFreshness, HitHandler, NoCacheReason, RespCacheable,
 };
-use pingora_core::{upstreams::peer::HttpPeer, Result};
+use pingora_core::protocols::tls::ALPN;
+use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::utils::tls::CertKey;
+use pingora_core::Result;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use regex::Regex;
@@ -41,7 +45,7 @@ mod routing;
 pub use ctx::RequestCtx;
 use match_::{build_redirect_location_ir, cors_allow_origin, pick_weighted_backend_ir_index};
 
-/// Build an HttpPeer with configurable timeouts.
+/// Build an HttpPeer with configurable timeouts and optional TLS settings.
 ///
 /// DNS resolution is performed here so that a lookup failure can be handled
 /// gracefully instead of panicking the Pingora worker thread.
@@ -49,17 +53,41 @@ async fn make_peer(
     addr: &str,
     timeout: Option<Duration>,
     protocol: BackendProtocol,
+    tls: Option<&BackendTlsConfig>,
+    client_cert: Option<Arc<CertKey>>,
 ) -> Option<Box<HttpPeer>> {
     let addr = backend_addr(addr);
     let mut addrs = tokio::net::lookup_host(&addr).await.ok()?;
     let sa = addrs.next()?;
-    let mut peer = HttpPeer::new(sa, false, String::new());
+    let is_tls = matches!(
+        protocol,
+        BackendProtocol::Https | BackendProtocol::WebSocketSecure
+    );
+    let sni = tls.map(|t| t.sni.as_ref().to_string()).unwrap_or_default();
+    let mut peer = HttpPeer::new(sa, is_tls, sni);
     let t = timeout.unwrap_or(Duration::from_secs(60));
     peer.options.connection_timeout = Some(Duration::from_secs(10));
     peer.options.read_timeout = Some(t);
     peer.options.write_timeout = Some(t);
-    if protocol == BackendProtocol::H2c {
-        peer.options.alpn = pingora_core::protocols::tls::ALPN::H2;
+
+    if is_tls {
+        if let Some(t) = tls {
+            peer.options.verify_hostname = t.verify_hostname;
+            if let Some(alt) = &t.alternative_cn {
+                peer.options.alternative_cn = Some(alt.as_ref().to_string());
+            }
+        }
+        if let Some(cert_key) = client_cert {
+            peer.client_cert_key = Some(cert_key);
+        }
+    }
+
+    match protocol {
+        BackendProtocol::H2c => peer.options.alpn = ALPN::H2,
+        BackendProtocol::WebSocket | BackendProtocol::WebSocketSecure => {
+            peer.options.alpn = ALPN::H1;
+        }
+        _ => {}
     }
     Some(Box::new(peer))
 }
@@ -77,6 +105,7 @@ pub struct CompiledRewrite {
 pub type CompiledRewrites = Vec<(String, Arc<Vec<CompiledRewrite>>)>;
 
 /// Sunbeamproxy.
+#[derive(Default)]
 pub struct SunbeamProxy {
     /// Compiled routes — atomically swappable at runtime via [`Self::swap_routes`].
     pub routes: Arc<ArcSwap<CompiledRouteTable>>,
@@ -109,11 +138,14 @@ pub struct SunbeamProxy {
     pub ddos_observe_only: bool,
     /// When true, scanner detector logs decisions but never blocks traffic.
     pub scanner_observe_only: bool,
+    /// TLS registry for upstream client certificates and per-listener server configs.
+    pub tls_registry: Option<Arc<TlsRegistry>>,
     /// Maps the internal upstream socket address of a TLS-terminated connection
     /// to the SNI hostname presented during the TLS handshake. Populated by the
     /// L4 router and consumed by the HTTP proxy for 421 misdirected request
     /// detection.
-    pub sni_context: Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>>,
+    pub sni_context:
+        Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>>,
     /// Maps the internal upstream socket address of an L4-relayed plain HTTP
     /// connection to the public listener that accepted it. Populated by the L4
     /// router and consumed by the HTTP proxy so that host/port route matching
@@ -159,7 +191,10 @@ impl SunbeamProxy {
             .client_addr()
             .and_then(|addr| addr.as_inet())
             .copied()?;
-        self.sni_context.lock().unwrap_or_else(|e| e.into_inner()).remove(&peer)
+        self.sni_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&peer)
     }
 
     /// Retrieve (without removing) the HTTP relay context associated with this
@@ -1157,6 +1192,7 @@ mod tests {
             l4_config: Arc::new(ArcSwap::new(Arc::new(CompiledL4Config::empty()))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            tls_registry: None,
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -1169,6 +1205,7 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+
         }
     }
 
@@ -1310,6 +1347,7 @@ mod tests {
                         weight: 1,
                         protocol: crate::ir::BackendProtocol::Http,
                         request_filters: vec![],
+                        tls: None,
                     }],
                     timeout: None,
                     request_filters: vec![],
@@ -1321,9 +1359,12 @@ mod tests {
                     auth: None,
                     disable_https_redirect: true,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
-            }],};
+            }],
+        };
         let table = crate::ir::compile::CompiledRouteTable::compile(crate::ir::RouteTable {
             listeners: vec![],
             hosts: vec![host],
@@ -1334,7 +1375,9 @@ mod tests {
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
-        assert!(proxy.lookup_plan("", 0, "/", "GET", &headers, None).is_some());
+        assert!(proxy
+            .lookup_plan("", 0, "/", "GET", &headers, None)
+            .is_some());
         assert!(proxy
             .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
             .is_some());
@@ -1369,6 +1412,7 @@ mod tests {
                         weight: 1,
                         protocol: crate::ir::BackendProtocol::Http,
                         request_filters: vec![],
+                        tls: None,
                     }],
                     timeout: None,
                     request_filters: vec![],
@@ -1380,9 +1424,12 @@ mod tests {
                     auth: None,
                     disable_https_redirect: true,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
-            }],};
+            }],
+        };
         let table = crate::ir::compile::CompiledRouteTable::compile(crate::ir::RouteTable {
             listeners: vec![],
             hosts: vec![host],
@@ -1430,6 +1477,7 @@ mod tests {
                                 weight: 1,
                                 protocol: crate::ir::BackendProtocol::Http,
                                 request_filters: vec![],
+                                tls: None,
                             }],
                             timeout: None,
                             request_filters: vec![],
@@ -1441,6 +1489,8 @@ mod tests {
                             auth: None,
                             disable_https_redirect: true,
                             websocket: false,
+                            client_cert_id: None,
+
                         }),
                         rule_order: 0,
                     }],
@@ -1467,6 +1517,7 @@ mod tests {
                                 weight: 1,
                                 protocol: crate::ir::BackendProtocol::Http,
                                 request_filters: vec![],
+                                tls: None,
                             }],
                             timeout: None,
                             request_filters: vec![],
@@ -1478,6 +1529,8 @@ mod tests {
                             auth: None,
                             disable_https_redirect: true,
                             websocket: false,
+                            client_cert_id: None,
+
                         }),
                         rule_order: 0,
                     }],
@@ -1485,7 +1538,8 @@ mod tests {
             ],
             acme_routes: std::collections::HashMap::new(),
             l4_routes: vec![],
-            tls_certs: vec![],})
+            tls_certs: vec![],
+        })
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
@@ -1801,6 +1855,8 @@ mod tests {
                 cert_id: "gateway".into(),
             }),
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         };
         let l4_config = crate::ir::compile::CompiledL4Config {
             listeners: vec![listener],
@@ -1831,6 +1887,8 @@ mod tests {
             protocol: Protocol::Http,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         };
         let l4_config = crate::ir::compile::CompiledL4Config {
             listeners: vec![listener],

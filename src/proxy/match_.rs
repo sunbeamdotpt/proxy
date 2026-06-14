@@ -1203,12 +1203,14 @@ mod tests {
                 weight: 1,
                 protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             },
             crate::ir::WeightedBackend {
                 backend: "b".into(),
                 weight: 2,
                 protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             },
         ];
         let total: usize = backends.iter().map(|b| b.weight as usize).sum();

@@ -10,16 +10,17 @@ pub mod view;
 
 pub use digest::compute_digest;
 pub use routing::{
-    Fraction, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HTTPRouteRule, HTTPRouteState,
-    HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, MethodMatch, MethodMatchType,
-    PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
-    RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState, WeightedBackend,
+    BackendTlsAttachment, Fraction, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HTTPRouteRule,
+    HTTPRouteState, HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, MethodMatch,
+    MethodMatchType, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
+    RouteMatch, RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState, WeightedBackend,
 };
 pub use types::{
     BackendTarget, ListenerKey, RefResolution, ResolvedRoute, RouteTableDigest, StatusPatch,
 };
 pub use view::{
-    AllowedRoutes, GatewayState, GatewayView, GrantSubject, ListenerAllowedMap, ListenerModel,
-    ListenerSetState, ListenerState, NamespaceFrom, NamespaceLabels, ParentRef, ReconciledView,
-    ReferenceGrantState, RouteGroupKind, RouteNamespaces, RouteState, TlsMode,
+    AllowedRoutes, BackendTLSPolicyState, CaCertificateRef, GatewayState, GatewayView,
+    GrantSubject, ListenerAllowedMap, ListenerModel, ListenerSetState, ListenerState,
+    NamespaceFrom, NamespaceLabels, ParentRef, ReconciledView, ReferenceGrantState, RouteGroupKind,
+    RouteNamespaces, RouteState, ServiceTargetRef, SubjectAltName, TlsMode,
 };

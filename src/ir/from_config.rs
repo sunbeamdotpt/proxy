@@ -173,6 +173,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         weight: 1,
                         request_filters: vec![],
                         protocol: BackendProtocol::Http,
+                        tls: None,
                     }]
                 } else {
                     pr.weighted_backends
@@ -182,6 +183,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                             weight: wb.weight,
                             request_filters: vec![],
                             protocol: BackendProtocol::Http,
+                            tls: None,
                         })
                         .collect()
                 };
@@ -225,6 +227,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     }),
                     websocket: pr.websocket || route.websocket,
                     disable_https_redirect: route.disable_secure_redirection,
+                    client_cert_id: None,
                 })
             };
 
@@ -246,6 +249,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         weight: 1,
                         request_filters: vec![],
                         protocol: BackendProtocol::Http,
+                        tls: None,
                     }],
                     timeout: route.timeout_secs.map(Duration::from_secs),
                     request_filters: vec![],
@@ -289,6 +293,8 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     auth: None,
                     websocket: route.websocket,
                     disable_https_redirect: route.disable_secure_redirection,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
             });
@@ -893,13 +899,15 @@ mod tests {
                     backend: "a".into(),
                     weight: 3,
                     protocol: BackendProtocol::Http,
-                    request_filters: vec![]
+                    request_filters: vec![],
+                    tls: None,
                 },
                 WeightedBackend {
                     backend: "b".into(),
                     weight: 7,
                     protocol: BackendProtocol::Http,
-                    request_filters: vec![]
+                    request_filters: vec![],
+                    tls: None,
                 },
             ]
         );

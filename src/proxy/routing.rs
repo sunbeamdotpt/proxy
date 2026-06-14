@@ -12,7 +12,9 @@ impl SunbeamProxy {
         // ACME challenge: backend was resolved in request_filter.
         if let Some(backend) = &ctx.acme_backend {
             tracing::debug!(backend, "upstream_peer: ACME challenge route");
-            if let Some(peer) = make_peer(backend, None, crate::ir::BackendProtocol::Http).await {
+            if let Some(peer) =
+                make_peer(backend, None, crate::ir::BackendProtocol::Http, None, None).await
+            {
                 return Ok(peer);
             }
             let mut resp = ResponseHeader::build(502, None)?;
@@ -80,14 +82,19 @@ impl SunbeamProxy {
                 });
             }
 
-            let protocol = ctx
-                .backend_index
-                .and_then(|idx| upstream.backends.get(idx))
-                .map(|b| b.protocol)
-                .unwrap_or_default();
-            tracing::debug!(backend = %backend, ?upstream.timeout, "upstream_peer: route plan");
+            let weighted = ctx.backend_index.and_then(|idx| upstream.backends.get(idx));
+            let protocol = weighted.map(|b| b.protocol).unwrap_or_default();
+            let tls = weighted.and_then(|b| b.tls.as_ref());
+            let client_cert_id = weighted
+                .and_then(|b| b.tls.as_ref().and_then(|t| t.client_cert_id.as_ref()))
+                .or(plan.client_cert_id.as_ref());
+            let client_cert =
+                client_cert_id.and_then(|id| self.tls_registry.as_ref()?.client_cert(id.as_ref()));
+            tracing::debug!(backend = %backend, ?upstream.timeout, ?protocol, "upstream_peer: route plan");
             if !backend.is_empty() {
-                if let Some(peer) = make_peer(&backend, upstream.timeout, protocol).await {
+                if let Some(peer) =
+                    make_peer(&backend, upstream.timeout, protocol, tls, client_cert).await
+                {
                     return Ok(peer);
                 }
             }
@@ -147,6 +154,7 @@ mod tests {
                 weight: 1,
                 protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             })
             .collect();
         let backend_request_mutations = backends.iter().map(|_| vec![]).collect();
@@ -170,6 +178,8 @@ mod tests {
             body_rewrites: vec![],
             cache: None,
             websocket: false,
+            client_cert_id: None,
+
         })
     }
 
@@ -188,6 +198,8 @@ mod tests {
             body_rewrites: vec![],
             cache: None,
             websocket: false,
+            client_cert_id: None,
+
         })
     }
 
@@ -206,6 +218,8 @@ mod tests {
             body_rewrites: vec![],
             cache: None,
             websocket: false,
+            client_cert_id: None,
+
         })
     }
 
@@ -247,6 +261,8 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+            tls_registry: None,
+
         }
     }
 

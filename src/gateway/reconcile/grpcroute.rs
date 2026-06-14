@@ -9,12 +9,14 @@
 
 use crate::gateway::api::GRPCRoute;
 use crate::gateway::model::{
-    GatewayState, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HeaderMatch, HeaderMatchValue,
+    GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, GatewayState, HeaderMatch, HeaderMatchValue,
     HostnameMatch, ListenerSetState, MethodMatch, MethodMatchType, ParentRef, RouteFilter,
     RouteState, WeightedBackend,
 };
 use crate::gateway::reconcile::httproute::{resolve_parent_ref, ParsedParentRef};
-use crate::gateway::reconcile::httproute::{BackendResolution, BackendResolutionStatus, RuleBackendResolution};
+use crate::gateway::reconcile::httproute::{
+    BackendResolution, BackendResolutionStatus, RuleBackendResolution,
+};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use gateway_api::grpcroutes::{
@@ -53,9 +55,11 @@ pub fn reconcile_grpcroutes(
     grant_index: &GrantIndex,
 ) -> Vec<ReconciledGRPCRoute> {
     let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
-    let listener_allowed = HashMap::<(String, String, String), crate::gateway::model::AllowedRoutes>::new();
+    let listener_allowed =
+        HashMap::<(String, String, String), crate::gateway::model::AllowedRoutes>::new();
     let listener_sets = Vec::<ListenerSetState>::new();
-    let listener_set_allowed = HashMap::<(String, String, String), crate::gateway::model::AllowedRoutes>::new();
+    let listener_set_allowed =
+        HashMap::<(String, String, String), crate::gateway::model::AllowedRoutes>::new();
     reconcile_grpcroutes_with_context(
         routes,
         gateways,
@@ -311,49 +315,60 @@ pub fn reconcile_single(
 
         // Merge backend ref resolution into the parent status.
         let resolved_refs = match &backend_resolution.overall {
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok => resolved_refs_true(generation),
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "RefNotPermitted".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Unsupported(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "InvalidKind".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "BackendNotFound".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
+            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok => {
+                resolved_refs_true(generation)
+            }
+            crate::gateway::reconcile::httproute::BackendResolutionStatus::RefNotPermitted(msg) => {
+                StatusCondition {
+                    condition_type: ConditionType::ResolvedRefs,
+                    status: ConditionStatus::False,
+                    reason: "RefNotPermitted".to_string(),
+                    message: msg.clone(),
+                    observed_generation: generation,
+                }
+            }
+            crate::gateway::reconcile::httproute::BackendResolutionStatus::Unsupported(msg) => {
+                StatusCondition {
+                    condition_type: ConditionType::ResolvedRefs,
+                    status: ConditionStatus::False,
+                    reason: "InvalidKind".to_string(),
+                    message: msg.clone(),
+                    observed_generation: generation,
+                }
+            }
+            crate::gateway::reconcile::httproute::BackendResolutionStatus::BackendNotFound(msg) => {
+                StatusCondition {
+                    condition_type: ConditionType::ResolvedRefs,
+                    status: ConditionStatus::False,
+                    reason: "BackendNotFound".to_string(),
+                    message: msg.clone(),
+                    observed_generation: generation,
+                }
+            }
         };
         conditions.push(resolved_refs);
 
-        let programmed =
-            if matches!(&backend_resolution.overall, crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok) && accepted {
-                StatusCondition {
-                    condition_type: ConditionType::Programmed,
-                    status: ConditionStatus::True,
-                    reason: "Programmed".to_string(),
-                    message: "Route programmed into proxy".to_string(),
-                    observed_generation: generation,
-                }
-            } else {
-                StatusCondition {
-                    condition_type: ConditionType::Programmed,
-                    status: ConditionStatus::False,
-                    reason: "NotProgrammed".to_string(),
-                    message: "Route not programmed into proxy".to_string(),
-                    observed_generation: generation,
-                }
-            };
+        let programmed = if matches!(
+            &backend_resolution.overall,
+            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok
+        ) && accepted
+        {
+            StatusCondition {
+                condition_type: ConditionType::Programmed,
+                status: ConditionStatus::True,
+                reason: "Programmed".to_string(),
+                message: "Route programmed into proxy".to_string(),
+                observed_generation: generation,
+            }
+        } else {
+            StatusCondition {
+                condition_type: ConditionType::Programmed,
+                status: ConditionStatus::False,
+                reason: "NotProgrammed".to_string(),
+                message: "Route not programmed into proxy".to_string(),
+                observed_generation: generation,
+            }
+        };
         conditions.push(programmed);
 
         parent_statuses.push(GRPCRouteParentStatus {
@@ -401,7 +416,9 @@ fn parse_parent_refs(route: &GRPCRoute) -> Vec<ParsedParentRef> {
         .unwrap_or_default()
 }
 
-fn parse_parent_ref(value: &gateway_api::grpcroutes::GrpcRouteParentRefs) -> Option<ParsedParentRef> {
+fn parse_parent_ref(
+    value: &gateway_api::grpcroutes::GrpcRouteParentRefs,
+) -> Option<ParsedParentRef> {
     Some(ParsedParentRef {
         group: value
             .group
@@ -563,10 +580,7 @@ fn parse_header_match(value: &GrpcRouteRulesMatchesHeaders) -> Option<HeaderMatc
     })
 }
 
-fn parse_backend_ref(
-    value: &GrpcRouteRulesBackendRefs,
-    route_ns: &str,
-) -> Option<WeightedBackend> {
+fn parse_backend_ref(value: &GrpcRouteRulesBackendRefs, route_ns: &str) -> Option<WeightedBackend> {
     let name = &value.name;
     let ns = value.namespace.as_deref().unwrap_or(route_ns);
     let port = value.port.unwrap_or(80);
@@ -588,6 +602,7 @@ fn parse_backend_ref(
         weight,
         filters,
         protocol: crate::ir::BackendProtocol::Http,
+        tls: None,
     })
 }
 
@@ -1012,7 +1027,7 @@ pub fn run_grpcroute_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::model::{GrantSubject, ListenerState};
+    use crate::gateway::model::ListenerState;
 
     fn gw_with_listener(ns: &str, name: &str, listener: &str) -> GatewayState {
         GatewayState {
@@ -1025,8 +1040,10 @@ mod tests {
                 port: 80,
                 hostname: None,
                 tls_mode: None,
-            }],
-        }
+        frontend_validation: None,
+    }],
+        backend_client_cert_id: None,
+    }
     }
 
     fn sample_route(parent_refs: Vec<Value>) -> GRPCRoute {

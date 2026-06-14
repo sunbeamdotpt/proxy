@@ -447,6 +447,7 @@ pub(crate) async fn resolve_l4_backends_async(
             weight,
             filters: vec![],
             protocol: crate::ir::BackendProtocol::Http,
+            tls: None,
         });
     }
 
@@ -492,6 +493,7 @@ pub(crate) fn resolve_l4_backends(
             weight,
             filters: vec![],
             protocol: crate::ir::BackendProtocol::Http,
+            tls: None,
         });
     }
 
@@ -1476,7 +1478,9 @@ mod tests {
                 port,
                 hostname: None,
                 tls_mode: None,
+                frontend_validation: None,
             }],
+            backend_client_cert_id: None,
         }
     }
 
@@ -1497,7 +1501,9 @@ mod tests {
                 port,
                 hostname: hostname.map(Arc::from),
                 tls_mode: None,
+                frontend_validation: None,
             }],
+            backend_client_cert_id: None,
         }
     }
 
@@ -1646,8 +1652,10 @@ mod tests {
                 port: 80,
                 hostname: None,
                 tls_mode: None,
-            }],
-        }];
+        frontend_validation: None,
+    }],
+        backend_client_cert_id: None,
+    }];
 
         let reconciled = reconcile_tcproutes(
             &[route],
@@ -1940,7 +1948,8 @@ mod tests {
                 namespace: Some(Arc::from("default")),
                 name: Arc::from("gw-1"),
                 section_name: Some(Arc::from("tls")),
-            port: None,},
+                port: None,
+            },
             conditions: vec![StatusCondition {
                 condition_type: ConditionType::Accepted,
                 status: ConditionStatus::True,
@@ -2194,7 +2203,8 @@ mod tests {
                 namespace: Some(Arc::from("default")),
                 name: Arc::from("gw-1"),
                 section_name: None,
-            port: None,},
+                port: None,
+            },
             conditions: vec![StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,

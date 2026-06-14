@@ -144,6 +144,8 @@ fn start_proxy_once(backend_port: u16) {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+
+            ..Default::default()
         };
 
         let opt = Opt {

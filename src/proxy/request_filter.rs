@@ -35,7 +35,11 @@ impl SunbeamProxy {
                 ctx.downstream_port = downstream_port(session);
             }
         } else {
-            ctx.downstream_scheme = if is_plain_http(session) { "http" } else { "https" };
+            ctx.downstream_scheme = if is_plain_http(session) {
+                "http"
+            } else {
+                "https"
+            };
             ctx.downstream_port = downstream_port(session);
         }
 
@@ -459,8 +463,14 @@ impl SunbeamProxy {
         let method = session.req_header().method.to_string();
         let headers = session.req_header().headers.clone();
         let query = session.req_header().uri.query().map(|s| s.to_string());
-        let plan =
-            self.lookup_plan(&host, ctx.downstream_port, &path, &method, &headers, query.as_deref());
+        let plan = self.lookup_plan(
+            &host,
+            ctx.downstream_port,
+            &path,
+            &method,
+            &headers,
+            query.as_deref(),
+        );
 
         if let Some(plan) = plan {
             ctx.plan = Some(Arc::clone(&plan));
@@ -813,6 +823,7 @@ mod tests {
             ))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            tls_registry: None,
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -825,6 +836,7 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
+
         }
     }
 
@@ -925,6 +937,8 @@ mod tests {
             body_rewrites: vec![],
             cache: None,
             websocket: false,
+            client_cert_id: None,
+
         }
     }
 
@@ -1579,6 +1593,7 @@ mod tests {
                     weight: 1,
                     protocol: crate::ir::BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 }],
                 timeout: None,
                 mirror: vec![],
@@ -1776,6 +1791,7 @@ mod tests {
                     weight: 1,
                     protocol: crate::ir::BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 }],
                 timeout: None,
                 mirror: vec![],

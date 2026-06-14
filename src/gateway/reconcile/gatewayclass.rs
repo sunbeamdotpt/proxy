@@ -68,6 +68,22 @@ pub fn supported_features() -> Vec<String> {
         "GatewayStaticAddresses".to_string(),
         "GatewayAddressEmpty".to_string(),
         "GatewayInfrastructurePropagation".to_string(),
+        "GatewayInfrastructure".to_string(),
+        "GatewayOptionalAddressValue".to_string(),
+        "GatewayFrontendClientCertificateValidation".to_string(),
+        "GatewayFrontendClientCertificateValidationInsecureFallback".to_string(),
+        "GatewayBackendClientCertificate".to_string(),
+        "BackendTLSPolicy".to_string(),
+        "BackendTLSPolicyConflictResolution".to_string(),
+        "BackendTLSPolicyObservedGenerationBump".to_string(),
+        "GRPCExactMethodMatching".to_string(),
+        "GRPCRouteHeaderMatching".to_string(),
+        "GRPCRouteListenerHostnameMatching".to_string(),
+        "GRPCRouteNamedRule".to_string(),
+        "GRPCRouteWeight".to_string(),
+        "HTTPRouteHTTPSListenerDetectMisdirectedRequests".to_string(),
+        "HTTPRouteListenerPortMatching".to_string(),
+        "HTTPRouteNamedRule".to_string(),
     ]
 }
 

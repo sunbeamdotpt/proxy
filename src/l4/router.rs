@@ -6,7 +6,9 @@
 //! Matches TCP/UDP/TLS passthrough routes from the compiled L4 configuration and
 //! relays traffic to weighted backends.
 
-use crate::ir::compile::{ir_hostname_matches, CompiledL4Config, CompiledL4Route};
+use crate::ir::compile::{
+    ir_hostname_matches, CompiledL4Config, CompiledL4Route, CompiledListener,
+};
 use crate::ir::{L4Action, L4Match, Protocol, WeightedBackend};
 use crate::l4::context::L4Context;
 use crate::l4::udp::DualStackUdpSocket;
@@ -37,6 +39,7 @@ pub struct Router {
     config: Arc<arc_swap::ArcSwap<CompiledL4Config>>,
     registry: Arc<TlsRegistry>,
     sni_context: Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
+    http_context: Arc<std::sync::Mutex<HashMap<SocketAddr, crate::l4::context::HttpRelayContext>>>,
 }
 
 impl Router {
@@ -51,6 +54,25 @@ impl Router {
             config,
             registry,
             sni_context,
+            http_context: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Create a router with an explicit HTTP relay context map. Used by tests
+    /// and by the binary to share the same map with the HTTP proxy.
+    pub fn new_with_http_context(
+        config: Arc<arc_swap::ArcSwap<CompiledL4Config>>,
+        registry: Arc<TlsRegistry>,
+        sni_context: Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
+        http_context: Arc<
+            std::sync::Mutex<HashMap<SocketAddr, crate::l4::context::HttpRelayContext>>,
+        >,
+    ) -> Self {
+        Self {
+            config,
+            registry,
+            sni_context,
+            http_context,
         }
     }
 
@@ -85,20 +107,28 @@ impl L4Router for Router {
 
         let route = find_route(routes, &ctx, sni.as_deref());
         let Some(route) = route else {
-            tracing::debug!(
+            tracing::info!(
                 listener_id = %ctx.listener_id,
                 protocol = ?ctx.protocol,
+                local_addr = %ctx.local_addr,
                 "l4 router: no matching route"
             );
             return;
         };
+        tracing::info!(
+            listener_id = %ctx.listener_id,
+            protocol = ?ctx.protocol,
+            action = ?route.action,
+            "l4 router: matched route"
+        );
 
         match &route.action {
             L4Action::TcpRelay(backends) | L4Action::TlsPassthrough(backends) => {
                 relay_tcp(&ctx, stream, backends).await;
             }
             L4Action::TlsTerminate(backends) => {
-                if let Err(e) = tls_terminate(&ctx, stream, backends, &self.registry).await {
+                if let Err(e) = tls_terminate(&ctx, stream, backends, &self.registry, &config).await
+                {
                     tracing::debug!(
                         listener_id = %ctx.listener_id,
                         error = %e,
@@ -110,7 +140,16 @@ impl L4Router for Router {
                 tracing::debug!(listener_id = %ctx.listener_id, "l4 router: udp action on tcp stream");
             }
             L4Action::TerminateAndHttp(target) => {
-                if let Err(e) = terminate_and_http(&ctx, stream, target, &self.registry, &self.sni_context).await {
+                if let Err(e) = terminate_and_http(
+                    &ctx,
+                    stream,
+                    target,
+                    &self.registry,
+                    &self.sni_context,
+                    &config,
+                )
+                .await
+                {
                     tracing::debug!(
                         listener_id = %ctx.listener_id,
                         error = %e,
@@ -119,7 +158,7 @@ impl L4Router for Router {
                 }
             }
             L4Action::HttpRelay(target) => {
-                if let Err(e) = http_relay(&ctx, stream, target).await {
+                if let Err(e) = http_relay(&ctx, stream, target, &self.http_context).await {
                     tracing::debug!(
                         listener_id = %ctx.listener_id,
                         error = %e,
@@ -259,19 +298,49 @@ async fn relay_tcp(ctx: &L4Context, mut stream: TcpStream, backends: &[WeightedB
 }
 
 /// Relay a plain HTTP TCP stream to the internal Pingora plaintext address.
-async fn http_relay(_ctx: &L4Context, mut stream: TcpStream, target: &str) -> io::Result<()> {
+async fn http_relay(
+    ctx: &L4Context,
+    mut stream: TcpStream,
+    target: &str,
+    http_context: &Arc<std::sync::Mutex<HashMap<SocketAddr, crate::l4::context::HttpRelayContext>>>,
+) -> io::Result<()> {
     let addr = resolve_backend_addr(target)?;
+    tracing::info!(%addr, "l4 router: http_relay connecting");
     let mut upstream = TcpStream::connect(addr).await?;
+
+    // Tell the internal HTTP proxy which public listener this connection
+    // arrived on, keyed by the source address it will see as the downstream
+    // peer.
+    if let Ok(local_addr) = upstream.local_addr() {
+        http_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                local_addr,
+                crate::l4::context::HttpRelayContext {
+                    listener_id: Arc::clone(&ctx.listener_id),
+                    listener_port: ctx.local_addr.port(),
+                },
+            );
+    }
+
     match copy_bidirectional(&mut stream, &mut upstream).await {
         Ok((down, up)) => {
             tracing::debug!(down, up, %addr, "l4 router: http relay completed");
-            Ok(())
         }
         Err(e) => {
             tracing::debug!(error = %e, %addr, "l4 router: http relay error");
-            Ok(())
         }
     }
+
+    if let Ok(local_addr) = upstream.local_addr() {
+        http_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&local_addr);
+    }
+
+    Ok(())
 }
 
 /// Relay a UDP packet to a selected backend and send the response back.
@@ -326,20 +395,36 @@ async fn relay_udp(
 
 /// Accept TLS using the registry and forward the decrypted stream to a
 /// plaintext HTTP upstream.
+fn find_listener<'a>(
+    config: &'a CompiledL4Config,
+    listener_id: &str,
+) -> Option<&'a CompiledListener> {
+    config
+        .listeners
+        .iter()
+        .find(|l| l.id.as_ref() == listener_id)
+}
+
 async fn terminate_and_http(
     ctx: &L4Context,
     stream: TcpStream,
     target: &Arc<str>,
     registry: &Arc<TlsRegistry>,
     sni_context: &Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
+    l4_config: &CompiledL4Config,
 ) -> io::Result<()> {
     if registry.is_empty() {
         return Err(io::Error::other("tls registry has no certificates"));
     }
-    let config = registry
-        .server_config()
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = find_listener(l4_config, ctx.listener_id.as_ref())
+        .ok_or_else(|| io::Error::other("listener not found for terminate_and_http"))?;
+    let server_config = match &listener.frontend_validation {
+        Some(v) => registry
+            .server_config_with_client_auth(v.ca_bundle_pem.as_ref(), v.allow_insecure_fallback),
+        None => registry.server_config(),
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
     let mut tls_stream = match acceptor.accept(stream).await {
         Ok(s) => s,
         Err(e) => {
@@ -384,14 +469,20 @@ async fn tls_terminate(
     stream: TcpStream,
     backends: &[WeightedBackend],
     registry: &Arc<TlsRegistry>,
+    l4_config: &CompiledL4Config,
 ) -> io::Result<()> {
     if registry.is_empty() {
         return Err(io::Error::other("tls registry has no certificates"));
     }
-    let config = registry
-        .server_config()
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = find_listener(l4_config, ctx.listener_id.as_ref())
+        .ok_or_else(|| io::Error::other("listener not found for tls_terminate"))?;
+    let server_config = match &listener.frontend_validation {
+        Some(v) => registry
+            .server_config_with_client_auth(v.ca_bundle_pem.as_ref(), v.allow_insecure_fallback),
+        None => registry.server_config(),
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
     let mut tls_stream = match acceptor.accept(stream).await {
         Ok(s) => s,
         Err(e) => {
@@ -450,6 +541,7 @@ mod tests {
             weight: 1,
             request_filters: Vec::new(),
             protocol: crate::ir::BackendProtocol::Http,
+            tls: None,
         }
     }
 
@@ -469,10 +561,15 @@ mod tests {
         routes: Vec<CompiledL4Route>,
     ) -> Arc<arc_swap::ArcSwap<CompiledL4Config>> {
         Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
             tcp_routes: routes.clone(),
             udp_routes: routes.clone(),
             tls_routes: routes.clone(),
-            https_routes: routes,
+            https_routes: routes.clone(),
+            http_routes: routes,
             ..Default::default()
         }))
     }
@@ -735,6 +832,55 @@ mod tests {
         assert!(config.load().tcp_routes.is_empty());
     }
 
+    #[tokio::test]
+    async fn http_relay_forwards_request_and_response() {
+        // Minimal upstream that reads an HTTP request and returns a response.
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream_listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .await
+                .unwrap();
+            socket.shutdown().await.ok();
+        });
+
+        let (mut client, inbound) = connected_pair().await;
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Http,
+        );
+        let router = Router::new(
+            config_with_route(L4Action::HttpRelay(
+                upstream_addr.to_string().as_str().into(),
+            )),
+            registry(),
+            sni_context(),
+        );
+
+        let relay = tokio::spawn(async move {
+            router.handle_tcp(ctx, inbound).await;
+        });
+
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(n > 0);
+        assert!(std::str::from_utf8(&buf[..n]).unwrap().contains("200 OK"));
+
+        drop(client);
+        let _ = tokio::join!(upstream_task, relay);
+    }
+
     #[test]
     fn match_route_any_is_true() {
         assert!(match_route(&L4Match::Any, None));
@@ -753,7 +899,22 @@ mod tests {
         );
         drop(client);
         let sni_ctx = sni_context();
-        let result = terminate_and_http(&ctx, inbound, &Arc::from("127.0.0.1:1"), &registry, &sni_ctx).await;
+        let l4_config = CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = terminate_and_http(
+            &ctx,
+            inbound,
+            &Arc::from("127.0.0.1:1"),
+            &registry,
+            &sni_ctx,
+            &l4_config,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -885,6 +1046,8 @@ XgdEFjRXMOS5FmfbOMU3zxVS0l6xeA6kvA9tWDbvAoGADGdEQYBm1xaoQlb2F6TY
                 cert_id: "cert1".into(),
             }),
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         };
         let _ = listener.clone();
         let tls = CompiledTlsConfig::Files {

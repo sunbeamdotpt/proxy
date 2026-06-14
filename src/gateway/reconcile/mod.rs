@@ -7,6 +7,7 @@
 //! cross-references (RefGrant, parentRefs, backendRefs), and produces
 //! a `GatewayView` that is handed off to `translate`.
 
+pub mod backendtlspolicy;
 pub mod endpoints;
 pub mod gateway;
 pub mod gatewayclass;
@@ -41,12 +42,14 @@ pub fn strip_last_transition_time(v: &Value) -> Value {
 }
 
 use crate::gateway::api::{
-    Gateway, GRPCRoute, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
+    BackendTLSPolicy, GRPCRoute, Gateway, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute,
+    TLSRoute, UDPRoute,
 };
 use crate::gateway::model::{GatewayView, ListenerSetState, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::grpcroute::{
-    parse_grpcroute_state, reconcile_grpcroutes_with_context, resolve_backend_refs_async as resolve_grpc_backend_refs_async,
+    parse_grpcroute_state, reconcile_grpcroutes_with_context,
+    resolve_backend_refs_async as resolve_grpc_backend_refs_async,
 };
 use crate::gateway::reconcile::httproute::{
     parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
@@ -169,9 +172,43 @@ pub async fn reconcile_tick_with_leader(
         }
     };
 
-    let gateway_states: Vec<_> = gateway_list.iter().map(build_gateway_state).collect();
+    let backendtlspolicies: Api<BackendTLSPolicy> = Api::all(client.clone());
+    let _backendtlspolicy_list = match backendtlspolicies.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            let is_missing = matches!(&e, kube::Error::Api(s) if s.code == 404);
+            if is_missing {
+                tracing::debug!("BackendTLSPolicy CRD is not installed; treating as empty");
+                kube::core::object::ObjectList {
+                    types: kube::core::TypeMeta::default(),
+                    metadata: kube::core::ListMeta::default(),
+                    items: vec![],
+                }
+            } else {
+                tracing::warn!(error = %e, "failed to list BackendTLSPolicies; skipping tick");
+                return None;
+            }
+        }
+    };
+
+    let mut gateway_states: Vec<_> = gateway_list.iter().map(build_gateway_state).collect();
+    crate::gateway::reconcile::gateway::load_gateway_frontend_validations(
+        client,
+        &gateway_list.items,
+        &mut gateway_states,
+    )
+    .await;
     let grant_states = reconcile_reference_grants(&grant_list.items);
     let grant_index = GrantIndex::new(grant_states.clone());
+
+    let backend_tls_policies =
+        crate::gateway::reconcile::backendtlspolicy::reconcile_backend_tls_policies(
+            client,
+            &crate::gateway::model::ReconciledView::default(),
+            &grant_index,
+            is_leader,
+        )
+        .await;
 
     let namespace_labels: HashMap<String, HashMap<String, String>> = namespace_list
         .iter()
@@ -252,7 +289,11 @@ pub async fn reconcile_tick_with_leader(
     );
 
     let mut grpc_routes = Vec::new();
-    for (raw, reconciled) in grpcroute_list.items.iter().zip(reconciled_grpc_routes.iter()) {
+    for (raw, reconciled) in grpcroute_list
+        .items
+        .iter()
+        .zip(reconciled_grpc_routes.iter())
+    {
         let mut state = parse_grpcroute_state(raw);
         state.parent_refs = reconciled.route_state.parent_refs.clone();
         let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
@@ -269,8 +310,18 @@ pub async fn reconcile_tick_with_leader(
         grpc_routes.push(state);
     }
 
-    crate::gateway::reconcile::endpoints::resolve_service_endpoints(client, &mut http_routes).await;
-    crate::gateway::reconcile::endpoints::resolve_service_endpoints(client, &mut grpc_routes).await;
+    crate::gateway::reconcile::endpoints::resolve_service_endpoints(
+        client,
+        &mut http_routes,
+        &backend_tls_policies,
+    )
+    .await;
+    crate::gateway::reconcile::endpoints::resolve_service_endpoints(
+        client,
+        &mut grpc_routes,
+        &backend_tls_policies,
+    )
+    .await;
 
     let routes: Vec<RouteState> = reconciled_routes
         .into_iter()
@@ -455,6 +506,7 @@ pub async fn reconcile_tick_with_leader(
         udp_routes,
         tls_routes,
         reference_grants,
+        backend_tls_policies,
         namespace_labels: namespace_labels_arc,
         listener_allowed: listener_allowed_arc,
         listener_set_allowed: listener_set_allowed_arc,

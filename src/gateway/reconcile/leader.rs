@@ -377,6 +377,26 @@ fn diff_view(old: &Option<ReconciledView>, new: &ReconciledView) -> Vec<GatewayR
         }
     }
 
+    for policy in &new.backend_tls_policies {
+        let changed = old.as_ref().is_none_or(|o| {
+            !o.backend_tls_policies.iter().any(|p| {
+                p.namespace == policy.namespace
+                    && p.name == policy.name
+                    && p.generation == policy.generation
+            })
+        });
+        if changed {
+            notifies.push(GatewayResourceNotify {
+                topic_version: 1,
+                kind: "BackendTLSPolicy".into(),
+                namespace: policy.namespace.to_string(),
+                name: policy.name.to_string(),
+                generation: policy.generation,
+                timestamp: now,
+            });
+        }
+    }
+
     notifies
 }
 
@@ -396,7 +416,9 @@ mod tests {
                 port: 80,
                 hostname: None,
                 tls_mode: None,
+                frontend_validation: None,
             }],
+            backend_client_cert_id: None,
         }
     }
 

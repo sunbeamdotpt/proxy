@@ -481,6 +481,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
             protocol: ir::Protocol::Https,
             tls,
             redirect_http_to_https: false,
+            frontend_validation: None,
         });
         // Terminate TLS for all traffic on the public HTTPS listener and
         // forward the decrypted plaintext HTTP to Pingora.  Pingora still
@@ -498,12 +499,22 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     // 4b. Spawn the L4 socket manager and wire it to RouteManager updates.
     let l4_config = route_manager.l4_config();
-    let sni_context: Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let l4_router = Arc::new(sunbeam_proxy::l4::router::Router::new(
+    let sni_context: Arc<
+        std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let http_context: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                std::net::SocketAddr,
+                sunbeam_proxy::l4::context::HttpRelayContext,
+            >,
+        >,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let l4_router = Arc::new(sunbeam_proxy::l4::router::Router::new_with_http_context(
         Arc::clone(&l4_config),
         Arc::clone(&tls_registry),
         Arc::clone(&sni_context),
+        Arc::clone(&http_context),
     ));
     let l4_manager = sunbeam_proxy::l4::manager::spawn_with_config(
         Arc::clone(&tls_registry),
@@ -554,6 +565,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
             .map(|s| s.observe_only)
             .unwrap_or(false),
         sni_context,
+        http_context,
+        tls_registry: Some(Arc::clone(&tls_registry)),
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
     if let Some(app) = svc.app_logic_mut() {

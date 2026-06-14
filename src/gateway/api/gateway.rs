@@ -38,6 +38,9 @@ pub struct GatewaySpec {
     /// instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infrastructure: Option<serde_json::Value>,
+    /// TLS specifies frontend and backend TLS configuration for the Gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

@@ -99,6 +99,18 @@ impl From<&gw::WeightedBackend> for ir::WeightedBackend {
                 .flat_map(route_filter_to_request_filters)
                 .collect(),
             protocol: value.protocol,
+            tls: value.tls.as_ref().map(|t| ir::BackendTlsConfig {
+                sni: Arc::clone(&t.hostname),
+                verify_hostname: true,
+                alternative_cn: t.subject_alt_names.first().cloned(),
+                client_cert_id: None,
+                ca_bundle_pem: if t.ca_bundle_pem.is_empty() {
+                    None
+                } else {
+                    Some(Arc::clone(&t.ca_bundle_pem))
+                },
+                subject_alt_names: t.subject_alt_names.clone(),
+            }),
         }
     }
 }
@@ -174,6 +186,7 @@ mod tests {
             weight: 3,
             protocol: crate::ir::BackendProtocol::Http,
             filters: vec![],
+            tls: None,
         };
         let ir_wb = ir::WeightedBackend::from(&wb);
         assert_eq!(ir_wb.backend.as_ref(), "http://svc:8080");
@@ -196,6 +209,7 @@ mod tests {
                     value: "yes".into(),
                 },
             ],
+            tls: None,
         };
         let ir_wb = ir::WeightedBackend::from(&wb);
         assert_eq!(ir_wb.request_filters.len(), 1);

@@ -8,8 +8,9 @@
 //! `ArcSwap`, so consumers can reload certs without restarting.
 
 use arc_swap::ArcSwap;
+use pingora_core::utils::tls::CertKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::RootCertStore;
 use std::collections::HashMap;
@@ -58,6 +59,8 @@ pub struct CertStore {
     pub trust_roots: RootCertStore,
     /// Roots used to validate client certificates for mTLS.
     pub client_auth_roots: RootCertStore,
+    /// Client certificates keyed by identifier, used for upstream mTLS.
+    pub client_certs: HashMap<Arc<str>, Arc<CertKey>>,
 }
 
 impl Default for CertStore {
@@ -68,6 +71,7 @@ impl Default for CertStore {
             wildcard: Vec::new(),
             trust_roots: RootCertStore::empty(),
             client_auth_roots: RootCertStore::empty(),
+            client_certs: HashMap::new(),
         }
     }
 }
@@ -133,16 +137,64 @@ impl TlsRegistry {
     /// certificate resolution. The caller must ensure the rustls crypto
     /// provider is installed.
     pub fn server_config(&self) -> anyhow::Result<rustls::ServerConfig> {
+        self.server_config_inner(None)
+    }
+
+    /// Build a `rustls::ServerConfig` with optional frontend client-certificate
+    /// validation. The `ca_bundle_pem` is a PEM-encoded CA certificate bundle;
+    /// when `allow_insecure_fallback` is true, clients without a certificate are
+    /// still allowed to connect.
+    pub fn server_config_with_client_auth(
+        &self,
+        ca_bundle_pem: &str,
+        allow_insecure_fallback: bool,
+    ) -> anyhow::Result<rustls::ServerConfig> {
+        self.server_config_inner(Some((ca_bundle_pem, allow_insecure_fallback)))
+    }
+
+    fn server_config_inner(
+        &self,
+        client_auth: Option<(&str, bool)>,
+    ) -> anyhow::Result<rustls::ServerConfig> {
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no rustls crypto provider installed"))?;
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        let builder = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| anyhow::anyhow!("protocol versions: {e}"))?
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(self.clone()));
+            .map_err(|e| anyhow::anyhow!("protocol versions: {e}"))?;
+
+        let mut config = if let Some((ca_bundle_pem, allow_insecure_fallback)) = client_auth {
+            let roots = root_store_from_pem(ca_bundle_pem.as_bytes())
+                .map_err(|e| anyhow::anyhow!("invalid client-auth CA bundle: {e}"))?;
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+            let verifier = if allow_insecure_fallback {
+                verifier.allow_unauthenticated()
+            } else {
+                verifier
+            };
+            let verifier = verifier
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?;
+            builder
+                .with_client_cert_verifier(verifier)
+                .with_cert_resolver(Arc::new(self.clone()))
+        } else {
+            builder
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(self.clone()))
+        };
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(config)
+    }
+
+    /// Look up a client certificate by identifier.
+    pub fn client_cert(&self, id: &str) -> Option<Arc<CertKey>> {
+        self.store.load().client_certs.get(id).cloned()
+    }
+
+    /// Return true if the registry has a client certificate for the given id.
+    pub fn has_client_cert(&self, id: &str) -> bool {
+        self.store.load().client_certs.contains_key(id)
     }
 }
 
@@ -257,6 +309,33 @@ pub fn root_store_from_pem(pem: &[u8]) -> anyhow::Result<RootCertStore> {
             .map_err(|e| anyhow::anyhow!("invalid root cert: {e}"))?;
     }
     Ok(store)
+}
+
+/// Load a `CertKey` (Pingora upstream client certificate) from PEM data.
+pub fn cert_key_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<CertKey> {
+    let certs: Vec<Vec<u8>> = parse_cert_chain(cert_pem)?
+        .into_iter()
+        .map(|c| c.into_owned().as_ref().to_vec())
+        .collect();
+    let key = parse_private_key(key_pem)?;
+    Ok(CertKey::new(certs, key.secret_der().to_vec()))
+}
+
+/// Load a `CertKey` from a Kubernetes Secret's `tls.crt` / `tls.key` data.
+pub fn cert_key_from_secret(
+    secret: &k8s_openapi::api::core::v1::Secret,
+) -> anyhow::Result<CertKey> {
+    let data = secret
+        .data
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret has no data"))?;
+    let cert = data
+        .get("tls.crt")
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret missing tls.crt"))?;
+    let key = data
+        .get("tls.key")
+        .ok_or_else(|| anyhow::anyhow!("TLS Secret missing tls.key"))?;
+    cert_key_from_pem(&cert.0, &key.0)
 }
 
 /// Load a `CertifiedKey` from a Kubernetes Secret's `tls.crt` / `tls.key` data.

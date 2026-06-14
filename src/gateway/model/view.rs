@@ -34,6 +34,7 @@ pub struct ReconciledView {
     pub udp_routes: Vec<UDPRouteState>,
     pub tls_routes: Vec<TLSRouteState>,
     pub reference_grants: Vec<ReferenceGrantState>,
+    pub backend_tls_policies: Vec<BackendTLSPolicyState>,
     /// Labels on each namespace, used by `allowedRoutes.namespaces` selectors.
     pub namespace_labels: NamespaceLabels,
     /// Allowed routes configured on each Gateway listener, keyed by
@@ -44,6 +45,15 @@ pub struct ReconciledView {
     pub listener_set_allowed: ListenerAllowedMap,
 }
 
+/// Frontend client-certificate validation configuration attached to a listener.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FrontendValidation {
+    /// PEM-encoded CA certificate bundle used to validate client certificates.
+    pub ca_bundle_pem: Arc<str>,
+    /// When true, clients without a valid certificate are still allowed.
+    pub allow_insecure_fallback: bool,
+}
+
 /// Stub for the reconciled state of a single Gateway resource.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GatewayState {
@@ -51,6 +61,8 @@ pub struct GatewayState {
     pub name: Arc<str>,
     pub generation: i64,
     pub listeners: Vec<ListenerState>,
+    /// Optional identifier for a Gateway-wide backend client certificate.
+    pub backend_client_cert_id: Option<Arc<str>>,
 }
 
 /// Alias used by the listener integration module.
@@ -78,6 +90,8 @@ pub struct ListenerState {
     pub hostname: Option<Arc<str>>,
     /// TLS termination mode. `None` for plain HTTP/TCP/UDP listeners.
     pub tls_mode: Option<TlsMode>,
+    /// Optional frontend client-certificate validation configuration.
+    pub frontend_validation: Option<FrontendValidation>,
 }
 
 /// Stub for the reconciled state of a single HTTPRoute / TLSRoute /
@@ -178,4 +192,49 @@ pub struct GrantSubject {
     pub kind: Arc<str>,
     pub namespace: Option<Arc<str>>,
     pub name: Option<Arc<str>>,
+}
+
+/// Reconciled state of a single `BackendTLSPolicy` resource.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BackendTLSPolicyState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    pub created_at: i64,
+    pub target: ServiceTargetRef,
+    pub hostname: Arc<str>,
+    pub ca_certificate_refs: Vec<CaCertificateRef>,
+    pub subject_alt_names: Vec<SubjectAltName>,
+    pub accepted: bool,
+    pub accepted_reason: Arc<str>,
+    pub accepted_message: Arc<str>,
+    pub resolved_refs: bool,
+    pub resolved_refs_reason: Arc<str>,
+    pub resolved_refs_message: Arc<str>,
+    pub programmed: bool,
+}
+
+/// Target Service reference extracted from a `BackendTLSPolicy` `targetRef`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ServiceTargetRef {
+    pub group: Arc<str>,
+    pub kind: Arc<str>,
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub section_name: Option<Arc<str>>,
+}
+
+/// Normalized CA certificate reference from a `BackendTLSPolicy`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CaCertificateRef {
+    pub group: Arc<str>,
+    pub kind: Arc<str>,
+    pub name: Arc<str>,
+}
+
+/// Normalized SubjectAltName entry from a `BackendTLSPolicy`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubjectAltName {
+    pub r#type: Arc<str>,
+    pub value: Arc<str>,
 }

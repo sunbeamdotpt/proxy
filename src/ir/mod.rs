@@ -27,7 +27,7 @@ pub struct RouteTable {
 }
 
 /// A listener that the proxy binds to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ListenerConfig {
     /// Listener identifier.
     pub id: Arc<str>,
@@ -39,12 +39,24 @@ pub struct ListenerConfig {
     pub tls: Option<TlsConfig>,
     /// When true, plain-HTTP requests on this listener are redirected to HTTPS.
     pub redirect_http_to_https: bool,
+    /// Optional frontend client-certificate validation configuration (mTLS).
+    pub frontend_validation: Option<FrontendValidation>,
+}
+
+/// Frontend client-certificate validation configuration for a listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendValidation {
+    /// PEM-encoded CA certificate bundle used to validate client certificates.
+    pub ca_bundle_pem: Arc<str>,
+    /// When true, clients without a valid certificate are still allowed.
+    pub allow_insecure_fallback: bool,
 }
 
 /// Transport protocol for a listener.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Protocol {
     /// Plain HTTP.
+    #[default]
     Http,
     /// TLS-terminated HTTPS (TLS terminates in the L4 manager, then HTTP to Pingora).
     Https,
@@ -196,7 +208,7 @@ pub enum Action {
 }
 
 /// Forward the request to an upstream backend.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RouteAction {
     /// Upstream backends with traffic-split weights.
     pub backends: Vec<WeightedBackend>,
@@ -220,6 +232,8 @@ pub struct RouteAction {
     pub websocket: bool,
     /// When true, disable the proxy-level HTTP→HTTPS redirect for this route.
     pub disable_https_redirect: bool,
+    /// Optional identifier for a Gateway-wide backend client certificate.
+    pub client_cert_id: Option<Arc<str>>,
 }
 
 /// A fractional value used for probabilistic request mirroring.
@@ -427,6 +441,30 @@ pub struct WeightedBackend {
     pub request_filters: Vec<RequestFilter>,
     /// Protocol to use when communicating with the backend.
     pub protocol: BackendProtocol,
+    /// TLS configuration for HTTPS / secure WebSocket backends.
+    pub tls: Option<BackendTlsConfig>,
+}
+
+/// TLS settings for an upstream backend.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BackendTlsConfig {
+    /// SNI to send during the TLS handshake and to verify against the server
+    /// certificate unless `verify_hostname` is disabled.
+    pub sni: Arc<str>,
+    /// When false, the server certificate is verified but the hostname/SNI
+    /// match is skipped.
+    pub verify_hostname: bool,
+    /// Optional alternative common name/Subject Alternative Name to use for
+    /// certificate validation instead of the SNI.
+    pub alternative_cn: Option<Arc<str>>,
+    /// Optional identifier used to look up a client certificate for mutual TLS.
+    pub client_cert_id: Option<Arc<str>>,
+    /// PEM-encoded CA certificate bundle used to verify the backend certificate.
+    /// Currently stored for completeness; per-peer custom CA roots require
+    /// rustls configuration changes that are not yet implemented.
+    pub ca_bundle_pem: Option<Arc<str>>,
+    /// Subject Alternative Names allowed on the backend certificate.
+    pub subject_alt_names: Vec<Arc<str>>,
 }
 
 /// Application protocol to use for a backend connection.
@@ -437,6 +475,8 @@ pub enum BackendProtocol {
     Http,
     /// HTTP/2 prior knowledge without TLS (H2C).
     H2c,
+    /// HTTPS (TLS with optional mTLS and custom validation).
+    Https,
     /// WebSocket over cleartext.
     WebSocket,
     /// WebSocket over TLS.
@@ -461,7 +501,7 @@ pub struct CorsConfig {
 }
 
 /// Cache policy for a route.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CachePolicy {
     /// Whether caching is enabled.
     pub enabled: bool,
@@ -474,7 +514,7 @@ pub struct CachePolicy {
 }
 
 /// Body find/replace rule.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BodyRewrite {
     /// String to find in the response body.
     pub find: Arc<str>,
@@ -485,7 +525,7 @@ pub struct BodyRewrite {
 }
 
 /// Auth subrequest configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct AuthConfig {
     /// URL of the auth subrequest endpoint.
     pub url: Arc<str>,
@@ -538,6 +578,8 @@ mod tests {
             protocol: Protocol::Http,
             tls: None,
             redirect_http_to_https: false,
+            frontend_validation: None,
+
         });
         rt.acme_routes.insert("/challenge".into(), "backend".into());
         rt.l4_routes.push(L4Route {
@@ -563,6 +605,8 @@ mod tests {
                 key_path: "/etc/key.pem".into(),
             }),
             redirect_http_to_https: true,
+            frontend_validation: None,
+
         };
         let cloned = lc.clone();
         assert_eq!(lc, cloned);
@@ -612,6 +656,7 @@ mod tests {
                 weight: 1,
                 protocol: BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }]),
         };
         assert_eq!(route.listener_id.as_ref(), "l1");
@@ -729,6 +774,7 @@ mod tests {
                 weight: 1,
                 protocol: BackendProtocol::Http,
                 request_filters: vec![],
+                tls: None,
             }],
             timeout: None,
             request_filters: vec![],
@@ -740,6 +786,8 @@ mod tests {
             auth: None,
             disable_https_redirect: false,
             websocket: false,
+            client_cert_id: None,
+
         });
         let redirect = Action::Redirect(RedirectAction {
             status_code: 302,
@@ -781,12 +829,14 @@ mod tests {
                     weight: 3,
                     protocol: BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 },
                 WeightedBackend {
                     backend: "b".into(),
                     weight: 7,
                     protocol: BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 },
             ],
             timeout: Some(Duration::from_secs(30)),
@@ -823,6 +873,8 @@ mod tests {
             }),
             websocket: true,
             disable_https_redirect: false,
+            client_cert_id: None,
+
         };
         let cloned = ra.clone();
         assert_eq!(ra, cloned);
@@ -1021,12 +1073,14 @@ mod tests {
             weight: 5,
             protocol: BackendProtocol::Http,
             request_filters: vec![],
+            tls: None,
         };
         let b = WeightedBackend {
             backend: "http://a".into(),
             weight: 5,
             protocol: BackendProtocol::Http,
             request_filters: vec![],
+            tls: None,
         };
         assert_eq!(a, b);
         assert_eq!(hash_one(&a), hash_one(&b));

@@ -8496,6 +8496,7 @@ dependencies = [
  "gateway-api",
  "hex",
  "http",
+ "http-body-util",
  "iroh",
  "iroh-gossip",
  "k8s-openapi",

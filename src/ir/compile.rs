@@ -53,7 +53,7 @@ pub struct CompiledL4Config {
 }
 
 /// A compiled listener.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompiledListener {
     /// Listener identifier.
     pub id: Arc<str>,
@@ -65,6 +65,17 @@ pub struct CompiledListener {
     pub tls: Option<CompiledTlsConfig>,
     /// When true, plain-HTTP requests on this listener are redirected to HTTPS.
     pub redirect_http_to_https: bool,
+    /// Optional frontend client-certificate validation configuration (mTLS).
+    pub frontend_validation: Option<CompiledFrontendValidation>,
+}
+
+/// Compiled frontend client-certificate validation configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompiledFrontendValidation {
+    /// PEM-encoded CA certificate bundle used to validate client certificates.
+    pub ca_bundle_pem: Arc<str>,
+    /// When true, clients without a valid certificate are still allowed.
+    pub allow_insecure_fallback: bool,
 }
 
 /// Compiled TLS configuration for a listener.
@@ -125,7 +136,7 @@ pub struct HostNode {
 ///
 /// The compiler flattens all mutations into phase-specific ordered lists so the
 /// proxy is a dumb executor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompiledPlan {
     /// Precedence score (higher = more specific).
     pub precedence: u64,
@@ -155,10 +166,12 @@ pub struct CompiledPlan {
     pub cache: Option<CachePolicy>,
     /// WebSocket forwarding flag.
     pub websocket: bool,
+    /// Optional identifier for a Gateway-wide backend client certificate.
+    pub client_cert_id: Option<Arc<str>>,
 }
 
 /// Terminal actions that short-circuit before upstream.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TerminalAction {
     /// HTTP redirect response.
     Redirect(RedirectAction),
@@ -172,11 +185,12 @@ pub enum TerminalAction {
         body: Option<Arc<str>>,
     },
     /// 404 Not Found response.
+    #[default]
     NotFound,
 }
 
 /// Upstream selection executed in `upstream_peer`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UpstreamAction {
     /// Weighted upstream backends.
     pub backends: Vec<WeightedBackend>,
@@ -201,6 +215,12 @@ pub enum RequestStage {
     StaticFiles(StaticFileAction),
     /// Terminal action (redirect, fixed response, 404).
     Terminal(TerminalAction),
+}
+
+impl Default for RequestStage {
+    fn default() -> Self {
+        RequestStage::Terminal(TerminalAction::default())
+    }
 }
 
 /// Mutations applied in `upstream_request_filter`.
@@ -438,6 +458,10 @@ impl CompiledL4Config {
                 protocol: l.protocol,
                 tls,
                 redirect_http_to_https: l.redirect_http_to_https,
+                frontend_validation: l.frontend_validation.map(|v| CompiledFrontendValidation {
+                    ca_bundle_pem: v.ca_bundle_pem,
+                    allow_insecure_fallback: v.allow_insecure_fallback,
+                }),
             });
         }
 
@@ -498,6 +522,7 @@ impl CompiledL4Config {
                 };
                 let tls = group.iter().find_map(|l| l.tls.clone());
                 let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
+                let frontend_validation = group.iter().find_map(|l| l.frontend_validation.clone());
                 for l in &group {
                     listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_key));
                 }
@@ -507,6 +532,7 @@ impl CompiledL4Config {
                     protocol,
                     tls,
                     redirect_http_to_https,
+                    frontend_validation,
                 });
             }
         }
@@ -740,6 +766,7 @@ fn compile_plan(
     let mut upstream: Option<UpstreamAction> = None;
     let mut cache: Option<CachePolicy> = None;
     let mut websocket = false;
+    let mut client_cert_id: Option<Arc<str>> = None;
 
     match &rule.action {
         Action::Route(ra) => {
@@ -799,6 +826,7 @@ fn compile_plan(
                 mirror_fractions: ra.mirror_fractions.clone(),
                 backend_request_mutations,
             });
+            client_cert_id = ra.client_cert_id.clone();
         }
         Action::Redirect(redirect) => {
             request_stages.push(RequestStage::Terminal(TerminalAction::Redirect(
@@ -834,6 +862,7 @@ fn compile_plan(
         body_rewrites,
         cache,
         websocket,
+        client_cert_id,
     })
 }
 
@@ -1441,8 +1470,8 @@ mod tests {
                 backend: "http://svc".into(),
                 weight: 1,
                 protocol: BackendProtocol::Http,
-
                 request_filters: vec![],
+                tls: None,
             }],
             timeout: None,
             request_filters: vec![],
@@ -1454,6 +1483,8 @@ mod tests {
             auth: None,
             disable_https_redirect: false,
             websocket: false,
+            client_cert_id: None,
+
         }
     }
 
@@ -1476,7 +1507,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1516,7 +1547,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1554,7 +1585,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Any,
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1597,7 +1628,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1617,7 +1648,14 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("example.com", 0, "/api/v1", "GET", &Default::default(), None)
+            .lookup(
+                "example.com",
+                0,
+                "/api/v1",
+                "GET",
+                &Default::default(),
+                None
+            )
             .is_some());
         assert!(compiled
             .lookup("example.com", 0, "/other", "GET", &Default::default(), None)
@@ -1642,7 +1680,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1657,7 +1695,8 @@ mod tests {
         for i in 0..10 {
             assert!(compiled
                 .lookup(
-                    "example.com", 0,
+                    "example.com",
+                    0,
                     "/api",
                     &format!("METH{}", i),
                     &Default::default(),
@@ -1690,7 +1729,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1734,7 +1773,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1749,7 +1788,8 @@ mod tests {
         for i in 0..10 {
             assert!(compiled
                 .lookup(
-                    "example.com", 0,
+                    "example.com",
+                    0,
                     "/api",
                     "GET",
                     &Default::default(),
@@ -1765,7 +1805,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
-            listener_port: None,
+                listener_port: None,
                 hostname: HostnameMatch::Exact("app.example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1880,7 +1920,8 @@ mod tests {
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
             .lookup(
-                "multiple.prefixes.bar.com", 0,
+                "multiple.prefixes.bar.com",
+                0,
                 "/",
                 "GET",
                 &Default::default(),
@@ -2022,9 +2063,10 @@ mod tests {
                             backend: "root".into(),
                             weight: 1,
                             protocol: BackendProtocol::Http,
-
                             request_filters: vec![],
+                            tls: None,
                         }],
+                        client_cert_id: None,
                         ..simple_route_action()
                     }),
                     rule_order: 0,
@@ -2039,9 +2081,10 @@ mod tests {
                             backend: "api".into(),
                             weight: 1,
                             protocol: BackendProtocol::Http,
-
                             request_filters: vec![],
+                            tls: None,
                         }],
+                        client_cert_id: None,
                         ..simple_route_action()
                     }),
                     rule_order: 1,
@@ -2083,7 +2126,9 @@ mod tests {
                         weight: 1,
                         protocol: BackendProtocol::Http,
                         request_filters: vec![],
+                        tls: None,
                     }],
+                    client_cert_id: None,
                     ..simple_route_action()
                 }),
                 rule_order: i,
@@ -2101,7 +2146,9 @@ mod tests {
                     weight: 1,
                     protocol: BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 }],
+                client_cert_id: None,
                 ..simple_route_action()
             }),
             rule_order: 100,
@@ -2234,9 +2281,10 @@ mod tests {
                         backend: "v1".into(),
                         weight: 1,
                         protocol: BackendProtocol::Http,
-
                         request_filters: vec![],
+                        tls: None,
                     }],
+                    client_cert_id: None,
                     ..simple_route_action()
                 }),
                 rule_order: 0,
@@ -2285,6 +2333,7 @@ mod tests {
                         protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
+                        tls: None,
                     }],
                     timeout: None,
                     request_filters: vec![],
@@ -2300,6 +2349,8 @@ mod tests {
                     auth: None,
                     disable_https_redirect: false,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
             }],
@@ -2339,6 +2390,7 @@ mod tests {
                         protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
+                        tls: None,
                     }],
                     timeout: None,
                     request_filters: vec![],
@@ -2357,6 +2409,8 @@ mod tests {
                     auth: None,
                     disable_https_redirect: false,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
             }],
@@ -2399,6 +2453,7 @@ mod tests {
                         protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
+                        tls: None,
                     }],
                     timeout: None,
                     request_filters: vec![
@@ -2416,6 +2471,8 @@ mod tests {
                     auth: None,
                     disable_https_redirect: false,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
             }],
@@ -2463,6 +2520,7 @@ mod tests {
                                 name: "X-Backend".into(),
                                 value: "a".into(),
                             }],
+                            tls: None,
                         },
                         WeightedBackend {
                             backend: "svc-b".into(),
@@ -2472,6 +2530,7 @@ mod tests {
                                 name: "X-Backend".into(),
                                 value: "b".into(),
                             }],
+                            tls: None,
                         },
                     ],
                     timeout: None,
@@ -2484,6 +2543,8 @@ mod tests {
                     auth: None,
                     disable_https_redirect: false,
                     websocket: false,
+                    client_cert_id: None,
+
                 }),
                 rule_order: 0,
             }],
@@ -2532,6 +2593,8 @@ mod tests {
                 protocol: Protocol::Tcp,
                 tls: None,
                 redirect_http_to_https: false,
+                frontend_validation: None,
+
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2544,6 +2607,7 @@ mod tests {
                     weight: 1,
                     protocol: BackendProtocol::Http,
                     request_filters: vec![],
+                    tls: None,
                 }]),
             }],
             tls_certs: vec![],
@@ -2566,6 +2630,8 @@ mod tests {
                     protocol: Protocol::Udp,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
                 ListenerConfig {
                     id: "tls-l".into(),
@@ -2575,6 +2641,8 @@ mod tests {
                         cert_id: "tls-cert".into(),
                     }),
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
             ],
             hosts: vec![],
@@ -2614,6 +2682,8 @@ mod tests {
                 protocol: Protocol::Https,
                 tls: None,
                 redirect_http_to_https: false,
+                frontend_validation: None,
+
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2636,6 +2706,8 @@ mod tests {
                     key_path: "/k".into(),
                 }),
                 redirect_http_to_https: true,
+                frontend_validation: None,
+
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2684,6 +2756,8 @@ mod tests {
                         cert_id: "term-cert".into(),
                     }),
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
                 ListenerConfig {
                     id: "tls-pass".into(),
@@ -2693,6 +2767,8 @@ mod tests {
                         cert_id: "pass-cert".into(),
                     }),
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
             ],
             hosts: vec![],
@@ -2748,6 +2824,8 @@ mod tests {
                 protocol: Protocol::Http,
                 tls: None,
                 redirect_http_to_https: false,
+                frontend_validation: None,
+
             }],
             l4_routes: vec![L4Route {
                 listener_id: "gw/http".into(),
@@ -2761,10 +2839,7 @@ mod tests {
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.listeners[0].protocol, Protocol::Http);
         assert_eq!(cfg.http_routes.len(), 1);
-        assert!(matches!(
-            cfg.http_routes[0].action,
-            L4Action::HttpRelay(_)
-        ));
+        assert!(matches!(cfg.http_routes[0].action, L4Action::HttpRelay(_)));
     }
 
     #[test]
@@ -2777,6 +2852,8 @@ mod tests {
                     protocol: Protocol::Http,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
                 ListenerConfig {
                     id: "gw-b/http".into(),
@@ -2784,6 +2861,8 @@ mod tests {
                     protocol: Protocol::Http,
                     tls: None,
                     redirect_http_to_https: false,
+                    frontend_validation: None,
+
                 },
             ],
             l4_routes: vec![

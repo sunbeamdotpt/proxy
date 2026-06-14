@@ -786,16 +786,19 @@ mod tests {
                         port: 80,
                         hostname: None,
                         tls_mode: None,
-                    },
+        frontend_validation: None,
+    },
                     ListenerState {
                         name: arc("https"),
                         protocol: arc("HTTPS"),
                         port: 443,
                         hostname: None,
                         tls_mode: None,
-                    },
+        frontend_validation: None,
+    },
                 ],
-            }],
+        backend_client_cert_id: None,
+    }],
             routes: vec![RouteState {
                 namespace: arc("default"),
                 name: arc("route-a"),
@@ -808,7 +811,8 @@ mod tests {
                     namespace: Some(arc("default")),
                     name: arc("gw-1"),
                     section_name: Some(arc("http")),
-            port: None,}],
+                    port: None,
+                }],
             }],
             http_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
@@ -998,7 +1002,8 @@ mod tests {
             namespace: None,
             name: arc("gw-1"),
             section_name: None,
-            port: None,});
+            port: None,
+        });
         let mut b = a.clone();
         b.http_routes[0].parent_refs[0].name = arc("gw-2");
         assert_ne!(compute_digest(&a), compute_digest(&b));
@@ -1022,6 +1027,7 @@ mod tests {
                 weight: 1,
                 protocol: crate::ir::BackendProtocol::Http,
                 filters: vec![],
+                tls: None,
             }],
             filters: vec![],
         });
@@ -1228,12 +1234,14 @@ mod tests {
                         weight: 2,
                         protocol: crate::ir::BackendProtocol::Http,
                         filters: vec![],
+                        tls: None,
                     },
                     WeightedBackend {
                         backend: arc("a:80"),
                         weight: 1,
                         protocol: crate::ir::BackendProtocol::Http,
                         filters: vec![],
+                        tls: None,
                     },
                 ],
                 filters: vec![],
