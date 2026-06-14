@@ -982,6 +982,7 @@ fn translate_l4_routes(view: &GatewayView) -> (Vec<ir::ListenerConfig>, Vec<ir::
     // that fall within the listener's hostname so that unrelated TLS traffic is
     // not terminated by this listener.
     const HTTPS_HTTP_TARGET: &str = "127.0.0.1:10443";
+    const HTTP_TARGET: &str = "127.0.0.1:10443";
     for gateway in &view.gateways {
         for listener in &gateway.listeners {
             if listener.protocol.as_ref() != "HTTPS" {
@@ -1009,6 +1010,37 @@ fn translate_l4_routes(view: &GatewayView) -> (Vec<ir::ListenerConfig>, Vec<ir::
                 listener_hostname,
                 match_,
                 action: ir::L4Action::TerminateAndHttp(Arc::from(HTTPS_HTTP_TARGET)),
+            });
+        }
+    }
+
+    // Plain HTTP listeners are bound by the L4 manager and relayed to the
+    // internal Pingora plaintext service. This supports Gateway API HTTP
+    // listeners on arbitrary ports without requiring each port to be listed in
+    // the static config. HTTP has no SNI, so every connection on the listener
+    // is forwarded; host matching happens inside the HTTP proxy.
+    for gateway in &view.gateways {
+        for listener in &gateway.listeners {
+            if listener.protocol.as_ref() != "HTTP" {
+                continue;
+            }
+            add_l4_listener(&mut listeners, gateway, listener);
+            let id: Arc<str> = Arc::from(format!(
+                "{}/{}/{}",
+                gateway.namespace.as_ref(),
+                gateway.name.as_ref(),
+                listener.name.as_ref()
+            ));
+            let listener_hostname = listener
+                .hostname
+                .as_deref()
+                .map(|h| to_ir_hostname(&parse_listener_hostname(h)))
+                .unwrap_or(ir::HostnameMatch::Any);
+            l4_routes.push(ir::L4Route {
+                listener_id: id,
+                listener_hostname,
+                match_: ir::L4Match::Any,
+                action: ir::L4Action::HttpRelay(Arc::from(HTTP_TARGET)),
             });
         }
     }
@@ -4141,6 +4173,42 @@ mod tests {
         assert!(routes
             .iter()
             .any(|r| matches!(r.match_, ir::L4Match::Sni(_))));
+    }
+
+    fn http_gateway() -> GatewayState {
+        GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw-http"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("http"),
+                protocol: Arc::from("HTTP"),
+                port: 8080,
+                hostname: Some(Arc::from("foo.com")),
+                tls_mode: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn translate_l4_routes_relays_http_with_any_match() {
+        let view = GatewayView {
+            listener_sets: vec![],
+            gateways: vec![http_gateway()],
+            routes: vec![],
+            http_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            tls_routes: vec![],
+            reference_grants: vec![],
+            ..Default::default()
+        };
+        let (listeners, routes) = translate_l4_routes(&view);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].protocol, ir::Protocol::Http);
+        assert_eq!(routes.len(), 1);
+        assert!(matches!(routes[0].action, ir::L4Action::HttpRelay(_)));
+        assert_eq!(routes[0].match_, ir::L4Match::Any);
     }
 
     #[test]

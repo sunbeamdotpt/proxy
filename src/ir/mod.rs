@@ -125,6 +125,8 @@ pub enum L4Action {
     TlsTerminate(Vec<WeightedBackend>),
     /// Terminate TLS and forward plaintext HTTP to the given upstream address.
     TerminateAndHttp(Arc<str>),
+    /// Forward raw plain HTTP to the given upstream address.
+    HttpRelay(Arc<str>),
 }
 
 /// TLS certificate configuration referenced by id.

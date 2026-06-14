@@ -48,6 +48,8 @@ pub struct CompiledL4Config {
     pub tls_routes: Vec<CompiledL4Route>,
     /// HTTPS termination routes, ordered by precedence.
     pub https_routes: Vec<CompiledL4Route>,
+    /// Plain HTTP relay routes, ordered by precedence.
+    pub http_routes: Vec<CompiledL4Route>,
 }
 
 /// A compiled listener.
@@ -514,6 +516,7 @@ impl CompiledL4Config {
         let mut udp_routes = Vec::new();
         let mut tls_routes = Vec::new();
         let mut https_routes = Vec::new();
+        let mut http_routes = Vec::new();
 
         for route in ir.l4_routes {
             let listener_id = listener_id_map
@@ -534,6 +537,7 @@ impl CompiledL4Config {
                     tls_routes.push(compiled)
                 }
                 L4Action::TerminateAndHttp(_) => https_routes.push(compiled),
+                L4Action::HttpRelay(_) => http_routes.push(compiled),
             }
         }
 
@@ -543,6 +547,7 @@ impl CompiledL4Config {
             udp_routes,
             tls_routes,
             https_routes,
+            http_routes,
         })
     }
 

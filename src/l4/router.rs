@@ -118,6 +118,15 @@ impl L4Router for Router {
                     );
                 }
             }
+            L4Action::HttpRelay(target) => {
+                if let Err(e) = http_relay(&ctx, stream, target).await {
+                    tracing::debug!(
+                        listener_id = %ctx.listener_id,
+                        error = %e,
+                        "l4 router: http relay failed"
+                    );
+                }
+            }
         }
     }
 
@@ -159,7 +168,7 @@ fn routes_for_protocol(config: &CompiledL4Config, protocol: Protocol) -> &[Compi
         Protocol::Udp => &config.udp_routes,
         Protocol::Tls => &config.tls_routes,
         Protocol::Https => &config.https_routes,
-        Protocol::Http => &[],
+        Protocol::Http => &config.http_routes,
     }
 }
 
@@ -245,6 +254,22 @@ async fn relay_tcp(ctx: &L4Context, mut stream: TcpStream, backends: &[WeightedB
         }
         Err(e) => {
             tracing::debug!(error = %e, %addr, "l4 router: tcp relay error");
+        }
+    }
+}
+
+/// Relay a plain HTTP TCP stream to the internal Pingora plaintext address.
+async fn http_relay(_ctx: &L4Context, mut stream: TcpStream, target: &str) -> io::Result<()> {
+    let addr = resolve_backend_addr(target)?;
+    let mut upstream = TcpStream::connect(addr).await?;
+    match copy_bidirectional(&mut stream, &mut upstream).await {
+        Ok((down, up)) => {
+            tracing::debug!(down, up, %addr, "l4 router: http relay completed");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, %addr, "l4 router: http relay error");
+            Ok(())
         }
     }
 }
@@ -468,14 +493,15 @@ mod tests {
             tcp_routes: vec![route(L4Action::TcpRelay(vec![]))],
             udp_routes: vec![route(L4Action::UdpRelay(vec![]))],
             tls_routes: vec![route(L4Action::TlsPassthrough(vec![]))],
-            https_routes: vec![route(L4Action::TerminateAndHttp("127.0.0.1:80".into()))],
+            https_routes: vec![route(L4Action::TerminateAndHttp("127.0.0.1:443".into()))],
+            http_routes: vec![route(L4Action::HttpRelay("127.0.0.1:80".into()))],
             ..Default::default()
         };
         assert_eq!(routes_for_protocol(&config, Protocol::Tcp).len(), 1);
         assert_eq!(routes_for_protocol(&config, Protocol::Udp).len(), 1);
         assert_eq!(routes_for_protocol(&config, Protocol::Tls).len(), 1);
         assert_eq!(routes_for_protocol(&config, Protocol::Https).len(), 1);
-        assert!(routes_for_protocol(&config, Protocol::Http).is_empty());
+        assert_eq!(routes_for_protocol(&config, Protocol::Http).len(), 1);
     }
 
     #[test]

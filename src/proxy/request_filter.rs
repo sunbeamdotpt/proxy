@@ -9,20 +9,28 @@ impl SunbeamProxy {
         session: &mut Session,
         ctx: &mut RequestCtx,
     ) -> Result<bool> {
-        // TLS-terminated HTTPS connections arrive as plaintext HTTP from the L4
-        // manager. Detect them by matching the internal target address and use
-        // the public listener port for redirects.
-        if let Some(listener_port) = downstream_local_addr(session)
-            .and_then(|a| https_terminate_port(&self.l4_config.load(), a))
-        {
-            ctx.downstream_scheme = "https";
-            ctx.downstream_port = listener_port;
-        } else {
-            ctx.downstream_scheme = if is_plain_http(session) {
-                "http"
+        // TLS-terminated HTTPS and L4-relayed plain HTTP connections arrive as
+        // plaintext HTTP at the internal Pingora address. Detect them by matching
+        // the internal target address and use the public listener port for route
+        // selection.
+        let l4_config = self.l4_config.load();
+        if let Some(local) = downstream_local_addr(session) {
+            if let Some(listener_port) = https_terminate_port(&l4_config, local) {
+                ctx.downstream_scheme = "https";
+                ctx.downstream_port = listener_port;
+            } else if let Some(listener_port) = http_relay_port(&l4_config, local) {
+                ctx.downstream_scheme = "http";
+                ctx.downstream_port = listener_port;
             } else {
-                "https"
-            };
+                ctx.downstream_scheme = if is_plain_http(session) {
+                    "http"
+                } else {
+                    "https"
+                };
+                ctx.downstream_port = downstream_port(session);
+            }
+        } else {
+            ctx.downstream_scheme = if is_plain_http(session) { "http" } else { "https" };
             ctx.downstream_port = downstream_port(session);
         }
 

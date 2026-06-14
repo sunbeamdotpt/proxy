@@ -562,14 +562,16 @@ fn run_serve(upgrade: bool) -> Result<()> {
         app.server_options = Some(server_options);
     }
 
-    // Port 80: always serve plain HTTP (ACME challenges + redirect to HTTPS).
-    svc.add_tcp(&cfg.listen.http);
-
-    // Optional extra HTTP listeners used by Gateway API conformance tests
-    // that create Gateways on non-default ports.
-    for addr in &cfg.listen.extra_http {
-        svc.add_tcp(addr);
-        tracing::info!(%addr, "extra HTTP listener added");
+    // When Gateway API is enabled, plain HTTP listeners are bound dynamically
+    // by the L4 manager so arbitrary Gateway ports can be served. Otherwise
+    // fall back to the static listen.http / extra_http configuration.
+    let gateway_enabled = cfg.gateway.enabled;
+    if !gateway_enabled {
+        svc.add_tcp(&cfg.listen.http);
+        for addr in &cfg.listen.extra_http {
+            svc.add_tcp(addr);
+            tracing::info!(%addr, "extra HTTP listener added");
+        }
     }
 
     // Pingora runs plaintext HTTP on a loopback address.  The L4 manager owns

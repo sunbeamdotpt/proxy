@@ -381,6 +381,35 @@ fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Opti
     None
 }
 
+/// For plain HTTP traffic relayed through the L4 manager, the request arrives at
+/// the internal Pingora plaintext address. Map that internal address back to the
+/// public listener port so route matching can use it.
+fn http_relay_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u16> {
+    for route in &l4_config.http_routes {
+        if let L4Action::HttpRelay(target) = &route.action {
+            if let Ok(target_addr) = target.as_ref().parse::<SocketAddr>() {
+                if target_addr == local {
+                    if let Some(listener) = l4_config
+                        .listeners
+                        .iter()
+                        .find(|l| l.id.as_ref() == route.listener_id.as_ref())
+                    {
+                        if listener.protocol == Protocol::Http {
+                            return listener
+                                .bind_addr
+                                .as_ref()
+                                .rsplit(':')
+                                .next()
+                                .and_then(|p| p.parse().ok());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl ProxyHttp for SunbeamProxy {
     type CTX = RequestCtx;

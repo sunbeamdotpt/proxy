@@ -246,13 +246,52 @@ fn spawn_listener_task<R: L4Router>(
                 }
             }
             Protocol::Http => {
-                // Plain HTTP listeners are served by Pingora directly on the
-                // configured address. The L4 manager only terminates TLS here.
-                tracing::warn!(
-                    listener_id = %listener.id,
-                    protocol = ?listener.protocol,
-                    "l4 manager: http listeners handled by Pingora"
-                );
+                // Plain HTTP listeners are bound here and relayed to the internal
+                // Pingora plaintext address. This lets Gateway API HTTP listeners
+                // use arbitrary ports without conflicting with Pingora's static
+                // listen configuration.
+                let tcp = match TcpListener::bind(listener.bind_addr.as_ref()).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(
+                            listener_id = %listener.id,
+                            error = %e,
+                            "l4 manager: http bind failed"
+                        );
+                        return;
+                    }
+                };
+
+                loop {
+                    let accept = tcp.accept();
+                    tokio::select! {
+                        _ = shutdown.changed() => break,
+                        res = accept => {
+                            match res {
+                                Ok((stream, _peer)) => {
+                                    let ctx = match L4Context::from_tcp_stream(
+                                        Arc::clone(&listener.id),
+                                        listener.protocol,
+                                        &stream,
+                                    ) {
+                                        Ok(ctx) => ctx,
+                                        Err(e) => {
+                                            tracing::debug!(error = %e, "l4 manager: http context failed");
+                                            continue;
+                                        }
+                                    };
+                                    let router = Arc::clone(&router);
+                                    tokio::spawn(async move {
+                                        router.handle_tcp(ctx, stream).await;
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "l4 manager: http accept failed");
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     })
@@ -420,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_listener_is_ignored_and_https_listener_is_bound() {
+    async fn http_and_https_listeners_are_bound() {
         let http_port = reserve_tcp_port();
         let https_port = reserve_tcp_port();
 
@@ -442,13 +481,14 @@ mod tests {
             ..Default::default()
         }));
 
-        // Wait briefly to ensure the manager binds the HTTPS socket.
+        // Wait briefly to ensure the manager binds both sockets.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Plain HTTP listeners are still served by Pingora, not the L4 manager.
+        // Plain HTTP listeners are now bound by the L4 manager and relayed to
+        // the internal Pingora plaintext service.
         assert!(TcpStream::connect(format!("127.0.0.1:{}", http_port))
             .await
-            .is_err());
+            .is_ok());
         // HTTPS listeners are bound by the L4 manager for TLS termination.
         assert!(TcpStream::connect(format!("127.0.0.1:{}", https_port))
             .await
