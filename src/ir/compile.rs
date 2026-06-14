@@ -494,7 +494,7 @@ impl CompiledL4Config {
                 let protocol = if has_tls {
                     Protocol::Tls
                 } else {
-                    Protocol::Https
+                    group[0].protocol
                 };
                 let tls = group.iter().find_map(|l| l.tls.clone());
                 let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
@@ -2737,5 +2737,78 @@ mod tests {
             message: "bad regex".into(),
         };
         assert_eq!(format!("{}", err), "compile error: bad regex");
+    }
+
+    #[test]
+    fn l4_http_listener_compiles_to_http_relay_route() {
+        let rt = RouteTable {
+            listeners: vec![ListenerConfig {
+                id: "gw/http".into(),
+                bind_addr: "0.0.0.0:80".into(),
+                protocol: Protocol::Http,
+                tls: None,
+                redirect_http_to_https: false,
+            }],
+            l4_routes: vec![L4Route {
+                listener_id: "gw/http".into(),
+                listener_hostname: HostnameMatch::Any,
+                match_: L4Match::Any,
+                action: L4Action::HttpRelay("127.0.0.1:10443".into()),
+            }],
+            ..Default::default()
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].protocol, Protocol::Http);
+        assert_eq!(cfg.http_routes.len(), 1);
+        assert!(matches!(
+            cfg.http_routes[0].action,
+            L4Action::HttpRelay(_)
+        ));
+    }
+
+    #[test]
+    fn l4_http_listeners_on_same_port_are_merged_and_routes_remap() {
+        let rt = RouteTable {
+            listeners: vec![
+                ListenerConfig {
+                    id: "gw-a/http".into(),
+                    bind_addr: "0.0.0.0:80".into(),
+                    protocol: Protocol::Http,
+                    tls: None,
+                    redirect_http_to_https: false,
+                },
+                ListenerConfig {
+                    id: "gw-b/http".into(),
+                    bind_addr: "0.0.0.0:80".into(),
+                    protocol: Protocol::Http,
+                    tls: None,
+                    redirect_http_to_https: false,
+                },
+            ],
+            l4_routes: vec![
+                L4Route {
+                    listener_id: "gw-a/http".into(),
+                    listener_hostname: HostnameMatch::Any,
+                    match_: L4Match::Any,
+                    action: L4Action::HttpRelay("127.0.0.1:10443".into()),
+                },
+                L4Route {
+                    listener_id: "gw-b/http".into(),
+                    listener_hostname: HostnameMatch::Any,
+                    match_: L4Match::Any,
+                    action: L4Action::HttpRelay("127.0.0.1:10443".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let cfg = CompiledL4Config::compile(rt).unwrap();
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].protocol, Protocol::Http);
+        assert_eq!(cfg.http_routes.len(), 2);
+        let canonical = cfg.listeners[0].id.as_ref();
+        for route in &cfg.http_routes {
+            assert_eq!(route.listener_id.as_ref(), canonical);
+        }
     }
 }
