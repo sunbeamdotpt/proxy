@@ -136,11 +136,12 @@ impl TlsRegistry {
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no rustls crypto provider installed"))?;
-        let config = rustls::ServerConfig::builder_with_provider(provider)
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|e| anyhow::anyhow!("protocol versions: {e}"))?
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(self.clone()));
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(config)
     }
 }
@@ -434,6 +435,20 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
         registry.apply(store);
         let config = registry.server_config();
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn registry_server_config_advertises_alpn() {
+        ensure_provider();
+        let registry = TlsRegistry::new();
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
+        registry.apply(store);
+        let config = registry.server_config().unwrap();
+        assert!(config.alpn_protocols.contains(&b"h2".to_vec()));
+        assert!(config.alpn_protocols.contains(&b"http/1.1".to_vec()));
     }
 
     #[test]
