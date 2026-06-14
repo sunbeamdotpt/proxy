@@ -260,6 +260,7 @@ mod tests {
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,

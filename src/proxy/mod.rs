@@ -114,6 +114,15 @@ pub struct SunbeamProxy {
     /// L4 router and consumed by the HTTP proxy for 421 misdirected request
     /// detection.
     pub sni_context: Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>>,
+    /// Maps the internal upstream socket address of an L4-relayed plain HTTP
+    /// connection to the public listener that accepted it. Populated by the L4
+    /// router and consumed by the HTTP proxy so that host/port route matching
+    /// uses the original listener port.
+    pub http_context: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<std::net::SocketAddr, crate::l4::context::HttpRelayContext>,
+        >,
+    >,
 }
 
 impl SunbeamProxy {
@@ -151,6 +160,24 @@ impl SunbeamProxy {
             .and_then(|addr| addr.as_inet())
             .copied()?;
         self.sni_context.lock().unwrap_or_else(|e| e.into_inner()).remove(&peer)
+    }
+
+    /// Retrieve (without removing) the HTTP relay context associated with this
+    /// downstream connection. The L4 router stores the mapping keyed by the
+    /// upstream-side socket address that Pingora sees as the downstream peer.
+    fn http_relay_context(
+        &self,
+        session: &Session,
+    ) -> Option<crate::l4::context::HttpRelayContext> {
+        let peer = session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .copied()?;
+        self.http_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&peer)
+            .cloned()
     }
 
     /// True if the compiled route table contains any Gateway API routes.
@@ -1129,6 +1156,7 @@ mod tests {
             routes: Arc::new(ArcSwap::new(Arc::new(table))),
             l4_config: Arc::new(ArcSwap::new(Arc::new(CompiledL4Config::empty()))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,

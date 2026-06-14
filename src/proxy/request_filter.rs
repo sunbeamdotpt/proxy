@@ -15,7 +15,12 @@ impl SunbeamProxy {
         // selection.
         let l4_config = self.l4_config.load();
         if let Some(local) = downstream_local_addr(session) {
-            if let Some(listener_port) = https_terminate_port(&l4_config, local) {
+            if let Some(ctx_info) = self.http_relay_context(session) {
+                // Plain HTTP that was relayed through the L4 manager. The public
+                // listener port is recovered from the per-connection context.
+                ctx.downstream_scheme = "http";
+                ctx.downstream_port = ctx_info.listener_port;
+            } else if let Some(listener_port) = https_terminate_port(&l4_config, local) {
                 ctx.downstream_scheme = "https";
                 ctx.downstream_port = listener_port;
             } else if let Some(listener_port) = http_relay_port(&l4_config, local) {
@@ -807,6 +812,7 @@ mod tests {
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
             sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            http_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -826,7 +832,7 @@ mod tests {
         let proxy = make_proxy();
         proxy.routes.store(Arc::new(table));
         proxy
-}
+    }
 
     async fn make_session_pair(
         method: &str,
