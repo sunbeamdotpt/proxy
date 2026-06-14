@@ -56,19 +56,38 @@ struct StaticFile {
     len: u64,
 }
 
-/// Try to read a file from disk. Returns None if the file doesn't exist.
-async fn read_static_file(path: &Path) -> Option<StaticFile> {
-    let metadata = match tokio::fs::metadata(path).await {
+/// Try to read a file from disk. Returns None if the file doesn't exist or if
+/// it resolves outside of `root` (prevents directory traversal and symlink escapes).
+async fn read_static_file(root: &Path, path: &Path) -> Option<StaticFile> {
+    // Resolve symlinks and relative components. Failure to canonicalize means the
+    // path does not exist or is not accessible.
+    let canonical = match tokio::fs::canonicalize(path).await {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    // Ensure the resolved path is still under the configured root. The root is
+    // also canonicalized so platform-specific symlinks (e.g. /var -> /private/var)
+    // do not cause false rejections.
+    let root = match tokio::fs::canonicalize(root).await {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    if !canonical.starts_with(&root) {
+        return None;
+    }
+
+    let metadata = match tokio::fs::metadata(&canonical).await {
         Ok(m) if m.is_file() => m,
         _ => return None,
     };
 
-    let body = match tokio::fs::read(path).await {
+    let body = match tokio::fs::read(&canonical).await {
         Ok(b) => b,
         Err(_) => return None,
     };
 
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     Some(StaticFile {
         len: metadata.len(),
@@ -116,9 +135,12 @@ pub async fn try_serve(
     path: &str,
     extra_headers: Vec<(String, String)>,
 ) -> pingora_core::Result<bool> {
-    let root = Path::new(static_root);
+    let root = match tokio::fs::canonicalize(static_root).await {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
 
-    let candidates = match build_candidates(root, path) {
+    let candidates = match build_candidates(&root, path) {
         Some(c) => c,
         None => return Ok(false),
     };
@@ -126,7 +148,7 @@ pub async fn try_serve(
     // Find the first matching file.
     let mut file = None;
     for candidate in &candidates {
-        if let Some(f) = read_static_file(candidate).await {
+        if let Some(f) = read_static_file(&root, candidate).await {
             file = Some(f);
             break;
         }
@@ -135,7 +157,7 @@ pub async fn try_serve(
     // Try fallback if no candidate matched.
     if file.is_none() {
         if let Some(fb) = fallback {
-            file = read_static_file(&root.join(fb)).await;
+            file = read_static_file(&root, &root.join(fb)).await;
         }
     }
 
@@ -248,7 +270,7 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(b"hello world").unwrap();
 
-        let sf = read_static_file(&path).await.unwrap();
+        let sf = read_static_file(dir.path(), &path).await.unwrap();
         assert_eq!(sf.body, b"hello world");
         assert_eq!(sf.content_type, "text/plain; charset=utf-8");
         assert_eq!(sf.cache_control, "no-cache");
@@ -261,7 +283,7 @@ mod tests {
         let path = dir.path().join("index.html");
         std::fs::write(&path, b"<html></html>").unwrap();
 
-        let sf = read_static_file(&path).await.unwrap();
+        let sf = read_static_file(dir.path(), &path).await.unwrap();
         assert_eq!(sf.content_type, "text/html; charset=utf-8");
         assert_eq!(sf.cache_control, "no-cache");
     }
@@ -272,7 +294,7 @@ mod tests {
         let path = dir.path().join("app.js");
         std::fs::write(&path, b"console.log(1);").unwrap();
 
-        let sf = read_static_file(&path).await.unwrap();
+        let sf = read_static_file(dir.path(), &path).await.unwrap();
         assert_eq!(sf.content_type, "application/javascript; charset=utf-8");
         assert_eq!(sf.cache_control, "public, max-age=31536000, immutable");
     }
@@ -281,7 +303,7 @@ mod tests {
     async fn test_read_static_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.txt");
-        assert!(read_static_file(&path).await.is_none());
+        assert!(read_static_file(dir.path(), &path).await.is_none());
     }
 
     #[tokio::test]
@@ -289,7 +311,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let subdir = dir.path().join("folder");
         std::fs::create_dir(&subdir).unwrap();
-        assert!(read_static_file(&subdir).await.is_none());
+        assert!(read_static_file(dir.path(), &subdir).await.is_none());
     }
 
     #[tokio::test]
@@ -298,8 +320,22 @@ mod tests {
         let path = dir.path().join("LICENSE");
         std::fs::write(&path, b"MIT").unwrap();
 
-        let sf = read_static_file(&path).await.unwrap();
+        let sf = read_static_file(dir.path(), &path).await.unwrap();
         assert_eq!(sf.content_type, "application/octet-stream");
         assert_eq!(sf.cache_control, "no-cache");
+    }
+
+    #[tokio::test]
+    async fn test_read_static_file_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"secret").unwrap();
+        let link = dir.path().join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, &link).unwrap();
+        assert!(read_static_file(dir.path(), &link).await.is_none());
     }
 }

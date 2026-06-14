@@ -125,9 +125,11 @@ fn start_proxy_once(backend_port: u16) {
         let l4_config = Arc::new(arc_swap::ArcSwap::from_pointee(
             sunbeam_proxy::ir::compile::CompiledL4Config::default(),
         ));
+        let sni_context = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let proxy = SunbeamProxy {
             routes: Arc::new(arc_swap::ArcSwap::from_pointee(table)),
             l4_config,
+            sni_context,
             acme_routes,
             ddos_detector: None,
             scanner_detector: None,
@@ -136,6 +138,7 @@ fn start_proxy_once(backend_port: u16) {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::from_pointee(compiled_rewrites)),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,

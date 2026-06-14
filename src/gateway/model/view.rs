@@ -11,6 +11,13 @@ use super::routing::{HTTPRouteState, TCPRouteState, TLSRouteState, UDPRouteState
 /// Alias used by the reconcile and translate modules.
 pub type GatewayView = ReconciledView;
 
+/// Map from (namespace, name, listener_name) to the `AllowedRoutes` configured
+/// on that listener (Gateway or ListenerSet).
+pub type ListenerAllowedMap = BTreeMap<(Arc<str>, Arc<str>, Arc<str>), AllowedRoutes>;
+
+/// Labels on every namespace, used by `allowedRoutes.namespaces` selectors.
+pub type NamespaceLabels = BTreeMap<Arc<str>, BTreeMap<Arc<str>, Arc<str>>>;
+
 /// The full reconciled state produced by the Gateway API controller.
 ///
 /// This struct is intentionally cheap to clone (all strings are
@@ -19,12 +26,21 @@ pub type GatewayView = ReconciledView;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ReconciledView {
     pub gateways: Vec<GatewayState>,
+    pub listener_sets: Vec<ListenerSetState>,
     pub routes: Vec<RouteState>,
     pub http_routes: Vec<HTTPRouteState>,
     pub tcp_routes: Vec<TCPRouteState>,
     pub udp_routes: Vec<UDPRouteState>,
     pub tls_routes: Vec<TLSRouteState>,
     pub reference_grants: Vec<ReferenceGrantState>,
+    /// Labels on each namespace, used by `allowedRoutes.namespaces` selectors.
+    pub namespace_labels: NamespaceLabels,
+    /// Allowed routes configured on each Gateway listener, keyed by
+    /// (namespace, name, listener_name).
+    pub listener_allowed: ListenerAllowedMap,
+    /// Allowed routes configured on each ListenerSet listener, keyed by
+    /// (namespace, name, listener_name).
+    pub listener_set_allowed: ListenerAllowedMap,
 }
 
 /// Stub for the reconciled state of a single Gateway resource.
@@ -77,9 +93,13 @@ pub struct RouteState {
 /// A reference from a route to its parent gateway/listener.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ParentRef {
+    pub group: Arc<str>,
+    pub kind: Arc<str>,
     pub namespace: Option<Arc<str>>,
     pub name: Arc<str>,
     pub section_name: Option<Arc<str>>,
+    /// Listener port requested by the parentRef, if any.
+    pub port: Option<u16>,
 }
 
 /// Allowed route kinds and namespaces for a Gateway listener.
@@ -103,6 +123,8 @@ pub enum NamespaceFrom {
     Same,
     All,
     Selector,
+    /// No namespaces are allowed (used for Gateway `allowedListeners` default).
+    None,
 }
 
 /// Namespace selector from a listener's `allowedRoutes.namespaces` field.
@@ -110,6 +132,32 @@ pub enum NamespaceFrom {
 pub struct RouteNamespaces {
     pub from: NamespaceFrom,
     pub selector: Option<BTreeMap<String, String>>,
+}
+
+/// Stub for the reconciled state of a single ListenerSet resource.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ListenerSetState {
+    pub namespace: Arc<str>,
+    pub name: Arc<str>,
+    pub generation: i64,
+    /// Creation timestamp as Unix seconds; used for ListenerSet precedence
+    /// ordering during conflict resolution (oldest first).
+    pub created_at: i64,
+    pub parent_ref: ParentRef,
+    pub listeners: Vec<ListenerState>,
+    /// Map of listener name -> conflict reason ("HostnameConflict" or
+    /// "ProtocolConflict") for listeners that overlap with a higher-precedence
+    /// listener on the same parent Gateway.
+    pub conflicts: BTreeMap<Arc<str>, Arc<str>>,
+    pub accepted: bool,
+    pub programmed: bool,
+    pub reason: Arc<str>,
+    /// Per-listener certificate validation errors. When present, the listener's
+    /// `ResolvedRefs` condition is False with this reason.
+    pub listener_cert_errors: Vec<Option<Arc<str>>>,
+    /// Per-listener route kind validation errors. When present, the listener's
+    /// `ResolvedRefs` condition is False with this reason.
+    pub listener_kind_errors: Vec<Option<Arc<str>>>,
 }
 
 /// Stub for the reconciled state of a single ReferenceGrant resource.

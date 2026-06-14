@@ -59,10 +59,35 @@ impl SunbeamProxy {
         let host = extract_host(session);
         let req = session.req_header();
         let path = req.uri.path();
-        let key = match req.uri.query() {
+        let mut key = match req.uri.query() {
             Some(q) => format!("{host}{path}?{q}"),
             None => format!("{host}{path}"),
         };
+
+        // Separate cache entries for requests that carry authentication state or
+        // that vary by content-negotiation headers. This prevents responses for
+        // one user's session from being served to another client.
+        let headers = &req.headers;
+        let mut variance = String::new();
+        if headers.contains_key(http::header::AUTHORIZATION)
+            || headers.contains_key(http::header::COOKIE)
+        {
+            variance.push_str("|auth");
+        }
+        for h in [
+            http::header::ACCEPT_ENCODING,
+            http::header::ACCEPT_LANGUAGE,
+            http::header::ACCEPT,
+        ] {
+            if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
+                variance.push('|');
+                variance.push_str(v);
+            }
+        }
+        if !variance.is_empty() {
+            key.push_str(&variance);
+        }
+
         Ok(CacheKey::new("", key, ""))
     }
 
@@ -234,6 +259,7 @@ mod tests {
             l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -242,6 +268,7 @@ mod tests {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -360,6 +387,45 @@ mod tests {
         let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
         let key = proxy.cache_key_callback_inner(&session, &mut ctx).unwrap();
         assert!(!key.primary().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_key_differs_for_authenticated_requests() {
+        let proxy = make_proxy();
+        let anon = make_session("GET", "/path", "example.com").await;
+        let mut authed = make_session("GET", "/path", "example.com").await;
+        authed
+            .req_header_mut()
+            .insert_header("Authorization", "Bearer token")
+            .unwrap();
+        let mut anon_ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let mut authed_ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let anon_key = proxy
+            .cache_key_callback_inner(&anon, &mut anon_ctx)
+            .unwrap();
+        let authed_key = proxy
+            .cache_key_callback_inner(&authed, &mut authed_ctx)
+            .unwrap();
+        assert_ne!(anon_key.primary(), authed_key.primary());
+    }
+
+    #[tokio::test]
+    async fn cache_key_differs_by_accept_encoding() {
+        let proxy = make_proxy();
+        let plain = make_session("GET", "/path", "example.com").await;
+        let mut gzip = make_session("GET", "/path", "example.com").await;
+        gzip.req_header_mut()
+            .insert_header("Accept-Encoding", "gzip")
+            .unwrap();
+        let mut plain_ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let mut gzip_ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let plain_key = proxy
+            .cache_key_callback_inner(&plain, &mut plain_ctx)
+            .unwrap();
+        let gzip_key = proxy
+            .cache_key_callback_inner(&gzip, &mut gzip_ctx)
+            .unwrap();
+        assert_ne!(plain_key.primary(), gzip_key.primary());
     }
 
     // ── response_cache_filter_inner ─────────────────────────────────────

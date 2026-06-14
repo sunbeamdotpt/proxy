@@ -7,7 +7,7 @@ use crate::config::RouteConfig;
 use crate::ddos::detector::DDoSDetector;
 use crate::ddos::model::DDoSAction;
 use crate::ir::compile::{CompiledL4Config, CompiledPlan, CompiledRouteTable};
-use crate::ir::{L4Action, Protocol};
+use crate::ir::{BackendProtocol, L4Action, Protocol};
 use crate::metrics;
 use crate::rate_limit::key;
 use crate::rate_limit::limiter::{RateLimitResult, RateLimiter};
@@ -45,15 +45,22 @@ use match_::{build_redirect_location_ir, cors_allow_origin, pick_weighted_backen
 ///
 /// DNS resolution is performed here so that a lookup failure can be handled
 /// gracefully instead of panicking the Pingora worker thread.
-async fn make_peer(addr: &str, timeout_secs: Option<u64>) -> Option<Box<HttpPeer>> {
+async fn make_peer(
+    addr: &str,
+    timeout: Option<Duration>,
+    protocol: BackendProtocol,
+) -> Option<Box<HttpPeer>> {
     let addr = backend_addr(addr);
     let mut addrs = tokio::net::lookup_host(&addr).await.ok()?;
     let sa = addrs.next()?;
     let mut peer = HttpPeer::new(sa, false, String::new());
-    let t = timeout_secs.unwrap_or(60);
+    let t = timeout.unwrap_or(Duration::from_secs(60));
     peer.options.connection_timeout = Some(Duration::from_secs(10));
-    peer.options.read_timeout = Some(Duration::from_secs(t));
-    peer.options.write_timeout = Some(Duration::from_secs(t));
+    peer.options.read_timeout = Some(t);
+    peer.options.write_timeout = Some(t);
+    if protocol == BackendProtocol::H2c {
+        peer.options.alpn = pingora_core::protocols::tls::ALPN::H2;
+    }
     Some(Box::new(peer))
 }
 
@@ -92,12 +99,21 @@ pub struct SunbeamProxy {
     pub http_client: reqwest::Client,
     /// Parsed bypass CIDRs — IPs in these ranges skip the detection pipeline.
     pub pipeline_bypass_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
+    /// Parsed trusted downstream proxy CIDRs. Headers that carry the original
+    /// client IP are only trusted when the immediate TCP peer is in one of
+    /// these ranges.
+    pub trusted_proxy_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
     /// Optional cluster handle for multi-node bandwidth tracking.
     pub cluster: Option<Arc<ClusterHandle>>,
     /// When true, DDoS detector logs decisions but never blocks traffic.
     pub ddos_observe_only: bool,
     /// When true, scanner detector logs decisions but never blocks traffic.
     pub scanner_observe_only: bool,
+    /// Maps the internal upstream socket address of a TLS-terminated connection
+    /// to the SNI hostname presented during the TLS handshake. Populated by the
+    /// L4 router and consumed by the HTTP proxy for 421 misdirected request
+    /// detection.
+    pub sni_context: Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>>,
 }
 
 impl SunbeamProxy {
@@ -108,21 +124,33 @@ impl SunbeamProxy {
     fn lookup_plan(
         &self,
         host: &str,
+        port: u16,
         path: &str,
         method: &str,
         headers: &http::header::HeaderMap,
         query: Option<&str>,
     ) -> Option<Arc<CompiledPlan>> {
         let table = self.routes.load();
-        table.lookup(host, path, method, headers, query)
+        table.lookup(host, port, path, method, headers, query)
     }
 
-    /// Check whether any Gateway API listener matches the request host,
+    /// Check whether any Gateway API listener matches the request host and port,
     /// regardless of whether any route rule matches. Used in `request_filter`
     /// to avoid HTTPS-redirecting requests that should instead receive a 404.
-    fn has_matching_gateway_api_listener(&self, host: &str) -> bool {
+    fn has_matching_gateway_api_listener(&self, host: &str, port: u16) -> bool {
         let table = self.routes.load();
-        table.has_gateway_api_listener(host)
+        table.has_gateway_api_listener(host, port)
+    }
+
+    /// Retrieve and remove the SNI hostname associated with this downstream
+    /// connection. The L4 router stores the mapping keyed by the upstream-side
+    /// socket address that Pingora sees as the downstream peer.
+    fn sni_for_session(&self, session: &Session) -> Option<Arc<str>> {
+        let peer = session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .copied()?;
+        self.sni_context.lock().unwrap_or_else(|e| e.into_inner()).remove(&peer)
     }
 
     /// True if the compiled route table contains any Gateway API routes.
@@ -245,35 +273,48 @@ fn extract_host(session: &Session) -> String {
     req.uri.host().unwrap_or("").to_string()
 }
 
-/// Extract the real client IP, preferring trusted proxy headers.
-///
-/// Priority: CF-Connecting-IP → X-Real-IP → X-Forwarded-For (first) → socket addr.
-/// All traffic arrives via Cloudflare, so CF-Connecting-IP is the authoritative
-/// real client IP.  The socket address is the Cloudflare edge node.
-fn extract_client_ip(session: &Session) -> Option<IpAddr> {
-    let headers = &session.req_header().headers;
-
-    for header in &["cf-connecting-ip", "x-real-ip"] {
-        if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok()) {
-            if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-
-    // X-Forwarded-For: client, proxy1, proxy2 — take the first entry
-    if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = val.split(',').next() {
-            if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-
-    // Fallback: raw socket address
+fn socket_client_ip(session: &Session) -> Option<IpAddr> {
     session
         .client_addr()
         .and_then(|addr| addr.as_inet().map(|a| a.ip()))
+}
+
+impl SunbeamProxy {
+    /// Extract the real client IP.
+    ///
+    /// If the immediate downstream TCP peer is inside one of the configured
+    /// `trusted_proxy_cidrs`, proxy headers are consulted in order:
+    /// CF-Connecting-IP → X-Real-IP → X-Forwarded-For (first entry).
+    /// Otherwise the raw socket address is returned, preventing IP spoofing by
+    /// untrusted clients.
+    fn extract_client_ip(&self, session: &Session) -> Option<IpAddr> {
+        let socket_ip = socket_client_ip(session)?;
+
+        if !crate::rate_limit::cidr::is_bypassed(socket_ip, &self.trusted_proxy_cidrs) {
+            return Some(socket_ip);
+        }
+
+        let headers = &session.req_header().headers;
+
+        for header in &["cf-connecting-ip", "x-real-ip"] {
+            if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok()) {
+                if let Ok(ip) = val.trim().parse::<IpAddr>() {
+                    return Some(ip);
+                }
+            }
+        }
+
+        // X-Forwarded-For: client, proxy1, proxy2 — take the first entry
+        if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = val.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                    return Some(ip);
+                }
+            }
+        }
+
+        Some(socket_ip)
+    }
 }
 
 /// Strip the scheme prefix from a backend URL like `http://host:port`.
@@ -324,7 +365,7 @@ fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Opti
                         .iter()
                         .find(|l| l.id.as_ref() == route.listener_id.as_ref())
                     {
-                        if listener.protocol == Protocol::Https {
+                        if matches!(listener.protocol, Protocol::Https | Protocol::Tls) {
                             return listener
                                 .bind_addr
                                 .as_ref()
@@ -474,6 +515,52 @@ impl ProxyHttp for SunbeamProxy {
         Self::CTX: Send + Sync,
     {
         self.logging_inner(session, error, ctx).await
+    }
+
+    /// Map upstream read/write timeouts to 504 Gateway Timeout so that
+    /// Gateway API `rules.timeouts.backendRequest` / `rules.timeouts.request`
+    /// conformance tests see the expected status code.
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &pingora_core::Error,
+        _ctx: &mut RequestCtx,
+    ) -> pingora_proxy::FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        use pingora_core::{ErrorSource, ErrorType};
+
+        let code = match e.etype() {
+            ErrorType::HTTPStatus(code) => *code,
+            _ => match e.esource() {
+                ErrorSource::Upstream
+                    if matches!(
+                        e.etype(),
+                        ErrorType::ReadTimedout | ErrorType::WriteTimedout
+                    ) =>
+                {
+                    504
+                }
+                ErrorSource::Upstream => 502,
+                ErrorSource::Downstream => match e.etype() {
+                    ErrorType::WriteError | ErrorType::ReadError | ErrorType::ConnectionClosed => 0,
+                    _ => 400,
+                },
+                ErrorSource::Internal | ErrorSource::Unset => 500,
+            },
+        };
+
+        if code > 0 {
+            if let Err(err) = session.respond_error(code).await {
+                tracing::error!(%err, "failed to send error response to downstream");
+            }
+        }
+
+        pingora_proxy::FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
     }
 }
 
@@ -638,6 +725,7 @@ mod tests {
     fn select_path_route_prefers_longest_prefix() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "root".into(),
                 strip_prefix: false,
@@ -667,6 +755,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api".into(),
                 strip_prefix: false,
@@ -705,6 +794,7 @@ mod tests {
     fn select_path_route_respects_method_constraint() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api-read".into(),
                 strip_prefix: false,
@@ -734,6 +824,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api-write".into(),
                 strip_prefix: false,
@@ -783,6 +874,7 @@ mod tests {
     fn select_path_route_earlier_rule_wins_on_prefix_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "first".into(),
                 strip_prefix: false,
@@ -812,6 +904,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "second".into(),
                 strip_prefix: false,
@@ -854,6 +947,7 @@ mod tests {
     #[test]
     fn select_path_route_respects_exact_match() {
         let paths = vec![PathRoute {
+            timeout_ms: None,
             prefix: "/api".into(),
             backend: "api-exact".into(),
             strip_prefix: false,
@@ -1005,6 +1099,7 @@ mod tests {
         SunbeamProxy {
             routes: Arc::new(ArcSwap::new(Arc::new(table))),
             l4_config: Arc::new(ArcSwap::new(Arc::new(CompiledL4Config::empty()))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -1013,6 +1108,7 @@ mod tests {
             compiled_rewrites: Arc::new(ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -1062,10 +1158,10 @@ mod tests {
         )]));
         let headers = http::header::HeaderMap::new();
         assert!(proxy
-            .lookup_plan("example.com", "/", "GET", &headers, None)
+            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("other.com", "/", "GET", &headers, None)
+            .lookup_plan("other.com", 0, "/", "GET", &headers, None)
             .is_none());
     }
 
@@ -1078,10 +1174,10 @@ mod tests {
         )]));
         let headers = http::header::HeaderMap::new();
         assert!(proxy
-            .lookup_plan("foo.example.com", "/", "GET", &headers, None)
+            .lookup_plan("foo.example.com", 0, "/", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("example.com", "/", "GET", &headers, None)
+            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
             .is_none());
     }
 
@@ -1093,7 +1189,7 @@ mod tests {
         ]));
         let headers = http::header::HeaderMap::new();
         let chosen = proxy
-            .lookup_plan("sub.example.com", "/", "GET", &headers, None)
+            .lookup_plan("sub.example.com", 0, "/", "GET", &headers, None)
             .unwrap();
         assert_eq!(
             chosen.listener_hostname,
@@ -1109,7 +1205,7 @@ mod tests {
         ]));
         let headers = http::header::HeaderMap::new();
         let chosen = proxy
-            .lookup_plan("example.com", "/", "GET", &headers, None)
+            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
             .unwrap();
         assert_eq!(
             chosen.listener_hostname,
@@ -1125,7 +1221,7 @@ mod tests {
         ]));
         let headers = http::header::HeaderMap::new();
         let chosen = proxy
-            .lookup_plan("example.com", "/", "GET", &headers, None)
+            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
             .unwrap();
         assert_eq!(
             chosen.listener_hostname,
@@ -1141,6 +1237,7 @@ mod tests {
             hostname: crate::ir::HostnameMatch::Any,
             listener_ids: vec![],
             listener_hostname: Some(crate::ir::HostnameMatch::Exact("".into())),
+            listener_port: None,
             gateway_api: true,
             disable_secure_redirection: true,
             rules: vec![crate::ir::Rule {
@@ -1154,13 +1251,14 @@ mod tests {
                     backends: vec![crate::ir::WeightedBackend {
                         backend: "http://backend".into(),
                         weight: 1,
-
+                        protocol: crate::ir::BackendProtocol::Http,
                         request_filters: vec![],
                     }],
                     timeout: None,
                     request_filters: vec![],
                     response_filters: vec![],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![],
                     auth: None,
@@ -1168,8 +1266,7 @@ mod tests {
                     websocket: false,
                 }),
                 rule_order: 0,
-            }],
-        };
+            }],};
         let table = crate::ir::compile::CompiledRouteTable::compile(crate::ir::RouteTable {
             listeners: vec![],
             hosts: vec![host],
@@ -1180,15 +1277,15 @@ mod tests {
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
-        assert!(proxy.lookup_plan("", "/", "GET", &headers, None).is_some());
+        assert!(proxy.lookup_plan("", 0, "/", "GET", &headers, None).is_some());
         assert!(proxy
-            .lookup_plan("sub.third.com", "/", "GET", &headers, None)
+            .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("first.com", "/", "GET", &headers, None)
+            .lookup_plan("first.com", 0, "/", "GET", &headers, None)
             .is_some());
-        assert!(proxy.has_matching_gateway_api_listener("sub.third.com"));
-        assert!(proxy.has_matching_gateway_api_listener("first.com"));
+        assert!(proxy.has_matching_gateway_api_listener("sub.third.com", 0));
+        assert!(proxy.has_matching_gateway_api_listener("first.com", 0));
     }
 
     #[test]
@@ -1199,6 +1296,7 @@ mod tests {
             hostname: crate::ir::HostnameMatch::Exact("first.com".into()),
             listener_ids: vec![],
             listener_hostname: Some(crate::ir::HostnameMatch::Exact("".into())),
+            listener_port: None,
             gateway_api: true,
             disable_secure_redirection: true,
             rules: vec![crate::ir::Rule {
@@ -1212,13 +1310,14 @@ mod tests {
                     backends: vec![crate::ir::WeightedBackend {
                         backend: "http://backend".into(),
                         weight: 1,
-
+                        protocol: crate::ir::BackendProtocol::Http,
                         request_filters: vec![],
                     }],
                     timeout: None,
                     request_filters: vec![],
                     response_filters: vec![],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![],
                     auth: None,
@@ -1226,8 +1325,7 @@ mod tests {
                     websocket: false,
                 }),
                 rule_order: 0,
-            }],
-        };
+            }],};
         let table = crate::ir::compile::CompiledRouteTable::compile(crate::ir::RouteTable {
             listeners: vec![],
             hosts: vec![host],
@@ -1239,13 +1337,13 @@ mod tests {
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
         assert!(proxy
-            .lookup_plan("first.com", "/", "GET", &headers, None)
+            .lookup_plan("first.com", 0, "/", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("sub.third.com", "/", "GET", &headers, None)
+            .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
             .is_none());
-        assert!(proxy.has_matching_gateway_api_listener("first.com"));
-        assert!(!proxy.has_matching_gateway_api_listener("sub.third.com"));
+        assert!(proxy.has_matching_gateway_api_listener("first.com", 0));
+        assert!(!proxy.has_matching_gateway_api_listener("sub.third.com", 0));
     }
 
     #[test]
@@ -1259,6 +1357,7 @@ mod tests {
                     hostname: crate::ir::HostnameMatch::Any,
                     listener_ids: vec![],
                     listener_hostname: Some(crate::ir::HostnameMatch::Exact("".into())),
+                    listener_port: None,
                     gateway_api: true,
                     disable_secure_redirection: true,
                     rules: vec![crate::ir::Rule {
@@ -1272,13 +1371,14 @@ mod tests {
                             backends: vec![crate::ir::WeightedBackend {
                                 backend: "http://empty".into(),
                                 weight: 1,
-
+                                protocol: crate::ir::BackendProtocol::Http,
                                 request_filters: vec![],
                             }],
                             timeout: None,
                             request_filters: vec![],
                             response_filters: vec![],
                             mirror_backends: vec![],
+                            mirror_fractions: vec![],
                             cache: None,
                             body_rewrites: vec![],
                             auth: None,
@@ -1294,6 +1394,7 @@ mod tests {
                     listener_hostname: Some(crate::ir::HostnameMatch::Wildcard(
                         "example.com".into(),
                     )),
+                    listener_port: None,
                     gateway_api: true,
                     disable_secure_redirection: true,
                     rules: vec![crate::ir::Rule {
@@ -1307,13 +1408,14 @@ mod tests {
                             backends: vec![crate::ir::WeightedBackend {
                                 backend: "http://wildcard".into(),
                                 weight: 1,
-
+                                protocol: crate::ir::BackendProtocol::Http,
                                 request_filters: vec![],
                             }],
                             timeout: None,
                             request_filters: vec![],
                             response_filters: vec![],
                             mirror_backends: vec![],
+                            mirror_fractions: vec![],
                             cache: None,
                             body_rewrites: vec![],
                             auth: None,
@@ -1326,24 +1428,23 @@ mod tests {
             ],
             acme_routes: std::collections::HashMap::new(),
             l4_routes: vec![],
-            tls_certs: vec![],
-        })
+            tls_certs: vec![],})
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
         // Empty-listener route is used when no more specific listener matches.
         assert!(proxy
-            .lookup_plan("bar.com", "/empty", "GET", &headers, None)
+            .lookup_plan("bar.com", 0, "/empty", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("bar.example.com", "/empty", "GET", &headers, None)
+            .lookup_plan("bar.example.com", 0, "/empty", "GET", &headers, None)
             .is_none());
         // Wildcard-listener route is used for matching hosts.
         assert!(proxy
-            .lookup_plan("bar.example.com", "/wildcard", "GET", &headers, None)
+            .lookup_plan("bar.example.com", 0, "/wildcard", "GET", &headers, None)
             .is_some());
         assert!(proxy
-            .lookup_plan("bar.com", "/wildcard", "GET", &headers, None)
+            .lookup_plan("bar.com", 0, "/wildcard", "GET", &headers, None)
             .is_none());
     }
 
@@ -1351,6 +1452,7 @@ mod tests {
     fn select_path_route_prefers_more_header_matches_on_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "no-header".into(),
                 strip_prefix: false,
@@ -1380,6 +1482,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "with-header".into(),
                 strip_prefix: false,
@@ -1422,6 +1525,7 @@ mod tests {
     fn select_path_route_prefers_method_match_on_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "any-method".into(),
                 strip_prefix: false,
@@ -1451,6 +1555,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "post-only".into(),
                 strip_prefix: false,
@@ -1489,6 +1594,7 @@ mod tests {
     fn select_path_route_matches_conformance_path_prefix_cases() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "root".into(),
                 strip_prefix: false,
@@ -1518,6 +1624,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/v2".into(),
                 backend: "v2".into(),
                 strip_prefix: false,
@@ -1589,6 +1696,7 @@ mod tests {
     #[test]
     fn select_path_route_header_match_is_case_insensitive() {
         let paths = vec![PathRoute {
+            timeout_ms: None,
             prefix: "/".into(),
             backend: "matched".into(),
             strip_prefix: false,
@@ -1641,6 +1749,7 @@ mod tests {
             listeners: vec![listener],
             https_routes: vec![crate::ir::compile::CompiledL4Route {
                 listener_id: "https".into(),
+                listener_hostname: crate::ir::HostnameMatch::Any,
                 match_: crate::ir::L4Match::Any,
                 action: crate::ir::L4Action::TerminateAndHttp("127.0.0.1:10443".into()),
                 priority: 0,
@@ -1670,6 +1779,7 @@ mod tests {
             listeners: vec![listener],
             https_routes: vec![crate::ir::compile::CompiledL4Route {
                 listener_id: "http".into(),
+                listener_hostname: crate::ir::HostnameMatch::Any,
                 match_: crate::ir::L4Match::Any,
                 action: crate::ir::L4Action::TerminateAndHttp("127.0.0.1:8080".into()),
                 priority: 0,

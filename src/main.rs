@@ -18,6 +18,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kube::Client;
 use pingora::server::{configuration::Opt, Server};
+use pingora_core::apps::HttpServerOptions;
 use pingora_proxy::http_proxy_service;
 use std::sync::RwLock;
 
@@ -486,6 +487,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
         // performs host-level routing.
         startup_ir.l4_routes.push(ir::L4Route {
             listener_id: Arc::clone(&https_listener_id),
+            listener_hostname: ir::HostnameMatch::Any,
             match_: ir::L4Match::Any,
             action: ir::L4Action::TerminateAndHttp(Arc::from(pingora_http_addr)),
         });
@@ -496,9 +498,12 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     // 4b. Spawn the L4 socket manager and wire it to RouteManager updates.
     let l4_config = route_manager.l4_config();
+    let sni_context: Arc<std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<str>>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let l4_router = Arc::new(sunbeam_proxy::l4::router::Router::new(
         Arc::clone(&l4_config),
         Arc::clone(&tls_registry),
+        Arc::clone(&sni_context),
     ));
     let l4_manager = sunbeam_proxy::l4::manager::spawn_with_config(
         Arc::clone(&tls_registry),
@@ -540,6 +545,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 .map(|rl| rl.bypass_cidrs.clone())
                 .unwrap_or_default(),
         ),
+        trusted_proxy_cidrs: crate::rate_limit::cidr::parse_cidrs(&cfg.trusted_proxy_cidrs),
         cluster: cluster_handle.clone(),
         ddos_observe_only: cfg.ddos.as_ref().map(|d| d.observe_only).unwrap_or(false),
         scanner_observe_only: cfg
@@ -547,8 +553,14 @@ fn run_serve(upgrade: bool) -> Result<()> {
             .as_ref()
             .map(|s| s.observe_only)
             .unwrap_or(false),
+        sni_context,
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
+    if let Some(app) = svc.app_logic_mut() {
+        let mut server_options = HttpServerOptions::default();
+        server_options.h2c = true;
+        app.server_options = Some(server_options);
+    }
 
     // Port 80: always serve plain HTTP (ACME challenges + redirect to HTTPS).
     svc.add_tcp(&cfg.listen.http);

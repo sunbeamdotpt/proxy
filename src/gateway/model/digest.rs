@@ -3,10 +3,10 @@
 
 //! Stable canonical digest of a [`ReconciledView`].
 
-use super::routing::HTTPRouteState;
+use super::routing::{HTTPRouteState, TCPRouteState, TLSRouteState, UDPRouteState};
 use super::view::{
-    GatewayState, GrantSubject, ListenerState, ParentRef, ReconciledView, ReferenceGrantState,
-    RouteState,
+    AllowedRoutes, GatewayState, GrantSubject, ListenerSetState, ListenerState, NamespaceFrom,
+    ParentRef, ReconciledView, ReferenceGrantState, RouteGroupKind, RouteNamespaces, RouteState,
 };
 
 /// Compute a stable, deterministic [`blake3::Hash`] for a [`ReconciledView`].
@@ -39,6 +39,18 @@ fn encode_view(buf: &mut Vec<u8>, view: &ReconciledView) {
         encode_gateway(buf, g);
     }
 
+    // ListenerSets — sorted by (namespace, name).
+    let mut listener_sets = view.listener_sets.clone();
+    listener_sets.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    encode_u32(buf, listener_sets.len() as u32);
+    for s in &listener_sets {
+        encode_listener_set(buf, s);
+    }
+
     // Routes — sorted by (kind, namespace, name).
     let mut routes = view.routes.clone();
     routes.sort_by(|a, b| {
@@ -64,6 +76,11 @@ fn encode_view(buf: &mut Vec<u8>, view: &ReconciledView) {
         encode_http_route(buf, r);
     }
 
+    // TCP/UDP/TLS routes — sorted by (namespace, name).
+    encode_tcp_routes(buf, &view.tcp_routes);
+    encode_udp_routes(buf, &view.udp_routes);
+    encode_tls_routes(buf, &view.tls_routes);
+
     // ReferenceGrants — sorted by (namespace, name).
     let mut grants = view.reference_grants.clone();
     grants.sort_by(|a, b| {
@@ -75,6 +92,13 @@ fn encode_view(buf: &mut Vec<u8>, view: &ReconciledView) {
     for g in &grants {
         encode_reference_grant(buf, g);
     }
+
+    // Namespace labels used by allowedRoutes selectors.
+    encode_namespace_labels(buf, &view.namespace_labels);
+
+    // Allowed routes configured on Gateway and ListenerSet listeners.
+    encode_allowed_routes_map(buf, &view.listener_allowed);
+    encode_allowed_routes_map(buf, &view.listener_set_allowed);
 }
 
 fn encode_gateway(buf: &mut Vec<u8>, g: &GatewayState) {
@@ -364,9 +388,13 @@ fn encode_route_filter(buf: &mut Vec<u8>, f: &super::routing::RouteFilter) {
             encode_option_u16(buf, port);
             encode_u16(buf, *status_code);
         }
-        RouteFilter::RequestMirror { backend } => {
+        RouteFilter::RequestMirror { backend, fraction } => {
             buf.push(0x08);
             encode_str(buf, backend);
+            if let Some(f) = fraction {
+                buf.extend_from_slice(&f.numerator.to_be_bytes());
+                buf.extend_from_slice(&f.denominator.to_be_bytes());
+            }
         }
         RouteFilter::Cors {
             allow_origins,
@@ -492,6 +520,213 @@ fn encode_grant_subject(buf: &mut Vec<u8>, s: &GrantSubject) {
     encode_option_str(buf, &s.name);
 }
 
+fn encode_listener_set(buf: &mut Vec<u8>, s: &ListenerSetState) {
+    encode_str(buf, &s.namespace);
+    encode_str(buf, &s.name);
+    encode_i64(buf, s.generation);
+
+    let mut listeners = s.listeners.clone();
+    listeners.sort_by(|a, b| a.name.cmp(&b.name));
+    encode_u32(buf, listeners.len() as u32);
+    for l in &listeners {
+        encode_listener(buf, l);
+    }
+
+    let mut conflicts: Vec<_> = s.conflicts.iter().collect();
+    conflicts.sort_by(|a, b| a.0.cmp(b.0));
+    encode_u32(buf, conflicts.len() as u32);
+    for (name, reason) in &conflicts {
+        encode_str(buf, name);
+        encode_str(buf, reason);
+    }
+
+    buf.push(if s.accepted { 0x01 } else { 0x00 });
+    buf.push(if s.programmed { 0x01 } else { 0x00 });
+    encode_str(buf, &s.reason);
+}
+
+fn encode_tcp_route(buf: &mut Vec<u8>, r: &TCPRouteState) {
+    encode_str(buf, &r.namespace);
+    encode_str(buf, &r.name);
+    encode_i64(buf, r.generation);
+    encode_parent_refs(buf, &r.parent_refs);
+    encode_u32(buf, r.backends.len() as u32);
+    for b in &r.backends {
+        encode_weighted_backend(buf, b);
+    }
+    buf.push(if r.programmed { 0x01 } else { 0x00 });
+}
+
+fn encode_udp_route(buf: &mut Vec<u8>, r: &UDPRouteState) {
+    encode_str(buf, &r.namespace);
+    encode_str(buf, &r.name);
+    encode_i64(buf, r.generation);
+    encode_parent_refs(buf, &r.parent_refs);
+    encode_u32(buf, r.backends.len() as u32);
+    for b in &r.backends {
+        encode_weighted_backend(buf, b);
+    }
+    buf.push(if r.programmed { 0x01 } else { 0x00 });
+}
+
+fn encode_tls_route(buf: &mut Vec<u8>, r: &TLSRouteState) {
+    encode_str(buf, &r.namespace);
+    encode_str(buf, &r.name);
+    encode_i64(buf, r.generation);
+    encode_parent_refs(buf, &r.parent_refs);
+
+    let mut hostnames = r.hostnames.clone();
+    hostnames.sort_by(|a, b| {
+        use super::routing::HostnameMatch;
+        match (a, b) {
+            (HostnameMatch::Exact(a), HostnameMatch::Exact(b)) => a.cmp(b),
+            (HostnameMatch::Exact(_), _) => std::cmp::Ordering::Less,
+            (HostnameMatch::Wildcard(a), HostnameMatch::Wildcard(b)) => a.cmp(b),
+            (HostnameMatch::Wildcard(_), HostnameMatch::Exact(_)) => std::cmp::Ordering::Greater,
+            (HostnameMatch::Wildcard(_), HostnameMatch::Any) => std::cmp::Ordering::Less,
+            (HostnameMatch::Any, HostnameMatch::Any) => std::cmp::Ordering::Equal,
+            (HostnameMatch::Any, _) => std::cmp::Ordering::Greater,
+        }
+    });
+    encode_u32(buf, hostnames.len() as u32);
+    for h in &hostnames {
+        match h {
+            super::routing::HostnameMatch::Exact(s) => {
+                buf.push(0x00);
+                encode_str(buf, s);
+            }
+            super::routing::HostnameMatch::Wildcard(s) => {
+                buf.push(0x01);
+                encode_str(buf, s);
+            }
+            super::routing::HostnameMatch::Any => {
+                buf.push(0x02);
+            }
+        }
+    }
+
+    encode_u32(buf, r.backends.len() as u32);
+    for b in &r.backends {
+        encode_weighted_backend(buf, b);
+    }
+    buf.push(if r.programmed { 0x01 } else { 0x00 });
+}
+
+fn encode_tcp_routes(buf: &mut Vec<u8>, routes: &[TCPRouteState]) {
+    let mut routes = routes.to_vec();
+    routes.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    encode_u32(buf, routes.len() as u32);
+    for r in &routes {
+        encode_tcp_route(buf, r);
+    }
+}
+
+fn encode_udp_routes(buf: &mut Vec<u8>, routes: &[UDPRouteState]) {
+    let mut routes = routes.to_vec();
+    routes.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    encode_u32(buf, routes.len() as u32);
+    for r in &routes {
+        encode_udp_route(buf, r);
+    }
+}
+
+fn encode_tls_routes(buf: &mut Vec<u8>, routes: &[TLSRouteState]) {
+    let mut routes = routes.to_vec();
+    routes.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    encode_u32(buf, routes.len() as u32);
+    for r in &routes {
+        encode_tls_route(buf, r);
+    }
+}
+
+fn encode_namespace_labels(buf: &mut Vec<u8>, labels: &super::view::NamespaceLabels) {
+    encode_u32(buf, labels.len() as u32);
+    for (ns, inner) in labels {
+        encode_str(buf, ns);
+        encode_u32(buf, inner.len() as u32);
+        for (k, v) in inner {
+            encode_str(buf, k);
+            encode_str(buf, v);
+        }
+    }
+}
+
+fn encode_allowed_routes_map(buf: &mut Vec<u8>, map: &super::view::ListenerAllowedMap) {
+    encode_u32(buf, map.len() as u32);
+    for ((ns, name, listener), allowed) in map {
+        encode_str(buf, ns);
+        encode_str(buf, name);
+        encode_str(buf, listener);
+        encode_allowed_routes(buf, allowed);
+    }
+}
+
+fn encode_allowed_routes(buf: &mut Vec<u8>, allowed: &AllowedRoutes) {
+    let mut kinds = allowed.kinds.clone();
+    kinds.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.kind.cmp(&b.kind)));
+    encode_u32(buf, kinds.len() as u32);
+    for k in &kinds {
+        encode_route_group_kind(buf, k);
+    }
+    encode_route_namespaces(buf, &allowed.namespaces);
+}
+
+fn encode_route_group_kind(buf: &mut Vec<u8>, k: &RouteGroupKind) {
+    encode_str(buf, &k.group);
+    encode_str(buf, &k.kind);
+}
+
+fn encode_route_namespaces(buf: &mut Vec<u8>, ns: &RouteNamespaces) {
+    encode_namespace_from(buf, ns.from);
+    if let Some(selector) = &ns.selector {
+        buf.push(0x01);
+        encode_u32(buf, selector.len() as u32);
+        let mut pairs: Vec<_> = selector.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in pairs {
+            encode_str(buf, k);
+            encode_str(buf, v);
+        }
+    } else {
+        buf.push(0x00);
+    }
+}
+
+fn encode_namespace_from(buf: &mut Vec<u8>, from: NamespaceFrom) {
+    buf.push(match from {
+        NamespaceFrom::Same => 0x00,
+        NamespaceFrom::All => 0x01,
+        NamespaceFrom::Selector => 0x02,
+        NamespaceFrom::None => 0x03,
+    });
+}
+
+fn encode_parent_refs(buf: &mut Vec<u8>, refs: &[ParentRef]) {
+    let mut refs = refs.to_vec();
+    refs.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.section_name.cmp(&b.section_name))
+    });
+    encode_u32(buf, refs.len() as u32);
+    for p in &refs {
+        encode_parent_ref(buf, p);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Primitive encoders — fixed width, big endian.
 // ---------------------------------------------------------------------------
@@ -539,6 +774,7 @@ mod tests {
 
     fn sample_view() -> ReconciledView {
         ReconciledView {
+            listener_sets: vec![],
             gateways: vec![GatewayState {
                 namespace: arc("default"),
                 name: arc("gw-1"),
@@ -566,15 +802,15 @@ mod tests {
                 kind: arc("HTTPRoute"),
                 generation: 2,
                 parent_refs: vec![ParentRef {
+                    group: Arc::from("gateway.networking.k8s.io"),
+                    kind: Arc::from("Gateway"),
+
                     namespace: Some(arc("default")),
                     name: arc("gw-1"),
                     section_name: Some(arc("http")),
-                }],
+            port: None,}],
             }],
             http_routes: vec![],
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
                 namespace: arc("default"),
                 name: arc("grant-1"),
@@ -592,6 +828,7 @@ mod tests {
                     name: Some(arc("svc-1")),
                 }],
             }],
+            ..Default::default()
         }
     }
 
@@ -681,13 +918,8 @@ mod tests {
 
     fn view_with_http_routes(routes: Vec<HTTPRouteState>) -> ReconciledView {
         ReconciledView {
-            gateways: vec![],
-            routes: vec![],
             http_routes: routes,
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
-            reference_grants: vec![],
+            ..Default::default()
         }
     }
 
@@ -760,10 +992,13 @@ mod tests {
     fn http_route_parent_ref_changes_digest() {
         let mut a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
         a.http_routes[0].parent_refs.push(ParentRef {
+            group: Arc::from("gateway.networking.k8s.io"),
+            kind: Arc::from("Gateway"),
+
             namespace: None,
             name: arc("gw-1"),
             section_name: None,
-        });
+            port: None,});
         let mut b = a.clone();
         b.http_routes[0].parent_refs[0].name = arc("gw-2");
         assert_ne!(compute_digest(&a), compute_digest(&b));
@@ -774,7 +1009,8 @@ mod tests {
         let mut a = view_with_http_routes(vec![http_route("r1", vec![], 1)]);
         a.http_routes[0].rules.push(HTTPRouteRule {
             programmed: true,
-            timeout_secs: None,
+            timeout_ms: None,
+            request_timeout_ms: None,
             matches: vec![RouteMatch {
                 path: Some(PathMatch::Prefix(arc("/api"))),
                 headers: vec![],
@@ -784,7 +1020,7 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: arc("svc:80"),
                 weight: 1,
-
+                protocol: crate::ir::BackendProtocol::Http,
                 filters: vec![],
             }],
             filters: vec![],
@@ -807,7 +1043,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Exact(arc("/e"))),
                     headers: vec![],
@@ -827,7 +1064,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Prefix(arc("/p"))),
                     headers: vec![],
@@ -847,7 +1085,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![RouteMatch {
                     path: Some(PathMatch::Regex(arc("^/r$"))),
                     headers: vec![],
@@ -876,7 +1115,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![RouteMatch {
                     path: None,
                     headers: vec![HeaderMatch {
@@ -913,7 +1153,8 @@ mod tests {
                 hostnames: vec![],
                 rules: vec![HTTPRouteRule {
                     programmed: true,
-                    timeout_secs: None,
+                    timeout_ms: None,
+                    request_timeout_ms: None,
                     matches: vec![],
                     backends: vec![],
                     filters: vec![filter],
@@ -978,19 +1219,20 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![
                     WeightedBackend {
                         backend: arc("b:80"),
                         weight: 2,
-
+                        protocol: crate::ir::BackendProtocol::Http,
                         filters: vec![],
                     },
                     WeightedBackend {
                         backend: arc("a:80"),
                         weight: 1,
-
+                        protocol: crate::ir::BackendProtocol::Http,
                         filters: vec![],
                     },
                 ],
@@ -1007,12 +1249,6 @@ mod tests {
     #[test]
     fn reference_grant_subjects_affect_digest() {
         let base = ReconciledView {
-            gateways: vec![],
-            routes: vec![],
-            http_routes: vec![],
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
             reference_grants: vec![ReferenceGrantState {
                 namespace: arc("default"),
                 name: arc("g1"),
@@ -1030,6 +1266,7 @@ mod tests {
                     name: Some(arc("svc")),
                 }],
             }],
+            ..Default::default()
         };
         let mut changed = base.clone();
         changed.reference_grants[0].from[0].name = Some(arc("specific"));
@@ -1045,11 +1282,13 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![],
                 filters: vec![RouteFilter::RequestMirror {
                     backend: arc("mirror-svc:80"),
+                    fraction: None,
                 }],
             }],
             parent_refs: vec![],
@@ -1062,11 +1301,13 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![],
                 filters: vec![RouteFilter::RequestMirror {
                     backend: arc("other-svc:80"),
+                    fraction: None,
                 }],
             }],
             parent_refs: vec![],
@@ -1084,7 +1325,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![],
                 filters: vec![RouteFilter::Cors {
@@ -1106,7 +1348,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![],
                 filters: vec![RouteFilter::Cors {
@@ -1133,7 +1376,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![
                     RouteMatch {
                         path: Some(PathMatch::Prefix(arc("/z"))),
@@ -1188,7 +1432,8 @@ mod tests {
             hostnames: vec![],
             rules: vec![HTTPRouteRule {
                 programmed: true,
-                timeout_secs: None,
+                timeout_ms: None,
+                request_timeout_ms: None,
                 matches: vec![],
                 backends: vec![],
                 filters: filters.clone(),

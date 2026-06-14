@@ -13,6 +13,7 @@ pub mod gatewayclass;
 pub mod httproute;
 pub mod l4route;
 pub mod leader;
+pub mod listenerset;
 pub mod refgrant;
 
 pub use leader::run_reconcile_loop;
@@ -38,8 +39,10 @@ pub fn strip_last_transition_time(v: &Value) -> Value {
     }
 }
 
-use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute};
-use crate::gateway::model::{GatewayView, RouteState};
+use crate::gateway::api::{
+    Gateway, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
+};
+use crate::gateway::model::{GatewayView, ListenerSetState, RouteState};
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::httproute::{
     parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
@@ -50,33 +53,43 @@ use crate::gateway::reconcile::l4route::{
     resolve_l4_backends_async,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
-use kube::api::Api;
+use kube::api::{Api, Patch, PatchParams};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// List an optional L4 route CRD, returning an empty list when the CRD is not
-/// installed or the list call fails. HTTP routing is the primary concern of the
-/// reconcile tick; missing TCP/UDP/TLS CRDs should not block Gateway API HTTP
-/// routes from being programmed.
-async fn list_l4_routes<T>(api: &Api<T>, kind: &str) -> Vec<T>
+/// installed. Other list failures (e.g. API server 429 during CRD storage
+/// initialization) are propagated as `None` so the reconcile tick can retry on
+/// the next interval instead of programming an empty route table.
+async fn list_l4_routes<T>(api: &Api<T>, kind: &str) -> Option<Vec<T>>
 where
     T: kube::Resource<DynamicType = ()> + serde::de::DeserializeOwned + std::fmt::Debug + Clone,
 {
     match api.list(&Default::default()).await {
-        Ok(list) => list.items,
+        Ok(list) => Some(list.items),
         Err(e) => {
             let is_missing = matches!(&e, kube::Error::Api(s) if s.code == 404);
             if is_missing {
                 tracing::debug!(kind, "L4 route CRD is not installed; treating as empty");
+                Some(vec![])
             } else {
-                tracing::warn!(error = %e, kind, "failed to list L4 routes; treating as empty");
+                tracing::warn!(error = %e, kind, "failed to list L4 routes; skipping tick");
+                None
             }
-            vec![]
         }
     }
 }
 
 /// Single reconcile tick: fetch all Gateway API objects and emit a view.
 pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
+    reconcile_tick_with_leader(client, false).await
+}
+
+/// Single reconcile tick with optional leader status writeback.
+pub async fn reconcile_tick_with_leader(
+    client: &kube::Client,
+    is_leader: bool,
+) -> Option<GatewayView> {
     let gateways: Api<Gateway> = Api::all(client.clone());
     let httproutes: Api<HTTPRoute> = Api::all(client.clone());
     let grants: Api<ReferenceGrant> = Api::all(client.clone());
@@ -87,6 +100,25 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
         Err(e) => {
             tracing::warn!(error = %e, "failed to list Gateways");
             return None;
+        }
+    };
+
+    let listenersets: Api<ListenerSet> = Api::all(client.clone());
+    let listenerset_list = match listenersets.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            let is_missing = matches!(&e, kube::Error::Api(s) if s.code == 404);
+            if is_missing {
+                tracing::debug!("ListenerSet CRD is not installed; treating as empty");
+                kube::core::object::ObjectList {
+                    types: kube::core::TypeMeta::default(),
+                    metadata: kube::core::ListMeta::default(),
+                    items: vec![],
+                }
+            } else {
+                tracing::warn!(error = %e, "failed to list ListenerSets; skipping tick");
+                return None;
+            }
         }
     };
 
@@ -135,11 +167,36 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
     let listener_allowed =
         crate::gateway::reconcile::gateway::build_listener_allowed_map(&gateway_list.items);
 
+    let mut listener_set_states: Vec<ListenerSetState> = Vec::new();
+    for ls in &listenerset_list.items {
+        listener_set_states.push(
+            crate::gateway::reconcile::listenerset::build_listener_set_state(
+                ls,
+                &gateway_list.items,
+                &namespace_labels,
+                client,
+                &grant_index,
+            )
+            .await,
+        );
+    }
+    crate::gateway::reconcile::listenerset::resolve_listener_set_conflicts(
+        &mut listener_set_states,
+        &gateway_states,
+    );
+    let listener_set_allowed =
+        crate::gateway::reconcile::listenerset::build_listener_set_allowed_map(
+            &listenerset_list.items,
+            &listener_set_states,
+        );
+
     let reconciled_routes = reconcile_httproutes_with_context(
         &httproute_list.items,
         &gateway_states,
+        &listener_set_states,
         &namespace_labels,
         &listener_allowed,
+        &listener_set_allowed,
         &grant_index,
     );
 
@@ -175,9 +232,18 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
     let udproutes: Api<UDPRoute> = Api::all(client.clone());
     let tlsroutes: Api<TLSRoute> = Api::all(client.clone());
 
-    let tcp_route_items = list_l4_routes(&tcproutes, "TCPRoute").await;
-    let udp_route_items = list_l4_routes(&udproutes, "UDPRoute").await;
-    let tls_route_items = list_l4_routes(&tlsroutes, "TLSRoute").await;
+    let tcp_route_items = match list_l4_routes(&tcproutes, "TCPRoute").await {
+        Some(items) => items,
+        None => return None,
+    };
+    let udp_route_items = match list_l4_routes(&udproutes, "UDPRoute").await {
+        Some(items) => items,
+        None => return None,
+    };
+    let tls_route_items = match list_l4_routes(&tlsroutes, "TLSRoute").await {
+        Some(items) => items,
+        None => return None,
+    };
 
     let tcp_reconciled = reconcile_tcproutes(
         &tcp_route_items,
@@ -263,14 +329,82 @@ pub async fn reconcile_tick(client: &kube::Client) -> Option<GatewayView> {
 
     let reference_grants = grant_states;
 
+    crate::gateway::reconcile::listenerset::patch_listener_set_statuses(
+        client,
+        &listenerset_list.items,
+        &listener_set_states,
+        &httproute_list.items,
+        &namespace_labels,
+        is_leader,
+    )
+    .await;
+
+    if is_leader {
+        for gw in &gateway_list.items {
+            let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
+            let gw_name = gw.metadata.name.as_deref().unwrap_or("");
+            let current = gw
+                .status
+                .as_ref()
+                .and_then(|s| s.attached_listener_sets)
+                .unwrap_or(0) as i64;
+            let desired = crate::gateway::reconcile::listenerset::count_attached_listener_sets(
+                gw_ns,
+                gw_name,
+                &listener_set_states,
+            );
+            if current != desired {
+                let patch = serde_json::json!({ "status": { "attachedListenerSets": desired } });
+                let api: Api<Gateway> = Api::namespaced(client.clone(), gw_ns);
+                if let Err(e) = api
+                    .patch_status(
+                        gw_name,
+                        &PatchParams::apply("sunbeam-proxy"),
+                        &Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, %gw_ns, %gw_name, "failed to patch Gateway attachedListenerSets");
+                } else {
+                    tracing::debug!(%gw_ns, %gw_name, desired, "patched Gateway attachedListenerSets");
+                }
+            }
+        }
+    }
+
+    let namespace_labels_arc: crate::gateway::model::NamespaceLabels = namespace_labels
+        .into_iter()
+        .map(|(ns, labels)| {
+            (
+                Arc::from(ns),
+                labels
+                    .into_iter()
+                    .map(|(k, v)| (Arc::from(k), Arc::from(v)))
+                    .collect(),
+            )
+        })
+        .collect();
+    let listener_allowed_arc: crate::gateway::model::ListenerAllowedMap = listener_allowed
+        .into_iter()
+        .map(|((ns, name, ln), allowed)| ((Arc::from(ns), Arc::from(name), Arc::from(ln)), allowed))
+        .collect();
+    let listener_set_allowed_arc: crate::gateway::model::ListenerAllowedMap = listener_set_allowed
+        .into_iter()
+        .map(|((ns, name, ln), allowed)| ((Arc::from(ns), Arc::from(name), Arc::from(ln)), allowed))
+        .collect();
+
     Some(GatewayView {
         gateways: gateway_states,
+        listener_sets: listener_set_states,
         routes,
         http_routes,
         tcp_routes,
         udp_routes,
         tls_routes,
         reference_grants,
+        namespace_labels: namespace_labels_arc,
+        listener_allowed: listener_allowed_arc,
+        listener_set_allowed: listener_set_allowed_arc,
     })
 }
 
@@ -536,7 +670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_tick_tolerates_l4_route_list_errors() {
+    async fn reconcile_tick_returns_none_on_l4_route_list_errors() {
         let gateway = serde_json::json!({
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "Gateway",
@@ -612,13 +746,7 @@ mod tests {
             }),
             "default",
         );
-        let view = reconcile_tick(&client)
-            .await
-            .expect("reconcile_tick tolerates L4 list errors");
-        assert_eq!(view.gateways.len(), 1);
-        assert!(view.tcp_routes.is_empty());
-        assert!(view.udp_routes.is_empty());
-        assert!(view.tls_routes.is_empty());
+        assert!(reconcile_tick(&client).await.is_none());
     }
 
     #[test]

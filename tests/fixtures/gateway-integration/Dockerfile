@@ -1,5 +1,9 @@
-FROM gcr.io/distroless/static-debian12:nonroot
-COPY sunbeam-proxy /usr/local/bin/sunbeam-proxy
-USER nonroot:nonroot
+# Pinned digest for gcr.io/distroless/static-debian12:nonroot (multi-arch index).
+FROM gcr.io/distroless/static-debian12@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+
+COPY --chown=65532:65532 sunbeam-proxy /usr/local/bin/sunbeam-proxy
+
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/sunbeam-proxy"]
 CMD ["serve"]

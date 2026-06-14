@@ -39,6 +39,29 @@ impl SunbeamProxy {
 
         metrics::ACTIVE_CONNECTIONS.inc();
 
+        // HTTPS listener misdirected request detection: if the SNI selected a
+        // different listener than the request Host/Authority, return 421.
+        if ctx.downstream_scheme == "https" {
+            if let Some(sni) = self.sni_for_session(session) {
+                let host = extract_host(session);
+                let port = ctx.downstream_port;
+                let l4 = self.l4_config.load();
+                let sni_listener = l4.listener_hostname_for(&sni, port);
+                let host_listener = l4.listener_hostname_for(&host, port);
+                let mismatched = match (&sni_listener, &host_listener) {
+                    (Some(s), Some(h)) => s != h,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                if mismatched {
+                    let mut resp = ResponseHeader::build(421, None)?;
+                    resp.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
+                }
+            }
+        }
+
         if is_plain_http(session) {
             // cert-manager HTTP-01 challenge: look up the token path in the
             // Ingress-backed route table. Each challenge Ingress maps exactly
@@ -68,7 +91,8 @@ impl SunbeamProxy {
             // return 404 rather than redirecting to HTTPS.
             let headers = &session.req_header().headers;
             let query = session.req_header().uri.query();
-            let matched_plan = self.lookup_plan(&host, &path, &method, headers, query);
+            let matched_plan =
+                self.lookup_plan(&host, ctx.downstream_port, &path, &method, headers, query);
 
             if matched_plan.as_ref().is_some_and(|p| {
                 // Gateway API HTTP listeners must serve traffic without
@@ -79,6 +103,33 @@ impl SunbeamProxy {
                 // (e.g. a redirect or fixed response), execute it now; otherwise
                 // continue to upstream_peer for normal routing.
                 ctx.plan = matched_plan;
+
+                // CORS preflight requests are answered locally so that the upstream
+                // backend never sees them. The synthetic 204 carries the configured
+                // CORS headers when the Origin is allowed.
+                if let Some(plan) = ctx.plan.as_ref() {
+                    if session.req_header().method == http::Method::OPTIONS {
+                        if let Some(cors) = plan.response_mutations.iter().find_map(|m| match m {
+                            crate::ir::compile::ResponseMutation::Cors(c) => Some(c),
+                            _ => None,
+                        }) {
+                            let headers = &session.req_header().headers;
+                            if headers.get("origin").is_some()
+                                && headers.get("access-control-request-method").is_some()
+                            {
+                                let mut resp = ResponseHeader::build(204, None)?;
+                                super::filters::apply_response_mutation(
+                                    session,
+                                    &mut resp,
+                                    &crate::ir::compile::ResponseMutation::Cors(cors.clone()),
+                                )?;
+                                session.write_response_header(Box::new(resp), true).await?;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+
                 if let Some(plan) = ctx.plan.as_ref() {
                     for stage in &plan.request_stages {
                         if let crate::ir::compile::RequestStage::Terminal(terminal) = stage {
@@ -129,7 +180,8 @@ impl SunbeamProxy {
 
         // Skip the detection pipeline for trusted IPs (localhost, pod network),
         // but still perform the single route lookup below.
-        if extract_client_ip(session)
+        if self
+            .extract_client_ip(session)
             .map(|ip| crate::rate_limit::cidr::is_bypassed(ip, &self.pipeline_bypass_cidrs))
             .unwrap_or(false)
         {
@@ -137,7 +189,7 @@ impl SunbeamProxy {
         } else {
             // DDoS detection: check the client IP against the KNN model.
             if let Some(detector) = &self.ddos_detector {
-                if let Some(ip) = extract_client_ip(session) {
+                if let Some(ip) = self.extract_client_ip(session) {
                     let method = session.req_header().method.as_str();
                     let path = session.req_header().uri.path();
                     let host = extract_host(session);
@@ -245,7 +297,7 @@ impl SunbeamProxy {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                let client_ip = extract_client_ip(session);
+                let client_ip = self.extract_client_ip(session);
 
                 // Bot allowlist: verified crawlers/agents bypass the scanner model.
                 let bot_reason = self
@@ -311,7 +363,7 @@ impl SunbeamProxy {
 
             // Rate limiting: per-identity throttling.
             if let Some(limiter) = &self.rate_limiter {
-                if let Some(ip) = extract_client_ip(session) {
+                if let Some(ip) = self.extract_client_ip(session) {
                     let cookie = session
                         .req_header()
                         .headers
@@ -394,7 +446,8 @@ impl SunbeamProxy {
         let method = session.req_header().method.to_string();
         let headers = session.req_header().headers.clone();
         let query = session.req_header().uri.query().map(|s| s.to_string());
-        let plan = self.lookup_plan(&host, &path, &method, &headers, query.as_deref());
+        let plan =
+            self.lookup_plan(&host, ctx.downstream_port, &path, &method, &headers, query.as_deref());
 
         if let Some(plan) = plan {
             ctx.plan = Some(Arc::clone(&plan));
@@ -439,7 +492,7 @@ impl SunbeamProxy {
             }
         } else {
             // No matching rule.
-            if self.has_matching_gateway_api_listener(&host) {
+            if self.has_matching_gateway_api_listener(&host, ctx.downstream_port) {
                 // Gateway API route: unmatched hosts/paths return 404.
                 ctx.plan = None;
                 return Ok(false);
@@ -563,16 +616,24 @@ impl SunbeamProxy {
                 }
             }
             if !cors.allow_methods.is_empty() {
-                resp.insert_header(
-                    "Access-Control-Allow-Methods",
-                    cors.allow_methods.join(", "),
-                )?;
+                let allowed_methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
+                    if cors.allow_credentials {
+                        requested_method.unwrap_or("*").to_string()
+                    } else {
+                        "*".to_string()
+                    }
+                } else {
+                    cors.allow_methods.join(", ")
+                };
+                resp.insert_header("Access-Control-Allow-Methods", allowed_methods)?;
             }
             if !cors.allow_headers.is_empty() {
-                let allowed = if cors.allow_headers.iter().any(|h| h.as_ref() == "*")
-                    && requested_headers.is_some()
-                {
-                    requested_headers.unwrap_or("").to_string()
+                let allowed = if cors.allow_headers.iter().any(|h| h.as_ref() == "*") {
+                    if cors.allow_credentials {
+                        requested_headers.unwrap_or("*").to_string()
+                    } else {
+                        "*".to_string()
+                    }
                 } else {
                     cors.allow_headers.join(", ")
                 };
@@ -663,6 +724,14 @@ impl SunbeamProxy {
                 for (name, value) in headers {
                     resp.insert_header(name.to_string(), value.as_ref())?;
                 }
+                // Default to text/plain to prevent browsers from MIME-sniffing a
+                // missing Content-Type and executing untrusted fixed responses.
+                if !headers
+                    .iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+                {
+                    resp.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+                }
                 if let Some(body) = body {
                     resp.insert_header("Content-Length", body.len().to_string())?;
                     session.write_response_header(Box::new(resp), false).await?;
@@ -729,6 +798,7 @@ mod tests {
             l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -737,6 +807,7 @@ mod tests {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: crate::rate_limit::cidr::parse_cidrs(&["127.0.0.0/8".into()]),
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -747,7 +818,7 @@ mod tests {
         let proxy = make_proxy();
         proxy.routes.store(Arc::new(table));
         proxy
-    }
+}
 
     async fn make_session_pair(
         method: &str,
@@ -770,6 +841,7 @@ mod tests {
         server.write_all(request.as_bytes()).await.unwrap();
         let mut session = Session::new_h1(Box::new(Stream::from(client)));
         session.as_downstream_mut().read_request().await.unwrap();
+        set_peer_addr(&mut session, "127.0.0.1:12345".parse().unwrap());
         (session, server)
     }
 
@@ -784,6 +856,18 @@ mod tests {
         )));
     }
 
+    fn set_peer_addr(session: &mut Session, addr: std::net::SocketAddr) {
+        use pingora_core::protocols::l4::socket::SocketAddr as PSocketAddr;
+        use pingora_core::protocols::SocketDigest;
+        let digest = session.as_downstream_mut().digest_mut().unwrap();
+        let socket_digest = SocketDigest::from_raw_fd(-1);
+        socket_digest
+            .peer_addr
+            .set(Some(PSocketAddr::Inet(addr)))
+            .ok();
+        digest.socket_digest = Some(Arc::new(socket_digest));
+    }
+
     fn host_node_with_plan(
         hostname: HostnameMatch,
         gateway_api: bool,
@@ -796,6 +880,7 @@ mod tests {
             hostname,
             listener_ids: vec![],
             listener_hostname: None,
+            listener_port: None,
             gateway_api,
             disable_secure_redirection,
             path_trie: trie,
@@ -931,6 +1016,7 @@ mod tests {
             hostname: HostnameMatch::Exact("gw.example.com".into()),
             listener_ids: vec![],
             listener_hostname: None,
+            listener_port: None,
             gateway_api: true,
             disable_secure_redirection: false,
             path_trie: PathTrieNode::default(),
@@ -1107,7 +1193,9 @@ mod tests {
         );
         let table = table_with_host_node("example.com", node);
         let mut proxy = make_proxy_with_routes(table);
-        proxy.pipeline_bypass_cidrs = crate::rate_limit::cidr::parse_cidrs(&["127.0.0.0/8".into()]);
+        let local = crate::rate_limit::cidr::parse_cidrs(&["127.0.0.0/8".into()]);
+        proxy.pipeline_bypass_cidrs = local.clone();
+        proxy.trusted_proxy_cidrs = local;
         let (mut session, _server) = make_session_pair(
             "GET",
             "/",
@@ -1125,6 +1213,33 @@ mod tests {
         assert!(
             ctx.plan.is_some(),
             "bypassed requests still receive a route plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_headers_used_when_peer_is_trusted() {
+        let mut proxy = make_proxy();
+        proxy.trusted_proxy_cidrs = crate::rate_limit::cidr::parse_cidrs(&["127.0.0.0/8".into()]);
+        let (mut session, _server) =
+            make_session_pair("GET", "/", "example.com", &[("x-real-ip", "192.0.2.42")]).await;
+        set_peer_addr(&mut session, "127.0.0.1:12345".parse().unwrap());
+        assert_eq!(
+            proxy.extract_client_ip(&session),
+            Some("192.0.2.42".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_peer_ignores_spoofed_headers() {
+        let mut proxy = make_proxy();
+        proxy.trusted_proxy_cidrs = vec![];
+        let (mut session, _server) =
+            make_session_pair("GET", "/", "example.com", &[("x-real-ip", "192.0.2.42")]).await;
+        set_peer_addr(&mut session, "127.0.0.1:12345".parse().unwrap());
+        let ip = proxy.extract_client_ip(&session).unwrap();
+        assert!(
+            ip.is_loopback(),
+            "expected loopback socket address, got {ip}"
         );
     }
 
@@ -1448,10 +1563,12 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: "http://127.0.0.1:1".into(),
                     weight: 1,
+                    protocol: crate::ir::BackendProtocol::Http,
                     request_filters: vec![],
                 }],
                 timeout: None,
                 mirror: vec![],
+                mirror_fractions: vec![],
                 backend_request_mutations: vec![vec![]],
             }),
             ..base_plan()
@@ -1607,6 +1724,7 @@ mod tests {
             hostname: HostnameMatch::Exact("example.com".into()),
             listener_ids: vec![],
             listener_hostname: None,
+            listener_port: None,
             gateway_api: true,
             disable_secure_redirection: false,
             path_trie: PathTrieNode::default(),
@@ -1642,10 +1760,12 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: "http://127.0.0.1:1".into(),
                     weight: 1,
+                    protocol: crate::ir::BackendProtocol::Http,
                     request_filters: vec![],
                 }],
                 timeout: None,
                 mirror: vec![],
+                mirror_fractions: vec![],
                 backend_request_mutations: vec![vec![]],
             }),
             ..base_plan()

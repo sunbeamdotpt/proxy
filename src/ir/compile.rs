@@ -11,7 +11,7 @@
 //! - precedence computed once at build time
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,6 +84,8 @@ pub enum CompiledTlsConfig {
 pub struct CompiledL4Route {
     /// Listener this route is attached to.
     pub listener_id: Arc<str>,
+    /// Listener hostname for SNI-based listener isolation.
+    pub listener_hostname: HostnameMatch,
     /// Match condition.
     pub match_: L4Match,
     /// Action to take.
@@ -101,6 +103,8 @@ pub struct HostNode {
     pub listener_ids: Vec<Arc<str>>,
     /// Optional listener hostname used for listener isolation.
     pub listener_hostname: Option<HostnameMatch>,
+    /// Optional listener port for port-aware matching. `None` matches any port.
+    pub listener_port: Option<u16>,
     /// True if this host route was created from a Gateway API HTTPRoute.
     pub gateway_api: bool,
     /// When true, disable the proxy-level HTTP→HTTPS redirect for this host.
@@ -178,6 +182,8 @@ pub struct UpstreamAction {
     pub timeout: Option<Duration>,
     /// Backends to mirror traffic to (fire-and-forget).
     pub mirror: Vec<Arc<str>>,
+    /// Optional fraction for each mirror backend (aligned by index).
+    pub mirror_fractions: Vec<Option<crate::ir::Fraction>>,
     /// Per-backend request mutations, aligned with `backends`.
     pub backend_request_mutations: Vec<Vec<UpstreamRequestMutation>>,
 }
@@ -445,22 +451,56 @@ impl CompiledL4Config {
                 .push(l);
         }
 
-        let mut listeners = Vec::with_capacity(listener_groups.len());
-        let mut listener_id_map: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+        // HTTPS and TLS listeners on the same bind address must share one socket:
+        // TLSRoute passthrough/terminate and HTTPS termination are distinguished
+        // by SNI in the L4 router rather than by separate binds.
+        let mut https_addrs: HashSet<Arc<str>> = HashSet::new();
+        let mut tls_addrs: HashSet<Arc<str>> = HashSet::new();
+        for (bind_addr, protocol) in listener_groups.keys() {
+            if *protocol == Protocol::Https {
+                https_addrs.insert(Arc::clone(bind_addr));
+            }
+            if *protocol == Protocol::Tls {
+                tls_addrs.insert(Arc::clone(bind_addr));
+            }
+        }
+        let shared_tls_addrs: HashSet<Arc<str>> =
+            https_addrs.intersection(&tls_addrs).cloned().collect();
+
+        let mut merged: HashMap<Arc<str>, Vec<CompiledListener>> = HashMap::new();
         for ((bind_addr, protocol), group) in listener_groups {
+            let key = if matches!(protocol, Protocol::Https | Protocol::Tls)
+                && shared_tls_addrs.contains(&bind_addr)
+            {
+                Arc::from(format!("{}#tls", bind_addr))
+            } else {
+                Arc::from(format!("{}#{:?}", bind_addr, protocol))
+            };
+            merged.entry(key).or_default().extend(group);
+        }
+
+        let mut listeners = Vec::with_capacity(merged.len());
+        let mut listener_id_map: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+        for (canonical_key, group) in merged {
             if group.len() == 1 {
                 let l = group.into_iter().next().unwrap();
                 listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&l.id));
                 listeners.push(l);
             } else {
-                let canonical_id: Arc<str> = Arc::from(format!("{}#{:?}", bind_addr, protocol));
+                let bind_addr = Arc::clone(&group[0].bind_addr);
+                let has_tls = group.iter().any(|l| l.protocol == Protocol::Tls);
+                let protocol = if has_tls {
+                    Protocol::Tls
+                } else {
+                    Protocol::Https
+                };
                 let tls = group.iter().find_map(|l| l.tls.clone());
                 let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
                 for l in &group {
-                    listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_id));
+                    listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_key));
                 }
                 listeners.push(CompiledListener {
-                    id: canonical_id,
+                    id: canonical_key,
                     bind_addr,
                     protocol,
                     tls,
@@ -482,6 +522,7 @@ impl CompiledL4Config {
                 .unwrap_or(route.listener_id);
             let compiled = CompiledL4Route {
                 listener_id,
+                listener_hostname: route.listener_hostname,
                 match_: route.match_,
                 action: route.action,
                 priority: 0,
@@ -508,6 +549,32 @@ impl CompiledL4Config {
     /// Empty compiled L4 config.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Return the most specific listener hostname that matches `host` on `port`
+    /// among the HTTPS termination routes, or `None` if no listener applies.
+    /// This is used by the HTTP proxy to detect misdirected requests.
+    pub fn listener_hostname_for(&self, host: &str, port: u16) -> Option<HostnameMatch> {
+        let listener_ids: std::collections::HashSet<&str> = self
+            .listeners
+            .iter()
+            .filter(|l| {
+                l.bind_addr
+                    .rsplit(':')
+                    .next()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .is_some_and(|p| p == port)
+            })
+            .map(|l| l.id.as_ref())
+            .collect();
+        self.https_routes
+            .iter()
+            .filter(|r| {
+                listener_ids.contains(r.listener_id.as_ref())
+                    && ir_hostname_matches(host, &r.listener_hostname)
+            })
+            .map(|r| r.listener_hostname.clone())
+            .max_by_key(ir_listener_specificity_score)
     }
 }
 
@@ -605,6 +672,7 @@ fn compile_host(host: &HostRoute) -> Result<HostNode, CompileError> {
         hostname: host.hostname.clone(),
         listener_ids: host.listener_ids.clone(),
         listener_hostname: host.listener_hostname.clone(),
+        listener_port: host.listener_port,
         gateway_api: host.gateway_api,
         disable_secure_redirection: host.disable_secure_redirection,
         path_trie,
@@ -723,6 +791,7 @@ fn compile_plan(
                 backends: ra.backends.clone(),
                 timeout: ra.timeout,
                 mirror: ra.mirror_backends.clone(),
+                mirror_fractions: ra.mirror_fractions.clone(),
                 backend_request_mutations,
             });
         }
@@ -994,18 +1063,19 @@ impl CompiledRouteTable {
     pub fn lookup(
         &self,
         host: &str,
+        port: u16,
         path: &str,
         method: &str,
         headers: &http::header::HeaderMap,
         query: Option<&str>,
     ) -> Option<Arc<CompiledPlan>> {
-        let host_node = self.find_host_node(host)?;
+        let host_node = self.find_host_node(host, port)?;
         host_node.lookup(path, method, headers, query)
     }
 
-    /// Find the host node for a request hostname, respecting listener hostname
-    /// isolation and specificity.
-    fn find_host_node(&self, host: &str) -> Option<&HostNode> {
+    /// Find the host node for a request hostname and port, respecting listener
+    /// hostname/port isolation and specificity.
+    fn find_host_node(&self, host: &str, port: u16) -> Option<&HostNode> {
         let mut candidates: Vec<&HostNode> = Vec::new();
 
         // Exact route hostnames.
@@ -1025,8 +1095,11 @@ impl CompiledRouteTable {
             candidates.push(node);
         }
 
-        // Filter by listener hostname.
-        candidates.retain(|n| listener_hostname_matches(host, n.listener_hostname.as_ref()));
+        // Filter by listener hostname and port.
+        candidates.retain(|n| {
+            listener_hostname_matches(host, n.listener_hostname.as_ref())
+                && listener_port_matches(port, n.listener_port)
+        });
 
         if candidates.is_empty() {
             return None;
@@ -1055,10 +1128,10 @@ impl CompiledRouteTable {
             .copied()
     }
 
-    /// Returns true if any Gateway API host node matches the request hostname,
-    /// regardless of whether any route rule matches. Used to decide whether an
-    /// unmatched request should get 404 instead of an HTTPS redirect.
-    pub fn has_gateway_api_listener(&self, host: &str) -> bool {
+    /// Returns true if any Gateway API host node matches the request hostname and
+    /// port, regardless of whether any route rule matches. Used to decide whether
+    /// an unmatched request should get 404 instead of an HTTPS redirect.
+    pub fn has_gateway_api_listener(&self, host: &str, port: u16) -> bool {
         let mut candidates: Vec<&HostNode> = Vec::new();
 
         if let Some(nodes) = self.exact_hosts.get(host) {
@@ -1073,9 +1146,11 @@ impl CompiledRouteTable {
             candidates.push(node);
         }
 
-        candidates
-            .iter()
-            .any(|n| n.gateway_api && listener_hostname_matches(host, n.listener_hostname.as_ref()))
+        candidates.iter().any(|n| {
+            n.gateway_api
+                && listener_hostname_matches(host, n.listener_hostname.as_ref())
+                && listener_port_matches(port, n.listener_port)
+        })
     }
 
     /// True if the table contains any Gateway API routes. Used to decide whether
@@ -1099,6 +1174,11 @@ fn listener_hostname_matches(host: &str, listener: Option<&HostnameMatch>) -> bo
         Some(HostnameMatch::Exact(s)) if s.is_empty() => true,
         Some(lh) => ir_hostname_matches(host, lh),
     }
+}
+
+/// True if a listener port accepts the request port. `None` matches any port.
+fn listener_port_matches(port: u16, listener_port: Option<u16>) -> bool {
+    listener_port.is_none_or(|p| p == port)
 }
 
 /// Specificity score for a listener hostname match (higher = more specific).
@@ -1355,6 +1435,7 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: "http://svc".into(),
                 weight: 1,
+                protocol: BackendProtocol::Http,
 
                 request_filters: vec![],
             }],
@@ -1362,6 +1443,7 @@ mod tests {
             request_filters: vec![],
             response_filters: vec![],
             mirror_backends: vec![],
+            mirror_fractions: vec![],
             cache: None,
             body_rewrites: vec![],
             auth: None,
@@ -1389,6 +1471,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1414,7 +1497,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("example.com", "/old", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/old", "GET", &Default::default(), None)
             .unwrap();
         assert!(matches!(
             plan.request_stages[0],
@@ -1428,6 +1511,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1451,7 +1535,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("example.com", "/deny", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/deny", "GET", &Default::default(), None)
             .unwrap();
         assert!(matches!(
             plan.request_stages[0],
@@ -1465,6 +1549,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Any,
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1492,7 +1577,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("example.com", "/foo", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/foo", "GET", &Default::default(), None)
             .unwrap();
         assert!(matches!(
             plan.request_stages[0],
@@ -1507,6 +1592,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1526,10 +1612,10 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("example.com", "/api/v1", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/api/v1", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("example.com", "/other", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/other", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1551,6 +1637,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1565,7 +1652,7 @@ mod tests {
         for i in 0..10 {
             assert!(compiled
                 .lookup(
-                    "example.com",
+                    "example.com", 0,
                     "/api",
                     &format!("METH{}", i),
                     &Default::default(),
@@ -1598,6 +1685,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1613,7 +1701,7 @@ mod tests {
             let mut headers = http::header::HeaderMap::new();
             headers.insert("X-Version", format!("v{}", i).parse().unwrap());
             assert!(compiled
-                .lookup("example.com", "/api", "GET", &headers, None)
+                .lookup("example.com", 0, "/api", "GET", &headers, None)
                 .is_some());
         }
     }
@@ -1641,6 +1729,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1655,7 +1744,7 @@ mod tests {
         for i in 0..10 {
             assert!(compiled
                 .lookup(
-                    "example.com",
+                    "example.com", 0,
                     "/api",
                     "GET",
                     &Default::default(),
@@ -1671,6 +1760,7 @@ mod tests {
             listeners: vec![],
             hosts: vec![HostRoute {
                 listener_hostname: None,
+            listener_port: None,
                 hostname: HostnameMatch::Exact("app.example.com".into()),
                 listener_ids: vec![],
                 gateway_api: true,
@@ -1689,7 +1779,7 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled.has_gateway_api_listener("app.example.com"));
+        assert!(compiled.has_gateway_api_listener("app.example.com", 0));
         assert!(compiled.has_gateway_api_routes());
     }
 
@@ -1699,6 +1789,7 @@ mod tests {
     fn exact_host_lookup() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Exact("example.com".into()),
             listener_ids: vec![],
             gateway_api: true,
@@ -1721,10 +1812,10 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("example.com", "/", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("other.com", "/", "GET", &Default::default(), None)
+            .lookup("other.com", 0, "/", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1732,6 +1823,7 @@ mod tests {
     fn wildcard_host_lookup() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Wildcard("example.com".into()),
             listener_ids: vec![],
             gateway_api: true,
@@ -1751,10 +1843,10 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("sub.example.com", "/", "GET", &Default::default(), None)
+            .lookup("sub.example.com", 0, "/", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("example.com", "/", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1762,6 +1854,7 @@ mod tests {
     fn wildcard_host_matches_multiple_subdomain_levels() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Wildcard("bar.com".into()),
             listener_ids: vec![],
             gateway_api: true,
@@ -1782,7 +1875,7 @@ mod tests {
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
             .lookup(
-                "multiple.prefixes.bar.com",
+                "multiple.prefixes.bar.com", 0,
                 "/",
                 "GET",
                 &Default::default(),
@@ -1790,10 +1883,10 @@ mod tests {
             )
             .is_some());
         assert!(compiled
-            .lookup("foo.bar.com", "/", "GET", &Default::default(), None)
+            .lookup("foo.bar.com", 0, "/", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("bar.com", "/", "GET", &Default::default(), None)
+            .lookup("bar.com", 0, "/", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1801,6 +1894,7 @@ mod tests {
     fn any_host_lookup() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -1820,7 +1914,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("anything.com", "/", "GET", &Default::default(), None)
+            .lookup("anything.com", 0, "/", "GET", &Default::default(), None)
             .is_some());
     }
 
@@ -1830,6 +1924,7 @@ mod tests {
     fn prefix_match_deeper_path() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -1852,16 +1947,16 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("h", "/api", "GET", &Default::default(), None)
+            .lookup("h", 0, "/api", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("h", "/api/v1", "GET", &Default::default(), None)
+            .lookup("h", 0, "/api/v1", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("h", "/api/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/api/", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("h", "/other", "GET", &Default::default(), None)
+            .lookup("h", 0, "/other", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1869,6 +1964,7 @@ mod tests {
     fn exact_match_only() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -1891,13 +1987,13 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         assert!(compiled
-            .lookup("h", "/health", "GET", &Default::default(), None)
+            .lookup("h", 0, "/health", "GET", &Default::default(), None)
             .is_some());
         assert!(compiled
-            .lookup("h", "/health/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/health/", "GET", &Default::default(), None)
             .is_none());
         assert!(compiled
-            .lookup("h", "/healthz", "GET", &Default::default(), None)
+            .lookup("h", 0, "/healthz", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -1905,6 +2001,7 @@ mod tests {
     fn longer_prefix_wins() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -1919,6 +2016,7 @@ mod tests {
                         backends: vec![WeightedBackend {
                             backend: "root".into(),
                             weight: 1,
+                            protocol: BackendProtocol::Http,
 
                             request_filters: vec![],
                         }],
@@ -1935,6 +2033,7 @@ mod tests {
                         backends: vec![WeightedBackend {
                             backend: "api".into(),
                             weight: 1,
+                            protocol: BackendProtocol::Http,
 
                             request_filters: vec![],
                         }],
@@ -1953,7 +2052,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("h", "/api/v1", "GET", &Default::default(), None)
+            .lookup("h", 0, "/api/v1", "GET", &Default::default(), None)
             .unwrap();
         assert_eq!(
             plan.upstream.as_ref().unwrap().backends[0].backend.as_ref(),
@@ -1977,7 +2076,7 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: format!("backend-{}", i).into(),
                         weight: 1,
-
+                        protocol: BackendProtocol::Http,
                         request_filters: vec![],
                     }],
                     ..simple_route_action()
@@ -1995,7 +2094,7 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: "catch-all".into(),
                     weight: 1,
-
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![],
                 }],
                 ..simple_route_action()
@@ -2005,6 +2104,7 @@ mod tests {
 
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2024,7 +2124,7 @@ mod tests {
         for i in 0..10 {
             let method = format!("METHOD{}", i);
             let plan = compiled
-                .lookup("h", "/api/x", &method, &Default::default(), None)
+                .lookup("h", 0, "/api/x", &method, &Default::default(), None)
                 .unwrap();
             assert_eq!(
                 plan.upstream.as_ref().unwrap().backends[0].backend.as_ref(),
@@ -2034,7 +2134,7 @@ mod tests {
 
         // Unknown method should hit catch-all.
         let plan = compiled
-            .lookup("h", "/api/x", "UNKNOWN", &Default::default(), None)
+            .lookup("h", 0, "/api/x", "UNKNOWN", &Default::default(), None)
             .unwrap();
         assert_eq!(
             plan.upstream.as_ref().unwrap().backends[0].backend.as_ref(),
@@ -2048,6 +2148,7 @@ mod tests {
     fn redirect_compiles_to_terminal() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Exact("example.com".into()),
             listener_ids: vec![],
             gateway_api: true,
@@ -2076,7 +2177,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("example.com", "/old", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/old", "GET", &Default::default(), None)
             .unwrap();
         assert_eq!(plan.request_stages.len(), 1);
         assert!(matches!(
@@ -2109,6 +2210,7 @@ mod tests {
     fn header_match_compiles_and_looks_up() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2126,6 +2228,7 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: "v1".into(),
                         weight: 1,
+                        protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
                     }],
@@ -2145,7 +2248,7 @@ mod tests {
 
         let mut headers = http::header::HeaderMap::new();
         headers.insert("version", http::header::HeaderValue::from_static("one"));
-        let plan = compiled.lookup("h", "/", "GET", &headers, None).unwrap();
+        let plan = compiled.lookup("h", 0, "/", "GET", &headers, None).unwrap();
         assert_eq!(
             plan.upstream.as_ref().unwrap().backends[0].backend.as_ref(),
             "v1"
@@ -2153,7 +2256,7 @@ mod tests {
 
         // No header — should not match (gateway_api = true, so no fallback).
         assert!(compiled
-            .lookup("h", "/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/", "GET", &Default::default(), None)
             .is_none());
     }
 
@@ -2163,6 +2266,7 @@ mod tests {
     fn body_rewrites_compiled_into_plan() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2173,6 +2277,7 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: "svc".into(),
                         weight: 1,
+                        protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
                     }],
@@ -2180,6 +2285,7 @@ mod tests {
                     request_filters: vec![],
                     response_filters: vec![],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![BodyRewrite {
                         find: "old".into(),
@@ -2202,7 +2308,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("h", "/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/", "GET", &Default::default(), None)
             .unwrap();
         assert_eq!(plan.body_rewrites.len(), 1);
         assert_eq!(plan.body_rewrites[0].find.as_ref(), "old");
@@ -2214,6 +2320,7 @@ mod tests {
     fn cors_compiled_into_response_mutations() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2224,6 +2331,7 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: "svc".into(),
                         weight: 1,
+                        protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
                     }],
@@ -2238,6 +2346,7 @@ mod tests {
                         allow_credentials: false,
                     })],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![],
                     auth: None,
@@ -2256,7 +2365,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("h", "/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/", "GET", &Default::default(), None)
             .unwrap();
         assert_eq!(plan.response_mutations.len(), 1);
         assert!(matches!(
@@ -2271,6 +2380,7 @@ mod tests {
     fn request_filters_compiled_into_mutations() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2281,6 +2391,7 @@ mod tests {
                     backends: vec![WeightedBackend {
                         backend: "svc".into(),
                         weight: 1,
+                        protocol: BackendProtocol::Http,
 
                         request_filters: vec![],
                     }],
@@ -2294,6 +2405,7 @@ mod tests {
                     ],
                     response_filters: vec![],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![],
                     auth: None,
@@ -2312,7 +2424,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("h", "/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/", "GET", &Default::default(), None)
             .unwrap();
         assert_eq!(plan.upstream_request_mutations.len(), 2);
         assert!(matches!(
@@ -2329,6 +2441,7 @@ mod tests {
     fn backend_request_filters_compiled_into_per_backend_mutations() {
         let host = HostRoute {
             listener_hostname: None,
+            listener_port: None,
             hostname: HostnameMatch::Any,
             listener_ids: vec![],
             gateway_api: true,
@@ -2340,6 +2453,7 @@ mod tests {
                         WeightedBackend {
                             backend: "svc-a".into(),
                             weight: 1,
+                            protocol: BackendProtocol::Http,
                             request_filters: vec![RequestFilter::SetHeader {
                                 name: "X-Backend".into(),
                                 value: "a".into(),
@@ -2348,6 +2462,7 @@ mod tests {
                         WeightedBackend {
                             backend: "svc-b".into(),
                             weight: 1,
+                            protocol: BackendProtocol::Http,
                             request_filters: vec![RequestFilter::SetHeader {
                                 name: "X-Backend".into(),
                                 value: "b".into(),
@@ -2358,6 +2473,7 @@ mod tests {
                     request_filters: vec![],
                     response_filters: vec![],
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: None,
                     body_rewrites: vec![],
                     auth: None,
@@ -2376,7 +2492,7 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         let plan = compiled
-            .lookup("h", "/", "GET", &Default::default(), None)
+            .lookup("h", 0, "/", "GET", &Default::default(), None)
             .unwrap();
         let upstream = plan.upstream.as_ref().unwrap();
         assert_eq!(upstream.backend_request_mutations.len(), 2);
@@ -2416,10 +2532,12 @@ mod tests {
             acme_routes: Default::default(),
             l4_routes: vec![L4Route {
                 listener_id: "tcp-l".into(),
+                listener_hostname: HostnameMatch::Any,
                 match_: L4Match::Any,
                 action: L4Action::TcpRelay(vec![WeightedBackend {
                     backend: "tcp://svc:8080".into(),
                     weight: 1,
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![],
                 }]),
             }],
@@ -2459,11 +2577,13 @@ mod tests {
             l4_routes: vec![
                 L4Route {
                     listener_id: "udp-l".into(),
+                    listener_hostname: HostnameMatch::Any,
                     match_: L4Match::Any,
                     action: L4Action::UdpRelay(vec![]),
                 },
                 L4Route {
                     listener_id: "tls-l".into(),
+                    listener_hostname: HostnameMatch::Wildcard("example.com".into()),
                     match_: L4Match::Sni(HostnameMatch::Wildcard("example.com".into())),
                     action: L4Action::TlsPassthrough(vec![]),
                 },
@@ -2534,6 +2654,7 @@ mod tests {
             acme_routes: Default::default(),
             l4_routes: vec![L4Route {
                 listener_id: "https-l".into(),
+                listener_hostname: HostnameMatch::Exact("app.example.com".into()),
                 match_: L4Match::Sni(HostnameMatch::Exact("app.example.com".into())),
                 action: L4Action::TerminateAndHttp("127.0.0.1:10443".into()),
             }],
@@ -2574,11 +2695,13 @@ mod tests {
             l4_routes: vec![
                 L4Route {
                     listener_id: "tls-term".into(),
+                    listener_hostname: HostnameMatch::Any,
                     match_: L4Match::Any,
                     action: L4Action::TlsTerminate(vec![]),
                 },
                 L4Route {
                     listener_id: "tls-pass".into(),
+                    listener_hostname: HostnameMatch::Any,
                     match_: L4Match::Any,
                     action: L4Action::TlsPassthrough(vec![]),
                 },

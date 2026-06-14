@@ -9,10 +9,10 @@
 
 use crate::gateway::api::HTTPRoute;
 use crate::gateway::model::{
-    AllowedRoutes, GatewayState, HTTPRouteRule, HTTPRouteState, HeaderMatch, HeaderMatchValue,
-    HostnameMatch, ListenerState, NamespaceFrom, ParentRef, PathMatch, PathRewrite,
-    QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch, RouteNamespaces, RouteState,
-    WeightedBackend,
+    AllowedRoutes, Fraction, GatewayState, HTTPRouteRule, HTTPRouteState, HeaderMatch,
+    HeaderMatchValue, HostnameMatch, ListenerSetState, ListenerState, NamespaceFrom, ParentRef,
+    PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
+    RouteNamespaces, RouteState, WeightedBackend,
 };
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
@@ -55,11 +55,15 @@ pub fn reconcile_httproutes(
 ) -> Vec<ReconciledHTTPRoute> {
     let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
     let listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+    let listener_sets = Vec::<ListenerSetState>::new();
+    let listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
     reconcile_httproutes_with_context(
         routes,
         gateways,
+        &listener_sets,
         &namespace_labels,
         &listener_allowed,
+        &listener_set_allowed,
         grant_index,
     )
 }
@@ -68,8 +72,10 @@ pub fn reconcile_httproutes(
 pub fn reconcile_httproutes_with_context(
     routes: &[HTTPRoute],
     gateways: &[GatewayState],
+    listener_sets: &[ListenerSetState],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
     listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
     grant_index: &GrantIndex,
 ) -> Vec<ReconciledHTTPRoute> {
     routes
@@ -80,19 +86,26 @@ pub fn reconcile_httproutes_with_context(
             reconcile_single(
                 route,
                 gateways,
+                listener_sets,
                 namespace_labels,
                 listener_allowed,
+                listener_set_allowed,
+                grant_index,
                 backend_resolution,
             )
         })
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_single(
     route: &HTTPRoute,
     gateways: &[GatewayState],
+    listener_sets: &[ListenerSetState],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
     listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    _grant_index: &GrantIndex,
     backend_resolution: BackendResolution,
 ) -> ReconciledHTTPRoute {
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
@@ -111,13 +124,18 @@ pub fn reconcile_single(
             generation,
             &route_hostnames,
             gateways,
+            listener_sets,
             namespace_labels,
             listener_allowed,
+            listener_set_allowed,
         );
         let status_parent_ref = resolved.clone().unwrap_or_else(|| ParentRef {
+            group: Arc::from(parsed.group.clone()),
+            kind: Arc::from(parsed.kind.clone()),
             namespace: Some(Arc::from(parsed.namespace.as_deref().unwrap_or(route_ns))),
             name: Arc::from(parsed.name.clone()),
             section_name: parsed.section_name.clone().map(Arc::from),
+            port: parsed.port.map(|p| p as u16),
         });
         let accepted = resolved.is_some();
         if let Some(pr) = resolved {
@@ -397,16 +415,16 @@ pub async fn resolve_backend_refs_async(
 }
 
 #[derive(Clone, Debug)]
-struct ParsedParentRef {
-    group: String,
-    kind: String,
-    namespace: Option<String>,
-    name: String,
-    section_name: Option<String>,
-    port: Option<i32>,
+pub(crate) struct ParsedParentRef {
+    pub(crate) group: String,
+    pub(crate) kind: String,
+    pub(crate) namespace: Option<String>,
+    pub(crate) name: String,
+    pub(crate) section_name: Option<String>,
+    pub(crate) port: Option<i32>,
 }
 
-fn parse_parent_refs(route: &HTTPRoute) -> Vec<ParsedParentRef> {
+pub(crate) fn parse_parent_refs(route: &HTTPRoute) -> Vec<ParsedParentRef> {
     route
         .spec
         .parent_refs
@@ -473,6 +491,7 @@ pub(crate) fn namespace_allowed(
     match namespaces.from {
         NamespaceFrom::All => true,
         NamespaceFrom::Same => route_ns == gateway_ns,
+        NamespaceFrom::None => false,
         NamespaceFrom::Selector => {
             let labels = match namespace_labels.get(route_ns) {
                 Some(l) => l,
@@ -503,26 +522,63 @@ pub(crate) fn listener_hostname_intersects(
         .any(|rh| crate::gateway::translate::hostname_intersects(rh, &listener_match))
 }
 
-/// Check whether a listener accepts a route considering kind, namespace, and
-/// hostname constraints.
-pub(crate) fn listener_accepts_route(
-    listener: &ListenerState,
-    allowed: &AllowedRoutes,
+#[allow(clippy::too_many_arguments)]
+fn resolve_parent_ref(
+    parsed: &ParsedParentRef,
     route_ns: &str,
-    gateway_ns: &str,
+    observed_generation: i64,
+    route_hostnames: &[crate::gateway::model::HostnameMatch],
+    gateways: &[GatewayState],
+    listener_sets: &[ListenerSetState],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
-    route_hostnames: &[HostnameMatch],
-) -> bool {
-    if !listener_allows_kind(allowed, "gateway.networking.k8s.io", "HTTPRoute") {
-        return false;
+    listener_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+    listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+) -> (Option<ParentRef>, Vec<StatusCondition>) {
+    if parsed.group != "gateway.networking.k8s.io" {
+        return unsupported_parent(parsed, observed_generation);
     }
-    if !namespace_allowed(&allowed.namespaces, route_ns, gateway_ns, namespace_labels) {
-        return false;
+
+    match parsed.kind.as_str() {
+        "Gateway" => resolve_gateway_parent(
+            parsed,
+            route_ns,
+            observed_generation,
+            route_hostnames,
+            gateways,
+            namespace_labels,
+            listener_allowed,
+        ),
+        "ListenerSet" => resolve_listenerset_parent(
+            parsed,
+            route_ns,
+            observed_generation,
+            route_hostnames,
+            listener_sets,
+            namespace_labels,
+            listener_set_allowed,
+        ),
+        _ => unsupported_parent(parsed, observed_generation),
     }
-    listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames)
 }
 
-fn resolve_parent_ref(
+fn unsupported_parent(
+    parsed: &ParsedParentRef,
+    observed_generation: i64,
+) -> (Option<ParentRef>, Vec<StatusCondition>) {
+    let conditions = vec![StatusCondition {
+        condition_type: ConditionType::Accepted,
+        status: ConditionStatus::False,
+        reason: "UnsupportedValue".to_string(),
+        message: format!(
+            "parentRef group {} kind {} is not supported",
+            parsed.group, parsed.kind
+        ),
+        observed_generation,
+    }];
+    (None, conditions)
+}
+
+fn resolve_gateway_parent(
     parsed: &ParsedParentRef,
     route_ns: &str,
     observed_generation: i64,
@@ -533,42 +589,102 @@ fn resolve_parent_ref(
 ) -> (Option<ParentRef>, Vec<StatusCondition>) {
     let target_ns = parsed.namespace.as_deref().unwrap_or(route_ns);
 
-    // Only Gateway parentRefs are supported in T1.
-    if parsed.group != "gateway.networking.k8s.io" || parsed.kind != "Gateway" {
-        let conditions = vec![StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::False,
-            reason: "UnsupportedValue".to_string(),
-            message: format!(
-                "parentRef group {} kind {} is not supported",
-                parsed.group, parsed.kind
-            ),
-            observed_generation,
-        }];
-        return (None, conditions);
-    }
-
-    // Find the gateway.
     let gateway = gateways
         .iter()
         .find(|g| g.namespace.as_ref() == target_ns && g.name.as_ref() == parsed.name);
 
     let Some(gateway) = gateway else {
-        let conditions = vec![StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::False,
-            reason: "NoMatchingParent".to_string(),
-            message: format!("Gateway {}/{} not found", target_ns, parsed.name),
-            observed_generation,
-        }];
-        return (None, conditions);
+        return (
+            None,
+            vec![StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "NoMatchingParent".to_string(),
+                message: format!("Gateway {}/{} not found", target_ns, parsed.name),
+                observed_generation,
+            }],
+        );
     };
 
-    // Find listeners that match this parentRef (by sectionName and/or port).
-    let matching_listeners: Vec<&ListenerState> = gateway
-        .listeners
+    let no_conflicts = std::collections::BTreeMap::<Arc<str>, Arc<str>>::new();
+    resolve_listener_parent(
+        parsed,
+        route_ns,
+        observed_generation,
+        route_hostnames,
+        &gateway.listeners,
+        namespace_labels,
+        listener_allowed,
+        target_ns,
+        &parsed.name,
+        "Gateway",
+        &no_conflicts,
+    )
+}
+
+fn resolve_listenerset_parent(
+    parsed: &ParsedParentRef,
+    route_ns: &str,
+    observed_generation: i64,
+    route_hostnames: &[crate::gateway::model::HostnameMatch],
+    listener_sets: &[ListenerSetState],
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    listener_set_allowed: &HashMap<(String, String, String), AllowedRoutes>,
+) -> (Option<ParentRef>, Vec<StatusCondition>) {
+    let target_ns = parsed.namespace.as_deref().unwrap_or(route_ns);
+
+    let ls = listener_sets
+        .iter()
+        .find(|s| s.namespace.as_ref() == target_ns && s.name.as_ref() == parsed.name);
+
+    let Some(ls) = ls else {
+        return (
+            None,
+            vec![StatusCondition {
+                condition_type: ConditionType::Accepted,
+                status: ConditionStatus::False,
+                reason: "NoMatchingParent".to_string(),
+                message: format!("ListenerSet {}/{} not found", target_ns, parsed.name),
+                observed_generation,
+            }],
+        );
+    };
+
+    resolve_listener_parent(
+        parsed,
+        route_ns,
+        observed_generation,
+        route_hostnames,
+        &ls.listeners,
+        namespace_labels,
+        listener_set_allowed,
+        target_ns,
+        &parsed.name,
+        "ListenerSet",
+        &ls.conflicts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_listener_parent(
+    parsed: &ParsedParentRef,
+    route_ns: &str,
+    observed_generation: i64,
+    route_hostnames: &[crate::gateway::model::HostnameMatch],
+    listeners: &[ListenerState],
+    namespace_labels: &HashMap<String, HashMap<String, String>>,
+    allowed_map: &HashMap<(String, String, String), AllowedRoutes>,
+    target_ns: &str,
+    owner_name: &str,
+    owner_kind: &str,
+    conflicts: &std::collections::BTreeMap<Arc<str>, Arc<str>>,
+) -> (Option<ParentRef>, Vec<StatusCondition>) {
+    let matching_listeners: Vec<&ListenerState> = listeners
         .iter()
         .filter(|l| {
+            if conflicts.contains_key(l.name.as_ref()) {
+                return false;
+            }
             let section_matches = parsed
                 .section_name
                 .as_deref()
@@ -579,54 +695,54 @@ fn resolve_parent_ref(
         })
         .collect();
 
-    // If sectionName is specified, the listener must exist.
     if let Some(ref section) = parsed.section_name {
-        let listener_exists = gateway
-            .listeners
+        let listener_exists = listeners
             .iter()
             .any(|l| l.name.as_ref() == section.as_str());
         if !listener_exists {
-            let conditions = vec![StatusCondition {
-                condition_type: ConditionType::Accepted,
-                status: ConditionStatus::False,
-                reason: "NoMatchingParent".to_string(),
-                message: format!(
-                    "listener {} not found on Gateway {}/{}",
-                    section, target_ns, parsed.name
-                ),
-                observed_generation,
-            }];
-            return (None, conditions);
+            return (
+                None,
+                vec![StatusCondition {
+                    condition_type: ConditionType::Accepted,
+                    status: ConditionStatus::False,
+                    reason: "NoMatchingParent".to_string(),
+                    message: format!(
+                        "listener {} not found on {} {}/{}",
+                        section, owner_kind, target_ns, owner_name
+                    ),
+                    observed_generation,
+                }],
+            );
         }
     }
 
-    // If port is specified but no listener matches, reject.
     if let Some(port) = parsed.port {
         if matching_listeners.is_empty() {
-            let conditions = vec![StatusCondition {
-                condition_type: ConditionType::Accepted,
-                status: ConditionStatus::False,
-                reason: "NoMatchingParent".to_string(),
-                message: format!(
-                    "no listener matching port {} on Gateway {}/{}",
-                    port, target_ns, parsed.name
-                ),
-                observed_generation,
-            }];
-            return (None, conditions);
+            return (
+                None,
+                vec![StatusCondition {
+                    condition_type: ConditionType::Accepted,
+                    status: ConditionStatus::False,
+                    reason: "NoMatchingParent".to_string(),
+                    message: format!(
+                        "no listener matching port {} on {} {}/{}",
+                        port, owner_kind, target_ns, owner_name
+                    ),
+                    observed_generation,
+                }],
+            );
         }
     }
 
-    // Classify why matching listeners reject the route.
     let mut kind_allowed = false;
     let mut namespace_allowed_flag = false;
     let mut hostname_intersects = false;
 
     for listener in matching_listeners {
-        let allowed = listener_allowed
+        let allowed = allowed_map
             .get(&(
                 target_ns.to_string(),
-                parsed.name.clone(),
+                owner_name.to_string(),
                 listener.name.to_string(),
             ))
             .cloned()
@@ -653,8 +769,8 @@ fn resolve_parent_ref(
                 status: ConditionStatus::False,
                 reason: "NotAllowedByListeners".to_string(),
                 message: format!(
-                    "Route is not allowed by any listener of Gateway {}/{}",
-                    target_ns, parsed.name
+                    "Route is not allowed by any listener of {} {}/{}",
+                    owner_kind, target_ns, owner_name
                 ),
                 observed_generation,
             }],
@@ -669,20 +785,21 @@ fn resolve_parent_ref(
                 status: ConditionStatus::False,
                 reason: "NoMatchingListenerHostname".to_string(),
                 message: format!(
-                    "Route hostnames do not intersect with any listener of Gateway {}/{}",
-                    target_ns, parsed.name
+                    "Route hostnames do not intersect with any listener of {} {}/{}",
+                    owner_kind, target_ns, owner_name
                 ),
                 observed_generation,
             }],
         );
     }
 
-    // Parent ref is accepted. The namespace is always included in status
-    // parentRef because Gateway API CRDs require it as a string (not null).
     let parent_ref = ParentRef {
+        group: Arc::from(parsed.group.clone()),
+        kind: Arc::from(parsed.kind.clone()),
         namespace: Some(Arc::from(target_ns)),
         name: Arc::from(parsed.name.clone()),
         section_name: parsed.section_name.as_ref().map(|s| Arc::from(s.as_str())),
+        port: parsed.port.map(|p| p as u16),
     };
 
     let conditions = vec![StatusCondition {
@@ -766,11 +883,18 @@ fn parse_rule(value: &HttpRouteRules, route_ns: &str) -> Option<HTTPRouteRule> {
         .map(|arr| arr.iter().flat_map(|f| parse_filter(f, route_ns)).collect())
         .unwrap_or_default();
 
-    let timeout_secs = value.timeouts.as_ref().and_then(|t| {
+    let timeout_ms = value.timeouts.as_ref().and_then(|t| {
         t.backend_request.as_ref().and_then(|dur| {
             dur.parse::<gateway_api::Duration>()
                 .ok()
-                .map(|d| d.as_secs())
+                .map(|d| d.as_millis() as u64)
+        })
+    });
+    let request_timeout_ms = value.timeouts.as_ref().and_then(|t| {
+        t.request.as_ref().and_then(|dur| {
+            dur.parse::<gateway_api::Duration>()
+                .ok()
+                .map(|d| d.as_millis() as u64)
         })
     });
 
@@ -778,7 +902,8 @@ fn parse_rule(value: &HttpRouteRules, route_ns: &str) -> Option<HTTPRouteRule> {
         matches,
         backends,
         filters,
-        timeout_secs,
+        timeout_ms,
+        request_timeout_ms,
         programmed: true,
     })
 }
@@ -898,6 +1023,7 @@ fn parse_backend_ref(value: &HttpRouteRulesBackendRefs, route_ns: &str) -> Optio
         backend: Arc::from(backend),
         weight,
         filters,
+        protocol: crate::ir::BackendProtocol::Http,
     })
 }
 
@@ -1020,8 +1146,26 @@ fn parse_filter(value: &HttpRouteRulesFilters, route_ns: &str) -> Vec<RouteFilte
             let ns = mirror.backend_ref.namespace.as_deref().unwrap_or(route_ns);
             let port = mirror.backend_ref.port.unwrap_or(80);
             let backend = format!("{}.{}.svc.cluster.local.:{}", name, ns, port);
+            let fraction = mirror
+                .fraction
+                .as_ref()
+                .map(|f| {
+                    let denom = f.denominator.unwrap_or(100).max(1);
+                    let num = f.numerator.max(0) as u32;
+                    Fraction {
+                        numerator: num,
+                        denominator: denom as u32,
+                    }
+                })
+                .or_else(|| {
+                    mirror.percent.map(|p| Fraction {
+                        numerator: p.max(0) as u32,
+                        denominator: 100,
+                    })
+                });
             vec![RouteFilter::RequestMirror {
                 backend: Arc::from(backend),
+                fraction,
             }]
         }
         HttpRouteRulesFiltersType::Cors => {
@@ -1237,8 +1381,52 @@ pub async fn reconcile_httproute(
             (name, labels)
         })
         .collect();
+
+    // Only fetch ListenerSets when this route actually parents to one.
+    let parsed_refs = parse_parent_refs(&route);
+    let needs_listener_sets = parsed_refs
+        .iter()
+        .any(|p| p.group == "gateway.networking.k8s.io" && p.kind == "ListenerSet");
+
+    let (listener_set_list_items, mut listener_set_states) = if needs_listener_sets {
+        let listener_sets: Api<crate::gateway::api::ListenerSet> = Api::all(ctx.client.clone());
+        let listener_set_list = match listener_sets.list(&Default::default()).await {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list ListenerSets for HTTPRoute reconcile");
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
+        };
+        let mut states = Vec::new();
+        for ls in &listener_set_list.items {
+            states.push(
+                crate::gateway::reconcile::listenerset::build_listener_set_state(
+                    ls,
+                    &gateway_list.items,
+                    &namespace_labels,
+                    &ctx.client,
+                    &grant_index,
+                )
+                .await,
+            );
+        }
+        (listener_set_list.items, states)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    if !listener_set_states.is_empty() {
+        crate::gateway::reconcile::listenerset::resolve_listener_set_conflicts(
+            &mut listener_set_states,
+            &gateway_states,
+        );
+    }
     let listener_allowed =
         crate::gateway::reconcile::gateway::build_listener_allowed_map(&gateway_list.items);
+    let listener_set_allowed =
+        crate::gateway::reconcile::listenerset::build_listener_set_allowed_map(
+            &listener_set_list_items,
+            &listener_set_states,
+        );
 
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
     let backend_resolution =
@@ -1246,8 +1434,11 @@ pub async fn reconcile_httproute(
     let reconciled = reconcile_single(
         &route,
         &gateway_states,
+        &listener_set_states,
         &namespace_labels,
         &listener_allowed,
+        &listener_set_allowed,
+        &grant_index,
         backend_resolution,
     );
 
@@ -1285,8 +1476,8 @@ pub async fn reconcile_httproute(
                     .collect();
 
                 let mut parent_ref = serde_json::Map::new();
-                parent_ref.insert("group".into(), "gateway.networking.k8s.io".into());
-                parent_ref.insert("kind".into(), "Gateway".into());
+                parent_ref.insert("group".into(), serde_json::json!(ps.parent_ref.group.as_ref()));
+                parent_ref.insert("kind".into(), serde_json::json!(ps.parent_ref.kind.as_ref()));
                 parent_ref.insert("name".into(), serde_json::json!(ps.parent_ref.name.as_ref()));
                 parent_ref.insert("namespace".into(), serde_json::json!(ps.parent_ref.namespace.as_ref()));
                 if let Some(section) = ps.parent_ref.section_name.as_deref() {
@@ -1390,6 +1581,30 @@ mod tests {
                 port: 80,
                 hostname: None,
                 tls_mode: None,
+            }],
+        }
+    }
+
+    fn grant_allowing_http_route(
+        from_ns: &str,
+        gateway_ns: &str,
+        gateway_name: &str,
+    ) -> ReferenceGrantState {
+        ReferenceGrantState {
+            namespace: Arc::from(gateway_ns),
+            name: Arc::from("allow"),
+            generation: 1,
+            from: vec![GrantSubject {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("HTTPRoute"),
+                namespace: Some(Arc::from(from_ns)),
+                name: None,
+            }],
+            to: vec![GrantSubject {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: None,
+                name: Some(Arc::from(gateway_name)),
             }],
         }
     }
@@ -1506,7 +1721,8 @@ mod tests {
             "sectionName": "http"
         })]);
         let gateways = vec![gw_with_listener("prod", "gw-1", "http")];
-        let grant_index = GrantIndex::new(vec![]);
+        let grant_index =
+            GrantIndex::new(vec![grant_allowing_http_route("default", "prod", "gw-1")]);
 
         let results = reconcile_httproutes(&[route], &gateways, &grant_index);
         let status = &results[0].parent_statuses[0];
@@ -1527,7 +1743,8 @@ mod tests {
             "sectionName": "http"
         })]);
         let gateways = vec![gw_with_listener("prod", "gw-1", "http")];
-        let grant_index = GrantIndex::new(vec![]);
+        let grant_index =
+            GrantIndex::new(vec![grant_allowing_http_route("default", "prod", "gw-1")]);
         let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
         let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         listener_allowed.insert(
@@ -1541,11 +1758,15 @@ mod tests {
             },
         );
 
+        let listener_sets = Vec::<ListenerSetState>::new();
+        let listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         let results = reconcile_httproutes_with_context(
             &[route],
             &gateways,
+            &listener_sets,
             &namespace_labels,
             &listener_allowed,
+            &listener_set_allowed,
             &grant_index,
         );
         let status = &results[0].parent_statuses[0];
@@ -1569,7 +1790,8 @@ mod tests {
         }))
         .expect("valid HTTPRoute");
         let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
-        let grant_index = GrantIndex::new(vec![]);
+        let grant_index =
+            GrantIndex::new(vec![grant_allowing_http_route("team-a", "infra", "gw-1")]);
         let mut namespace_labels = HashMap::<String, HashMap<String, String>>::new();
         namespace_labels.insert(
             "team-a".to_string(),
@@ -1593,11 +1815,15 @@ mod tests {
             },
         );
 
+        let listener_sets = Vec::<ListenerSetState>::new();
+        let listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         let results = reconcile_httproutes_with_context(
             &[route],
             &gateways,
+            &listener_sets,
             &namespace_labels,
             &listener_allowed,
+            &listener_set_allowed,
             &grant_index,
         );
         let status = &results[0].parent_statuses[0];
@@ -1621,7 +1847,8 @@ mod tests {
         }))
         .expect("valid HTTPRoute");
         let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
-        let grant_index = GrantIndex::new(vec![]);
+        let grant_index =
+            GrantIndex::new(vec![grant_allowing_http_route("team-b", "infra", "gw-1")]);
         let mut namespace_labels = HashMap::<String, HashMap<String, String>>::new();
         namespace_labels.insert(
             "team-b".to_string(),
@@ -1645,11 +1872,15 @@ mod tests {
             },
         );
 
+        let listener_sets = Vec::<ListenerSetState>::new();
+        let listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         let results = reconcile_httproutes_with_context(
             &[route],
             &gateways,
+            &listener_sets,
             &namespace_labels,
             &listener_allowed,
+            &listener_set_allowed,
             &grant_index,
         );
         let status = &results[0].parent_statuses[0];
@@ -1670,7 +1901,8 @@ mod tests {
             "sectionName": "http"
         })]);
         let gateways = vec![gw_with_listener("infra", "gw-1", "http")];
-        let grant_index = GrantIndex::new(vec![]);
+        let grant_index =
+            GrantIndex::new(vec![grant_allowing_http_route("default", "infra", "gw-1")]);
         let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
         let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         listener_allowed.insert(
@@ -1687,11 +1919,15 @@ mod tests {
             },
         );
 
+        let listener_sets = Vec::<ListenerSetState>::new();
+        let listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
         let results = reconcile_httproutes_with_context(
             &[route],
             &gateways,
+            &listener_sets,
             &namespace_labels,
             &listener_allowed,
+            &listener_set_allowed,
             &grant_index,
         );
         let status = &results[0].parent_statuses[0];
@@ -2441,6 +2677,7 @@ mod tests {
             *filter,
             RouteFilter::RequestMirror {
                 backend: Arc::from("mirror-svc.mirror-ns.svc.cluster.local.:8080"),
+                fraction: None,
             }
         );
     }
@@ -2459,7 +2696,7 @@ mod tests {
             }
         }));
         let rule = &parse_httproute_state(&route).rules[0];
-        assert_eq!(rule.timeout_secs, Some(30));
+        assert_eq!(rule.timeout_ms, Some(30_000));
     }
 
     #[test]
@@ -2476,7 +2713,7 @@ mod tests {
             }
         }));
         let rule = &parse_httproute_state(&route).rules[0];
-        assert_eq!(rule.timeout_secs, None);
+        assert_eq!(rule.timeout_ms, None);
     }
 
     fn gw_with_hostname(ns: &str, name: &str, listener: &str, hostname: &str) -> GatewayState {

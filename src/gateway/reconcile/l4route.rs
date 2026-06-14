@@ -337,22 +337,31 @@ impl BackendRefLike for TlsRouteRulesBackendRefs {
 // Backend resolution
 // ---------------------------------------------------------------------------
 
+/// Error returned when checking an L4 backendRef.
+#[derive(Clone, Debug)]
+enum L4BackendCheckError {
+    /// The backendRef points to an unsupported group/kind.
+    InvalidKind(String),
+    /// The backendRef is not permitted by a ReferenceGrant.
+    RefNotPermitted(String),
+}
+
 /// Check a single L4 backendRef for permission and supported kind.
 fn check_l4_backend_permitted(
     backend: &ParsedBackendRef,
     route_ns: &str,
     route_kind: &str,
     grant_index: &GrantIndex,
-) -> Result<(), String> {
+) -> Result<(), L4BackendCheckError> {
     let group = backend.group.as_deref().unwrap_or("");
     let kind = backend.kind.as_deref().unwrap_or("Service");
     let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
 
     if !group.is_empty() || kind != "Service" {
-        return Err(format!(
+        return Err(L4BackendCheckError::InvalidKind(format!(
             "backendRef group {} kind {} is not supported",
             group, kind
-        ));
+        )));
     }
 
     let permitted = grant_index.is_permitted(
@@ -366,10 +375,10 @@ fn check_l4_backend_permitted(
     );
 
     if !permitted {
-        return Err(format!(
+        return Err(L4BackendCheckError::RefNotPermitted(format!(
             "cross-namespace backend reference from {} to {}/{} is not permitted",
             route_ns, target_ns, backend.name
-        ));
+        )));
     }
 
     Ok(())
@@ -392,13 +401,17 @@ pub(crate) async fn resolve_l4_backends_async(
     let mut resolved_refs_condition: Option<StatusCondition> = None;
 
     for backend in backends {
-        if let Err(msg) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
-            tracing::debug!(%msg, "L4 backendRef not permitted");
+        if let Err(err) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
+            let (reason, message) = match err {
+                L4BackendCheckError::InvalidKind(msg) => ("InvalidKind", msg),
+                L4BackendCheckError::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+            };
+            tracing::debug!(%message, reason, "L4 backendRef check failed");
             resolved_refs_condition.get_or_insert(StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,
-                reason: "RefNotPermitted".to_string(),
-                message: msg,
+                reason: reason.to_string(),
+                message,
                 observed_generation,
             });
             continue;
@@ -433,6 +446,7 @@ pub(crate) async fn resolve_l4_backends_async(
             backend: target,
             weight,
             filters: vec![],
+            protocol: crate::ir::BackendProtocol::Http,
         });
     }
 
@@ -451,13 +465,17 @@ pub(crate) fn resolve_l4_backends(
     let mut resolved_refs_condition: Option<StatusCondition> = None;
 
     for backend in backends {
-        if let Err(msg) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
-            tracing::debug!(%msg, "L4 backendRef not permitted");
+        if let Err(err) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
+            let (reason, message) = match err {
+                L4BackendCheckError::InvalidKind(msg) => ("InvalidKind", msg),
+                L4BackendCheckError::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+            };
+            tracing::debug!(%message, reason, "L4 backendRef check failed");
             resolved_refs_condition.get_or_insert(StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,
-                reason: "RefNotPermitted".to_string(),
-                message: msg,
+                reason: reason.to_string(),
+                message,
                 observed_generation,
             });
             continue;
@@ -473,6 +491,7 @@ pub(crate) fn resolve_l4_backends(
             backend: target,
             weight,
             filters: vec![],
+            protocol: crate::ir::BackendProtocol::Http,
         });
     }
 
@@ -482,33 +501,6 @@ pub(crate) fn resolve_l4_backends(
 // ---------------------------------------------------------------------------
 // ParentRef resolution
 // ---------------------------------------------------------------------------
-
-/// Check whether a listener can accept an L4 route of the given kind and protocol.
-#[allow(clippy::too_many_arguments)]
-fn listener_accepts_l4_route(
-    listener: &ListenerState,
-    allowed: &AllowedRoutes,
-    route_ns: &str,
-    gateway_ns: &str,
-    namespace_labels: &HashMap<String, HashMap<String, String>>,
-    route_hostnames: &[HostnameMatch],
-    route_kind: &str,
-    expected_protocols: &[&str],
-) -> bool {
-    if !listener_allows_kind(allowed, "gateway.networking.k8s.io", route_kind) {
-        return false;
-    }
-    if !expected_protocols
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(listener.protocol.as_ref()))
-    {
-        return false;
-    }
-    if !namespace_allowed(&allowed.namespaces, route_ns, gateway_ns, namespace_labels) {
-        return false;
-    }
-    listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames)
-}
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_l4_parent_ref(
@@ -612,6 +604,7 @@ fn resolve_l4_parent_ref(
     }
 
     let mut kind_allowed = false;
+    let mut protocol_allowed = false;
     let mut namespace_allowed_flag = false;
     let mut hostname_intersects = false;
 
@@ -624,24 +617,26 @@ fn resolve_l4_parent_ref(
             ))
             .cloned()
             .unwrap_or_default();
-        if !listener_accepts_l4_route(
-            listener,
-            &allowed,
-            route_ns,
-            target_ns,
-            namespace_labels,
-            route_hostnames,
-            route_kind,
-            expected_protocols,
-        ) {
-            continue;
+        let kind_ok = listener_allows_kind(&allowed, "gateway.networking.k8s.io", route_kind);
+        let protocol_ok = expected_protocols
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(listener.protocol.as_ref()));
+        let ns_ok = namespace_allowed(&allowed.namespaces, route_ns, target_ns, namespace_labels);
+        let hostname_ok =
+            listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames);
+
+        kind_allowed |= kind_ok;
+        protocol_allowed |= protocol_ok;
+        namespace_allowed_flag |= ns_ok;
+        hostname_intersects |= hostname_ok;
+
+        // If this listener fully accepts the route, remember it for the parent ref.
+        if kind_ok && protocol_ok && ns_ok && hostname_ok {
+            let _ = listener;
         }
-        kind_allowed = true;
-        namespace_allowed_flag = true;
-        hostname_intersects = true;
     }
 
-    if !kind_allowed || !namespace_allowed_flag {
+    if !kind_allowed || !protocol_allowed || !namespace_allowed_flag {
         return (
             None,
             vec![StatusCondition {
@@ -674,9 +669,13 @@ fn resolve_l4_parent_ref(
     }
 
     let parent_ref = ParentRef {
+        group: Arc::from("gateway.networking.k8s.io"),
+        kind: Arc::from("Gateway"),
+
         namespace: Some(Arc::from(target_ns)),
         name: Arc::from(parsed.name.clone()),
         section_name: parsed.section_name.as_ref().map(|s| Arc::from(s.as_str())),
+        port: parsed.port.map(|p| p as u16),
     };
 
     let conditions = vec![StatusCondition {
@@ -729,6 +728,9 @@ fn reconcile_l4_routes(
                 } else if !conditions.is_empty() {
                     parent_statuses.push(L4ParentStatus {
                         parent_ref: ParentRef {
+                            group: Arc::from("gateway.networking.k8s.io"),
+                            kind: Arc::from("Gateway"),
+
                             namespace: parsed
                                 .namespace
                                 .as_ref()
@@ -739,6 +741,7 @@ fn reconcile_l4_routes(
                                 .section_name
                                 .as_ref()
                                 .map(|s| Arc::from(s.as_str())),
+                            port: parsed.port.map(|p| p as u16),
                         },
                         conditions,
                     });
@@ -760,6 +763,27 @@ fn reconcile_l4_routes(
                             && c.status == ConditionStatus::False
                     })
                 });
+
+            let programmed_condition = if accepted {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::True,
+                    reason: "Programmed".to_string(),
+                    message: "Route programmed into proxy".to_string(),
+                    observed_generation: route.generation,
+                }
+            } else {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::False,
+                    reason: "NotProgrammed".to_string(),
+                    message: "Route not programmed into proxy".to_string(),
+                    observed_generation: route.generation,
+                }
+            };
+            for parent_status in &mut parent_statuses {
+                parent_status.conditions.push(programmed_condition.clone());
+            }
 
             ReconciledL4Route {
                 route_state,
@@ -1586,6 +1610,14 @@ mod tests {
             .find(|c| matches!(c.condition_type, ConditionType::Accepted))
             .unwrap();
         assert_eq!(accepted.status, ConditionStatus::True);
+
+        let programmed = r.parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Programmed))
+            .unwrap();
+        assert_eq!(programmed.status, ConditionStatus::True);
+        assert_eq!(programmed.reason, "Programmed");
     }
 
     #[test]
@@ -1625,6 +1657,11 @@ mod tests {
         );
         assert!(reconciled[0].route_state.parent_refs.is_empty());
         assert!(!reconciled[0].programmed);
+        assert!(reconciled[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .any(|c| matches!(c.condition_type, ConditionType::Programmed)
+                && c.status == ConditionStatus::False));
     }
 
     #[test]
@@ -1897,10 +1934,13 @@ mod tests {
     fn status_parents_json_is_well_formed() {
         let parent_status = L4ParentStatus {
             parent_ref: ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+
                 namespace: Some(Arc::from("default")),
                 name: Arc::from("gw-1"),
                 section_name: Some(Arc::from("tls")),
-            },
+            port: None,},
             conditions: vec![StatusCondition {
                 condition_type: ConditionType::Accepted,
                 status: ConditionStatus::True,
@@ -2148,10 +2188,13 @@ mod tests {
     fn build_status_parents_false_condition() {
         let parent_status = L4ParentStatus {
             parent_ref: ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+
                 namespace: Some(Arc::from("default")),
                 name: Arc::from("gw-1"),
                 section_name: None,
-            },
+            port: None,},
             conditions: vec![StatusCondition {
                 condition_type: ConditionType::ResolvedRefs,
                 status: ConditionStatus::False,

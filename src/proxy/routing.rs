@@ -12,7 +12,7 @@ impl SunbeamProxy {
         // ACME challenge: backend was resolved in request_filter.
         if let Some(backend) = &ctx.acme_backend {
             tracing::debug!(backend, "upstream_peer: ACME challenge route");
-            if let Some(peer) = make_peer(backend, None).await {
+            if let Some(peer) = make_peer(backend, None, crate::ir::BackendProtocol::Http).await {
                 return Ok(peer);
             }
             let mut resp = ResponseHeader::build(502, None)?;
@@ -48,7 +48,16 @@ impl SunbeamProxy {
             let _ = backend_idx;
 
             // Fire-and-forget mirrors.
-            for mirror in &upstream.mirror {
+            for (i, mirror) in upstream.mirror.iter().enumerate() {
+                if let Some(frac) = upstream.mirror_fractions.get(i).and_then(|f| f.as_ref()) {
+                    if frac.denominator == 0 {
+                        continue;
+                    }
+                    let roll = rand::random::<u32>() % frac.denominator;
+                    if roll >= frac.numerator {
+                        continue;
+                    }
+                }
                 let mirror_addr = backend_addr(mirror);
                 let mirror_path = session
                     .req_header()
@@ -71,10 +80,14 @@ impl SunbeamProxy {
                 });
             }
 
-            let timeout_secs = upstream.timeout.map(|d| d.as_secs());
+            let protocol = ctx
+                .backend_index
+                .and_then(|idx| upstream.backends.get(idx))
+                .map(|b| b.protocol)
+                .unwrap_or_default();
             tracing::debug!(backend = %backend, ?upstream.timeout, "upstream_peer: route plan");
             if !backend.is_empty() {
-                if let Some(peer) = make_peer(&backend, timeout_secs).await {
+                if let Some(peer) = make_peer(&backend, upstream.timeout, protocol).await {
                     return Ok(peer);
                 }
             }
@@ -132,6 +145,7 @@ mod tests {
             .map(|b| crate::ir::WeightedBackend {
                 backend: b.into(),
                 weight: 1,
+                protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
             })
             .collect();
@@ -148,6 +162,7 @@ mod tests {
                 backends,
                 timeout: Some(Duration::from_secs(5)),
                 mirror: mirror.into_iter().map(|m| m.into()).collect(),
+                mirror_fractions: vec![],
                 backend_request_mutations,
             }),
             upstream_request_mutations: vec![],
@@ -218,6 +233,7 @@ mod tests {
             l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -226,6 +242,7 @@ mod tests {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,

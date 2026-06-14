@@ -10,13 +10,16 @@
 use crate::gateway::api::gateway::Gateway;
 use crate::gateway::api::gatewayclass::GatewayClass;
 use crate::gateway::api::httproute::HTTPRoute;
-use crate::gateway::api::ReferenceGrant;
+use crate::gateway::api::{ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute};
 use crate::gateway::model::{
-    AllowedRoutes, GatewayState, ListenerState, NamespaceFrom, RouteGroupKind, RouteNamespaces,
-    TlsMode,
+    AllowedRoutes, GatewayState, HostnameMatch, ListenerState, NamespaceFrom, RouteGroupKind,
+    RouteNamespaces, TlsMode,
 };
 use crate::gateway::reconcile::gatewayclass::{
     supported_features, to_k8s_condition, CONTROLLER_NAME,
+};
+use crate::gateway::reconcile::httproute::{
+    listener_allows_kind, listener_hostname_intersects, namespace_allowed, parse_route_hostnames,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
@@ -338,7 +341,30 @@ fn listener_accepted(
     ("True", "Accepted", "Listener accepted")
 }
 
-fn validate_listener_kinds(
+/// Return the default supported route kinds for a listener protocol.
+pub fn listener_supported_kinds(
+    protocol: &str,
+    _tls_mode: Option<TlsMode>,
+    _supported_features: &std::collections::HashSet<String>,
+) -> Vec<serde_json::Value> {
+    match protocol {
+        "TCP" => {
+            vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TCPRoute"})]
+        }
+        "UDP" => {
+            vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "UDPRoute"})]
+        }
+        "TLS" => {
+            vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TLSRoute"})]
+        }
+        _ => vec![
+            serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "HTTPRoute"}),
+            serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "GRPCRoute"}),
+        ],
+    }
+}
+
+pub(crate) fn validate_listener_kinds(
     listener: &serde_json::Map<String, serde_json::Value>,
 ) -> (
     Vec<serde_json::Value>,
@@ -377,7 +403,12 @@ fn validate_listener_kinds(
         }
     };
 
-    let supported_kinds: &[&str] = &["HTTPRoute", "TCPRoute", "UDPRoute", "TLSRoute"];
+    let valid_kinds_for_protocol: &[&str] = match protocol {
+        "TCP" => &["TCPRoute"],
+        "UDP" => &["UDPRoute"],
+        "TLS" => &["TLSRoute"],
+        _ => &["HTTPRoute"],
+    };
     let mut supported = Vec::new();
     let mut has_invalid = false;
     for entry in kinds {
@@ -386,7 +417,7 @@ fn validate_listener_kinds(
             .and_then(|v| v.as_str())
             .unwrap_or("gateway.networking.k8s.io");
         let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if group == "gateway.networking.k8s.io" && supported_kinds.contains(&kind) {
+        if group == "gateway.networking.k8s.io" && valid_kinds_for_protocol.contains(&kind) {
             supported.push(serde_json::json!({ "group": group, "kind": kind }));
         } else {
             has_invalid = true;
@@ -420,7 +451,8 @@ pub struct CertValidation {
 /// not contain valid certificate data.
 pub async fn validate_listener_certificates(
     client: &Client,
-    gateway_ns: &str,
+    from_ns: &str,
+    from_kind: &str,
     listener: &serde_json::Map<String, serde_json::Value>,
     grant_index: &crate::gateway::reconcile::refgrant::GrantIndex,
 ) -> Option<CertValidation> {
@@ -451,12 +483,12 @@ pub async fn validate_listener_certificates(
         let ns = cert
             .get("namespace")
             .and_then(|v| v.as_str())
-            .unwrap_or(gateway_ns);
-        if ns != gateway_ns {
+            .unwrap_or(from_ns);
+        if ns != from_ns {
             let permitted = grant_index.is_permitted(
-                gateway_ns,
+                from_ns,
                 "gateway.networking.k8s.io",
-                "Gateway",
+                from_kind,
                 ns,
                 group,
                 kind,
@@ -513,6 +545,7 @@ struct ListenerMatch {
     name: String,
     port: u16,
     hostname: Option<String>,
+    protocol: String,
     allowed: AllowedRoutes,
 }
 
@@ -532,12 +565,89 @@ fn listener_matches(gw: &Gateway) -> Vec<ListenerMatch> {
                 .get("hostname")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            protocol: obj
+                .get("protocol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("HTTP")
+                .to_string(),
             allowed: parse_allowed_routes(obj),
         })
         .collect()
 }
 
-/// Count how many HTTPRoutes are attached to each Gateway listener.
+/// Common shape for a route parentRef so HTTPRoute and L4 routes can share
+/// attachment counting logic.
+struct ParentRefInfo {
+    group: Option<String>,
+    kind: Option<String>,
+    namespace: Option<String>,
+    name: String,
+    section_name: Option<String>,
+    port: Option<i32>,
+}
+
+impl ParentRefInfo {
+    fn is_gateway(&self) -> bool {
+        self.group.as_deref().unwrap_or("gateway.networking.k8s.io") == "gateway.networking.k8s.io"
+            && self.kind.as_deref().unwrap_or("Gateway") == "Gateway"
+    }
+}
+
+struct AttachmentCounter<'a> {
+    listeners: &'a [ListenerMatch],
+    gw_ns: &'a str,
+    gw_name: &'a str,
+    namespace_labels: &'a HashMap<String, HashMap<String, String>>,
+    counts: &'a mut [i64],
+}
+
+impl<'a> AttachmentCounter<'a> {
+    fn increment(
+        &mut self,
+        parent: &ParentRefInfo,
+        route_ns: &str,
+        route_hostnames: &[HostnameMatch],
+        route_kind: &str,
+        expected_protocol: &str,
+    ) {
+        if !parent.is_gateway() {
+            return;
+        }
+        let parent_ns = parent.namespace.as_deref().unwrap_or(route_ns);
+        if parent_ns != self.gw_ns || parent.name != self.gw_name {
+            return;
+        }
+        let parent_section = parent.section_name.as_deref();
+        let parent_port = parent.port.map(|p| p as u16);
+        for (idx, listener) in self.listeners.iter().enumerate() {
+            let section_matches = parent_section.map(|s| s == listener.name).unwrap_or(true);
+            let port_matches = parent_port.map(|p| p == listener.port).unwrap_or(true);
+            if !section_matches || !port_matches {
+                continue;
+            }
+            if listener.protocol != expected_protocol {
+                continue;
+            }
+            if !listener_allows_kind(&listener.allowed, "gateway.networking.k8s.io", route_kind) {
+                continue;
+            }
+            if !namespace_allowed(
+                &listener.allowed.namespaces,
+                route_ns,
+                self.gw_ns,
+                self.namespace_labels,
+            ) {
+                continue;
+            }
+            if listener_hostname_intersects(listener.hostname.as_deref(), route_hostnames) {
+                self.counts[idx] += 1;
+            }
+        }
+    }
+}
+
+/// Count how many routes of each supported kind are attached to each Gateway
+/// listener.
 async fn count_attached_routes(
     client: &Client,
     gw_ns: &str,
@@ -545,58 +655,117 @@ async fn count_attached_routes(
     listeners: &[ListenerMatch],
     namespace_labels: &HashMap<String, HashMap<String, String>>,
 ) -> Vec<i64> {
-    use crate::gateway::reconcile::httproute::{listener_accepts_route, parse_route_hostnames};
-
-    let api: Api<HTTPRoute> = Api::all(client.clone());
     let mut counts = vec![0i64; listeners.len()];
-    let Ok(list) = api.list(&Default::default()).await else {
-        return counts;
+    let mut counter = AttachmentCounter {
+        listeners,
+        gw_ns,
+        gw_name,
+        namespace_labels,
+        counts: &mut counts,
     };
-    for route in list {
-        let route_ns = route.metadata.namespace.as_deref().unwrap_or(gw_ns);
-        let route_hostnames = parse_route_hostnames(&route);
-        let parents = route.spec.parent_refs.as_deref().unwrap_or(&[]);
-        for parent in parents {
-            let parent_group = parent
-                .group
-                .as_deref()
-                .unwrap_or("gateway.networking.k8s.io");
-            let parent_kind = parent.kind.as_deref().unwrap_or("Gateway");
-            if parent_group != "gateway.networking.k8s.io" || parent_kind != "Gateway" {
-                continue;
-            }
-            let parent_ns = parent.namespace.as_deref().unwrap_or(route_ns);
-            if parent_ns != gw_ns || parent.name != gw_name {
-                continue;
-            }
-            let parent_section = parent.section_name.as_deref();
-            let parent_port = parent.port.map(|p| p as u16);
-            for (idx, listener) in listeners.iter().enumerate() {
-                let section_matches = parent_section.map(|s| s == listener.name).unwrap_or(true);
-                let port_matches = parent_port.map(|p| p == listener.port).unwrap_or(true);
-                if !section_matches || !port_matches {
-                    continue;
-                }
-                let listener_state = crate::gateway::model::ListenerState {
-                    name: Arc::from(listener.name.as_str()),
-                    protocol: Arc::from("HTTP"),
-                    port: listener.port,
-                    hostname: listener.hostname.as_deref().map(Arc::from),
-                    tls_mode: None,
+
+    // HTTPRoutes
+    if let Ok(list) = Api::<HTTPRoute>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
+        for route in list {
+            let route_ns = route.metadata.namespace.as_deref().unwrap_or(gw_ns);
+            let route_hostnames = parse_route_hostnames(&route);
+            let parents = route.spec.parent_refs.as_deref().unwrap_or(&[]);
+            for parent in parents {
+                let info = ParentRefInfo {
+                    group: parent.group.clone(),
+                    kind: parent.kind.clone(),
+                    namespace: parent.namespace.clone(),
+                    name: parent.name.clone(),
+                    section_name: parent.section_name.clone(),
+                    port: parent.port,
                 };
-                if listener_accepts_route(
-                    &listener_state,
-                    &listener.allowed,
-                    route_ns,
-                    gw_ns,
-                    namespace_labels,
-                    &route_hostnames,
-                ) {
-                    counts[idx] += 1;
-                }
+                counter.increment(&info, route_ns, &route_hostnames, "HTTPRoute", "HTTPS");
+                counter.increment(&info, route_ns, &route_hostnames, "HTTPRoute", "HTTP");
             }
         }
     }
+
+    // TCPRoutes
+    if let Ok(list) = Api::<TCPRoute>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
+        for route in list {
+            let route_ns = route.metadata.namespace.as_deref().unwrap_or(gw_ns);
+            let parents = route.spec.parent_refs.as_deref().unwrap_or(&[]);
+            for parent in parents {
+                let info = ParentRefInfo {
+                    group: parent.group.clone(),
+                    kind: parent.kind.clone(),
+                    namespace: parent.namespace.clone(),
+                    name: parent.name.clone(),
+                    section_name: parent.section_name.clone(),
+                    port: parent.port,
+                };
+                counter.increment(&info, route_ns, &[], "TCPRoute", "TCP");
+            }
+        }
+    }
+
+    // UDPRoutes
+    if let Ok(list) = Api::<UDPRoute>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
+        for route in list {
+            let route_ns = route.metadata.namespace.as_deref().unwrap_or(gw_ns);
+            let parents = route.spec.parent_refs.as_deref().unwrap_or(&[]);
+            for parent in parents {
+                let info = ParentRefInfo {
+                    group: parent.group.clone(),
+                    kind: parent.kind.clone(),
+                    namespace: parent.namespace.clone(),
+                    name: parent.name.clone(),
+                    section_name: parent.section_name.clone(),
+                    port: parent.port,
+                };
+                counter.increment(&info, route_ns, &[], "UDPRoute", "UDP");
+            }
+        }
+    }
+
+    // TLSRoutes
+    if let Ok(list) = Api::<TLSRoute>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
+        for route in list {
+            let route_ns = route.metadata.namespace.as_deref().unwrap_or(gw_ns);
+            let hostnames: Vec<HostnameMatch> = route
+                .spec
+                .hostnames
+                .iter()
+                .map(|s| {
+                    if let Some(rest) = s.strip_prefix("*.") {
+                        HostnameMatch::Wildcard(Arc::from(rest))
+                    } else {
+                        HostnameMatch::Exact(Arc::from(s.as_str()))
+                    }
+                })
+                .collect();
+            let parents = route.spec.parent_refs.as_deref().unwrap_or(&[]);
+            for parent in parents {
+                let info = ParentRefInfo {
+                    group: parent.group.clone(),
+                    kind: parent.kind.clone(),
+                    namespace: parent.namespace.clone(),
+                    name: parent.name.clone(),
+                    section_name: parent.section_name.clone(),
+                    port: parent.port,
+                };
+                counter.increment(&info, route_ns, &hostnames, "TLSRoute", "TLS");
+            }
+        }
+    }
+
     counts
 }
 
@@ -694,7 +863,7 @@ pub async fn reconcile_gateway(
 ) -> Result<Action, kube::Error> {
     let ns = gw.metadata.namespace.clone().unwrap_or_default();
     let name = gw.metadata.name.clone().unwrap_or_default();
-    let observed_generation = gw.metadata.generation.unwrap_or(0);
+    let observed_generation = gw.metadata.generation.unwrap_or(0).max(1);
 
     // Look up the referenced GatewayClass (cluster-scoped).
     let gatewayclasses: Api<GatewayClass> = Api::all(ctx.client.clone());
@@ -727,7 +896,9 @@ pub async fn reconcile_gateway(
     let mut cert_errors: Vec<Option<CertValidation>> = Vec::new();
     for listener in &gw.spec.listeners {
         if let Some(obj) = listener.as_object() {
-            let err = validate_listener_certificates(&ctx.client, &ns, obj, &grant_index).await;
+            let err =
+                validate_listener_certificates(&ctx.client, &ns, "Gateway", obj, &grant_index)
+                    .await;
             cert_errors.push(err);
         } else {
             cert_errors.push(None);
@@ -737,6 +908,44 @@ pub async fn reconcile_gateway(
     let listeners = listener_matches(&gw);
     let attached_routes =
         count_attached_routes(&ctx.client, &ns, &name, &listeners, &namespace_labels).await;
+
+    let listener_sets_api: Api<ListenerSet> = Api::all(ctx.client.clone());
+    let listener_set_list = match listener_sets_api.list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list ListenerSets for Gateway status");
+            vec![]
+        }
+    };
+    let mut listener_set_states = Vec::new();
+    for ls in &listener_set_list {
+        if ls.spec.parent_ref.name != name {
+            continue;
+        }
+        if ls.spec.parent_ref.namespace.as_deref().unwrap_or(&ns) != ns {
+            continue;
+        }
+        listener_set_states.push(
+            crate::gateway::reconcile::listenerset::build_listener_set_state(
+                ls,
+                std::slice::from_ref(&gw),
+                &namespace_labels,
+                &ctx.client,
+                &grant_index,
+            )
+            .await,
+        );
+    }
+    crate::gateway::reconcile::listenerset::resolve_listener_set_conflicts(
+        &mut listener_set_states,
+        std::slice::from_ref(&build_gateway_state(&gw)),
+    );
+    let attached_listener_sets =
+        crate::gateway::reconcile::listenerset::count_attached_listener_sets(
+            &ns,
+            &name,
+            &listener_set_states,
+        );
 
     if ctx.is_leader.load(Ordering::Relaxed) {
         let k8s_conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> =
@@ -756,6 +965,7 @@ pub async fn reconcile_gateway(
             "conditions": k8s_conditions,
             "listeners": listener_statuses,
             "addresses": addresses,
+            "attachedListenerSets": attached_listener_sets,
         });
 
         let old_status_json = gw
@@ -1339,6 +1549,7 @@ mod tests {
             name: "http".to_string(),
             port: 80,
             hostname: None,
+            protocol: "HTTP".to_string(),
             allowed: crate::gateway::model::AllowedRoutes::default(),
         }];
         let namespace_labels =
@@ -1388,12 +1599,14 @@ mod tests {
                 name: "http".to_string(),
                 port: 80,
                 hostname: None,
+                protocol: "HTTP".to_string(),
                 allowed: crate::gateway::model::AllowedRoutes::default(),
             },
             crate::gateway::reconcile::gateway::ListenerMatch {
                 name: "https".to_string(),
                 port: 443,
                 hostname: None,
+                protocol: "HTTPS".to_string(),
                 allowed: crate::gateway::model::AllowedRoutes::default(),
             },
         ];
@@ -1429,7 +1642,9 @@ mod tests {
             "default",
         );
         let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
-        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        let err =
+            validate_listener_certificates(&client, "default", "Gateway", &listener, &grant_index)
+                .await;
         assert!(err.is_some());
         assert_eq!(err.unwrap().reason, "InvalidCertificateRef");
     }
@@ -1459,7 +1674,9 @@ mod tests {
             "default",
         );
         let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
-        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        let err =
+            validate_listener_certificates(&client, "default", "Gateway", &listener, &grant_index)
+                .await;
         assert_eq!(err.map(|e| e.reason), Some("InvalidCertificateRef"));
     }
 
@@ -1488,7 +1705,9 @@ mod tests {
             "default",
         );
         let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
-        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        let err =
+            validate_listener_certificates(&client, "default", "Gateway", &listener, &grant_index)
+                .await;
         assert_eq!(err.map(|e| e.reason), Some("RefNotPermitted"));
     }
 
@@ -1517,7 +1736,9 @@ mod tests {
             "default",
         );
         let grant_index = crate::gateway::reconcile::refgrant::GrantIndex::new(vec![]);
-        let err = validate_listener_certificates(&client, "default", &listener, &grant_index).await;
+        let err =
+            validate_listener_certificates(&client, "default", "Gateway", &listener, &grant_index)
+                .await;
         assert_eq!(err.map(|e| e.reason), Some("InvalidCertificateRef"));
     }
 

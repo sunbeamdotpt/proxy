@@ -18,24 +18,61 @@ metadata:
 rules:
   # Gateway API resources (cluster-scoped read).
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways", "httproutes", "tcproutes", "udproutes", "tlsroutes", "referencegrants", "gatewayclasses"]
+    resources: ["gateways", "httproutes", "tcproutes", "udproutes", "tlsroutes", "referencegrants", "gatewayclasses", "listenersets"]
     verbs: ["get", "list", "watch"]
   # Status writeback (leader only).
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways/status", "httproutes/status", "tcproutes/status", "udproutes/status", "tlsroutes/status", "gatewayclasses/status"]
+    resources: ["gateways/status", "httproutes/status", "tcproutes/status", "udproutes/status", "tlsroutes/status", "gatewayclasses/status", "listenersets/status"]
     verbs: ["patch", "update"]
-  # Lease API for leader election.
+  # Lease API for leader election. Scoped to the single lease object we create.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
+    resourceNames: ["sunbeam-proxy-gateway"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # Core resources for backend resolution, namespace selectors, cert/config reload.
+  # Core resources for backend resolution, namespace selectors, and pod/Svc endpoints.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "endpoints", "pods", "secrets", "configmaps"]
+    resources: ["namespaces", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  # Secrets may be referenced cross-namespace by Gateway certificateRefs when
+  # permitted by a ReferenceGrant. Limiting this to named resources is not
+  # practical for dynamic Gateway API usage; restrict to read-only verbs.
+  - apiGroups: [""]
+    resources: ["secrets"]
     verbs: ["get", "list", "watch"]
   # EndpointSlices for headless / manually-endpointed Service backends.
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
+---
+# Namespaced access for the proxy's own hot-reload ConfigMap and TLS Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sunbeam-proxy-config
+  namespace: sunbeam-proxy
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["sunbeam-proxy-config"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sunbeam-proxy-tls"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sunbeam-proxy-config
+  namespace: sunbeam-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sunbeam-proxy-config
+subjects:
+  - kind: ServiceAccount
+    name: sunbeam-proxy
+    namespace: sunbeam-proxy
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

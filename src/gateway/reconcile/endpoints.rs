@@ -34,6 +34,15 @@ struct ServiceInfo {
     ports: Vec<ServicePort>,
 }
 
+fn service_port_protocol(port: &ServicePort) -> crate::ir::BackendProtocol {
+    match port.app_protocol.as_deref() {
+        Some("kubernetes.io/h2c") => crate::ir::BackendProtocol::H2c,
+        Some("kubernetes.io/ws") => crate::ir::BackendProtocol::WebSocket,
+        Some("kubernetes.io/wss") => crate::ir::BackendProtocol::WebSocketSecure,
+        _ => crate::ir::BackendProtocol::Http,
+    }
+}
+
 /// A single ready endpoint together with its EndpointSlice ports.
 #[derive(Clone, Debug)]
 struct EndpointInfo {
@@ -143,13 +152,26 @@ fn expand_rule_backends(
             continue;
         };
 
+        let protocol = info
+            .ports
+            .iter()
+            .find(|p| p.port == target.port)
+            .map(service_port_protocol)
+            .unwrap_or(crate::ir::BackendProtocol::Http);
+
         if !needs_endpoint_resolution(info) {
-            expanded.push(backend);
+            expanded.push(WeightedBackend {
+                protocol,
+                ..backend
+            });
             continue;
         }
 
         let Some(endpoints) = endpoint_map.get(&key) else {
-            expanded.push(backend);
+            expanded.push(WeightedBackend {
+                protocol,
+                ..backend
+            });
             continue;
         };
 
@@ -163,6 +185,7 @@ fn expand_rule_backends(
                 backend: Arc::from(address),
                 weight: backend.weight,
                 filters: backend.filters.clone(),
+                protocol,
             });
             added = true;
         }
@@ -170,7 +193,10 @@ fn expand_rule_backends(
         // If no ready endpoints could be translated, fall back to the DNS name
         // rather than dropping the backend and returning a 500/503 immediately.
         if !added {
-            expanded.push(backend);
+            expanded.push(WeightedBackend {
+                protocol,
+                ..backend
+            });
         }
     }
     rule.backends = expanded;
@@ -382,10 +408,12 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: Arc::from(backend),
                 weight: 1,
+                protocol: crate::ir::BackendProtocol::Http,
                 filters: vec![],
             }],
             filters: vec![],
-            timeout_secs: None,
+            timeout_ms: None,
+            request_timeout_ms: None,
             programmed: true,
         }
     }
@@ -539,6 +567,53 @@ mod tests {
         expand_rule_backends(&mut rule, &services, &endpoints);
 
         assert_eq!(rule.backends[0].backend.as_ref(), "[2001:db8::1]:3000");
+    }
+
+    #[test]
+    fn clusterip_backend_inherits_app_protocol() {
+        let mut svc = svc_clusterip();
+        svc.spec.as_mut().unwrap().ports.as_mut().unwrap()[0].app_protocol =
+            Some("kubernetes.io/ws".to_string());
+        let mut rule = make_rule("regular.ns.svc.cluster.local.:8080");
+        let services = build_service_map(vec![svc]);
+        let endpoints = build_endpoint_map(vec![]);
+
+        expand_rule_backends(&mut rule, &services, &endpoints);
+
+        assert_eq!(rule.backends.len(), 1);
+        assert_eq!(
+            rule.backends[0].backend.as_ref(),
+            "regular.ns.svc.cluster.local.:8080"
+        );
+        assert_eq!(
+            rule.backends[0].protocol,
+            crate::ir::BackendProtocol::WebSocket
+        );
+    }
+
+    #[test]
+    fn headless_backend_inherits_h2c_app_protocol() {
+        let mut svc = svc_headless();
+        svc.spec.as_mut().unwrap().ports.as_mut().unwrap()[0].app_protocol =
+            Some("kubernetes.io/h2c".to_string());
+        let mut rule = make_rule("headless.ns.svc.cluster.local.:8080");
+        let services = build_service_map(vec![svc]);
+        let endpoints = build_endpoint_map(vec![endpoint_slice(
+            "headless",
+            vec!["10.42.0.10"],
+            true,
+            vec![EndpointPort {
+                name: Some("http".to_string()),
+                port: Some(3000),
+                ..Default::default()
+            }],
+        )]);
+
+        expand_rule_backends(&mut rule, &services, &endpoints);
+
+        assert_eq!(rule.backends.len(), 1);
+        assert_eq!(rule.backends[0].backend.as_ref(), "10.42.0.10:3000");
+        assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::H2c);
     }
 
     impl From<&Service> for ServiceInfo {

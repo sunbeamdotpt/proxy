@@ -7,6 +7,7 @@
 //! sources override lower-priority ones when the same hostname is claimed by
 //! more than one certificate.
 
+use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::tls::registry::{certified_key_from_pem, CertStore, WildcardPattern};
 use arc_swap::ArcSwap;
 use k8s_openapi::api::core::v1::Secret;
@@ -183,6 +184,7 @@ async fn build_gateway_cert_store(
     use crate::gateway::api::Gateway;
 
     let mut store = CertStore::default();
+    let grant_index = GrantIndex::new(view.reference_grants.clone());
 
     for gw_state in &view.gateways {
         let gateways_api: Api<Gateway> = Api::namespaced(client.clone(), &gw_state.namespace);
@@ -242,6 +244,28 @@ async fn build_gateway_cert_store(
                     .get("namespace")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&gw_state.namespace);
+
+                if secret_ns != gw_state.namespace.as_ref()
+                    && !grant_index.is_permitted(
+                        &gw_state.namespace,
+                        "gateway.networking.k8s.io",
+                        "Gateway",
+                        secret_ns,
+                        "",
+                        "Secret",
+                        secret_name,
+                    )
+                {
+                    tracing::warn!(
+                        gateway = %gw_state.name,
+                        namespace = %gw_state.namespace,
+                        listener = %obj.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        %secret_name,
+                        %secret_ns,
+                        "cross-namespace Gateway certificateRef denied by ReferenceGrant"
+                    );
+                    continue;
+                }
 
                 let secret_api: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
                 let secret = match secret_api.get(secret_name).await {

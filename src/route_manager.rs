@@ -295,8 +295,8 @@ impl RouteManager {
 mod tests {
     use super::*;
     use crate::ir::{
-        Action, HostRoute, HostnameMatch, PathMatch, RequestMatch, RouteAction, Rule,
-        WeightedBackend,
+        Action, BackendProtocol, HostRoute, HostnameMatch, PathMatch, RequestMatch, RouteAction,
+        Rule, WeightedBackend,
     };
     use std::collections::HashMap;
 
@@ -305,13 +305,14 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: "svc:80".into(),
                 weight: 1,
-
+                protocol: BackendProtocol::Http,
                 request_filters: vec![],
             }],
             timeout: None,
             request_filters: vec![],
             response_filters: vec![],
             mirror_backends: vec![],
+            mirror_fractions: vec![],
             cache: None,
             body_rewrites: vec![],
             auth: None,
@@ -327,6 +328,7 @@ mod tests {
                 hostname: HostnameMatch::Exact(hostname.into()),
                 listener_ids: vec![],
                 listener_hostname: None,
+                listener_port: None,
                 gateway_api: true,
                 disable_secure_redirection: false,
                 rules: vec![Rule {
@@ -360,7 +362,7 @@ mod tests {
             .unwrap();
         let current = mgr.current().load();
         assert!(current
-            .lookup("example.com", "/", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
             .is_some());
     }
 
@@ -385,18 +387,18 @@ mod tests {
         assert!(mgr
             .current()
             .load()
-            .lookup("v2.test", "/", "GET", &Default::default(), None)
+            .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
             .is_some());
         assert!(mgr.rollback(1));
         assert!(mgr
             .current()
             .load()
-            .lookup("v1.test", "/", "GET", &Default::default(), None)
+            .lookup("v1.test", 0, "/", "GET", &Default::default(), None)
             .is_some());
         assert!(mgr
             .current()
             .load()
-            .lookup("v2.test", "/", "GET", &Default::default(), None)
+            .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
             .is_none());
         assert_eq!(mgr.versions().len(), 1);
     }
@@ -425,7 +427,7 @@ mod tests {
         assert!(mgr
             .current()
             .load()
-            .lookup("b.test", "/", "GET", &Default::default(), None)
+            .lookup("b.test", 0, "/", "GET", &Default::default(), None)
             .is_some());
     }
 
@@ -441,7 +443,7 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: "gw:80".into(),
                 weight: 1,
-
+                protocol: BackendProtocol::Http,
                 request_filters: vec![],
             }],
             ..simple_backend()
@@ -454,7 +456,7 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: "toml:80".into(),
                 weight: 1,
-
+                protocol: BackendProtocol::Http,
                 request_filters: vec![],
             }],
             ..simple_backend()
@@ -464,7 +466,7 @@ mod tests {
         let plan = mgr
             .current()
             .load()
-            .lookup("example.com", "/", "GET", &Default::default(), None)
+            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
             .unwrap();
         let backend = match &plan.upstream {
             Some(up) => up.backends[0].backend.as_ref(),
@@ -482,7 +484,7 @@ mod tests {
             if mgr
                 .current()
                 .load()
-                .lookup("spawn.test", "/", "GET", &Default::default(), None)
+                .lookup("spawn.test", 0, "/", "GET", &Default::default(), None)
                 .is_some()
             {
                 break;
@@ -492,7 +494,7 @@ mod tests {
         assert!(mgr
             .current()
             .load()
-            .lookup("spawn.test", "/", "GET", &Default::default(), None)
+            .lookup("spawn.test", 0, "/", "GET", &Default::default(), None)
             .is_some());
     }
 
@@ -509,6 +511,7 @@ mod tests {
         });
         table.l4_routes.push(crate::ir::L4Route {
             listener_id: "tcp-l".into(),
+            listener_hostname: crate::ir::HostnameMatch::Any,
             match_: crate::ir::L4Match::Any,
             action: crate::ir::L4Action::TcpRelay(vec![]),
         });

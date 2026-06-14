@@ -14,11 +14,13 @@
 # dep needs must NOT be excluded.
 
 # ── Stage 1: build ──────────────────────────────────────────────
-FROM rust:slim AS builder
+FROM rust:1.86-slim AS builder
 
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y musl-tools curl cmake pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      musl-tools curl ca-certificates cmake pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in \
       "amd64") RUST_TARGET="x86_64-unknown-linux-musl" ;; \
@@ -45,6 +47,8 @@ RUN cargo build \
       --bin sunbeam-proxy && \
     cp "target/$(cat /rust-target)/release/sunbeam-proxy" /sunbeam-proxy
 
+# Pin tini to a released version and verify its checksum before copying into
+# the final image.
 RUN case "${TARGETARCH}" in \
       "amd64") TINI_ARCH="amd64" ;; \
       "arm64") TINI_ARCH="arm64" ;; \
@@ -52,14 +56,21 @@ RUN case "${TARGETARCH}" in \
     esac && \
     curl -fsSL -o /tini \
       "https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-${TINI_ARCH}" && \
+    case "${TINI_ARCH}" in \
+      "amd64") echo "c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee  /tini" ;; \
+      "arm64") echo "eae1d3aa50c48fb23b8cbdf4e369d0910dfc538566bfd09df89a774aa84a48b9  /tini" ;; \
+    esac | sha256sum -c - && \
     chmod +x /tini
 
 # ── Stage 2: distroless final ────────────────────────────────────
-FROM cgr.dev/chainguard/static:latest
+# Pinned digest for gcr.io/distroless/static-debian12:nonroot (multi-arch index).
+FROM gcr.io/distroless/static-debian12@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 
-COPY --from=builder /tini                       /tini
-COPY --from=builder /sunbeam-proxy              /usr/local/bin/sunbeam-proxy
+COPY --from=builder --chown=65532:65532 /tini                       /tini
+COPY --from=builder --chown=65532:65532 /sunbeam-proxy              /usr/local/bin/sunbeam-proxy
 
-EXPOSE 80 443
+USER 65532:65532
+
+EXPOSE 8080 8443 9090
 
 ENTRYPOINT ["/tini", "--", "/usr/local/bin/sunbeam-proxy"]

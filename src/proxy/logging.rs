@@ -24,7 +24,8 @@ impl SunbeamProxy {
             .and_then(|u| u.backends.first())
             .map(|b| b.backend.as_ref())
             .unwrap_or("-");
-        let client_ip = extract_client_ip(session)
+        let client_ip = self
+            .extract_client_ip(session)
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| {
                 session
@@ -138,7 +139,7 @@ impl SunbeamProxy {
         });
 
         if let Some(detector) = &self.ddos_detector {
-            if let Some(ip) = extract_client_ip(session) {
+            if let Some(ip) = self.extract_client_ip(session) {
                 detector.record_response(ip, status, duration_ms as u32);
             }
         }
@@ -165,6 +166,7 @@ mod tests {
             l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -173,6 +175,7 @@ mod tests {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -192,10 +195,12 @@ mod tests {
                 backends: vec![WeightedBackend {
                     backend: backend.into(),
                     weight: 1,
+                    protocol: crate::ir::BackendProtocol::Http,
                     request_filters: vec![],
                 }],
                 timeout: None,
                 mirror: vec![],
+                mirror_fractions: vec![],
                 backend_request_mutations: vec![vec![]],
             }),
             upstream_request_mutations: vec![],

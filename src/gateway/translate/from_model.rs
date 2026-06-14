@@ -98,6 +98,7 @@ impl From<&gw::WeightedBackend> for ir::WeightedBackend {
                 .iter()
                 .flat_map(route_filter_to_request_filters)
                 .collect(),
+            protocol: value.protocol,
         }
     }
 }
@@ -171,6 +172,7 @@ mod tests {
         let wb = gw::WeightedBackend {
             backend: "http://svc:8080".into(),
             weight: 3,
+            protocol: crate::ir::BackendProtocol::Http,
             filters: vec![],
         };
         let ir_wb = ir::WeightedBackend::from(&wb);
@@ -183,6 +185,7 @@ mod tests {
         let wb = gw::WeightedBackend {
             backend: "http://svc:8080".into(),
             weight: 1,
+            protocol: crate::ir::BackendProtocol::Http,
             filters: vec![
                 gw::RouteFilter::RequestHeaderSet {
                     name: "X-Backend".into(),

@@ -99,6 +99,15 @@ pub struct WeightedBackend {
     pub weight: u32,
     /// Filters applied only when this backend is selected.
     pub filters: Vec<RouteFilter>,
+    /// Protocol to use when communicating with the backend.
+    pub protocol: crate::ir::BackendProtocol,
+}
+
+/// A fractional value (numerator / denominator) used by RequestMirror.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Fraction {
+    pub numerator: u32,
+    pub denominator: u32,
 }
 
 /// A filter applied to a request or response.
@@ -130,7 +139,10 @@ pub enum RouteFilter {
         status_code: u16,
     },
     /// Mirror requests to a backend (fire-and-forget).
-    RequestMirror { backend: Arc<str> },
+    RequestMirror {
+        backend: Arc<str>,
+        fraction: Option<Fraction>,
+    },
     /// CORS response header configuration.
     Cors {
         allow_origins: Vec<Arc<str>>,
@@ -172,8 +184,10 @@ pub struct HTTPRouteRule {
     pub matches: Vec<RouteMatch>,
     pub backends: Vec<WeightedBackend>,
     pub filters: Vec<RouteFilter>,
-    /// Upstream backend request timeout in seconds (from `rules.timeouts.backendRequest`).
-    pub timeout_secs: Option<u64>,
+    /// Upstream backend request timeout in milliseconds (from `rules.timeouts.backendRequest`).
+    pub timeout_ms: Option<u64>,
+    /// Total request timeout in milliseconds (from `rules.timeouts.request`).
+    pub request_timeout_ms: Option<u64>,
     /// False when one or more backendRefs for this rule could not be resolved.
     pub programmed: bool,
 }

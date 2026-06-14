@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
+use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -35,15 +36,22 @@ const UDP_RELAY_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Router {
     config: Arc<arc_swap::ArcSwap<CompiledL4Config>>,
     registry: Arc<TlsRegistry>,
+    sni_context: Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
 }
 
 impl Router {
-    /// Create a router backed by the given atomic L4 config and TLS registry.
+    /// Create a router backed by the given atomic L4 config, TLS registry, and
+    /// SNI propagation context.
     pub fn new(
         config: Arc<arc_swap::ArcSwap<CompiledL4Config>>,
         registry: Arc<TlsRegistry>,
+        sni_context: Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
     ) -> Self {
-        Self { config, registry }
+        Self {
+            config,
+            registry,
+            sni_context,
+        }
     }
 
     /// Resolve the current compiled configuration.
@@ -102,7 +110,7 @@ impl L4Router for Router {
                 tracing::debug!(listener_id = %ctx.listener_id, "l4 router: udp action on tcp stream");
             }
             L4Action::TerminateAndHttp(target) => {
-                if let Err(e) = terminate_and_http(&ctx, stream, target, &self.registry).await {
+                if let Err(e) = terminate_and_http(&ctx, stream, target, &self.registry, &self.sni_context).await {
                     tracing::debug!(
                         listener_id = %ctx.listener_id,
                         error = %e,
@@ -298,6 +306,7 @@ async fn terminate_and_http(
     stream: TcpStream,
     target: &Arc<str>,
     registry: &Arc<TlsRegistry>,
+    sni_context: &Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
 ) -> io::Result<()> {
     if registry.is_empty() {
         return Err(io::Error::other("tls registry has no certificates"));
@@ -314,8 +323,24 @@ async fn terminate_and_http(
         }
     };
 
+    // Propagate the SNI hostname to the HTTP proxy so it can detect misdirected
+    // requests. The mapping is keyed by the upstream-side socket address that
+    // Pingora will see as the downstream peer.
+    let sni = tls_stream
+        .get_ref()
+        .1
+        .server_name()
+        .map(|name| Arc::from(name.to_string()) as Arc<str>);
+
     let addr = resolve_backend_addr(target.as_ref())?;
     let mut upstream = TcpStream::connect(addr).await?;
+    if let (Some(sni), Ok(local_addr)) = (sni, upstream.local_addr()) {
+        sni_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(local_addr, sni);
+    }
+
     match copy_bidirectional(&mut tls_stream, &mut upstream).await {
         Ok((down, up)) => {
             tracing::debug!(listener_id = %ctx.listener_id, down, up, %addr, "l4 router: https termination completed");
@@ -377,6 +402,7 @@ mod tests {
     fn route(action: L4Action) -> CompiledL4Route {
         CompiledL4Route {
             listener_id: "l1".into(),
+            listener_hostname: HostnameMatch::Any,
             match_: L4Match::Any,
             action,
             priority: 0,
@@ -386,6 +412,7 @@ mod tests {
     fn sni_route(hostname: HostnameMatch, action: L4Action) -> CompiledL4Route {
         CompiledL4Route {
             listener_id: "l1".into(),
+            listener_hostname: hostname.clone(),
             match_: L4Match::Sni(hostname),
             action,
             priority: 0,
@@ -397,6 +424,7 @@ mod tests {
             backend: addr.into(),
             weight: 1,
             request_filters: Vec::new(),
+            protocol: crate::ir::BackendProtocol::Http,
         }
     }
 
@@ -406,6 +434,10 @@ mod tests {
 
     fn registry() -> Arc<TlsRegistry> {
         Arc::new(TlsRegistry::new())
+    }
+
+    fn sni_context() -> Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>> {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
     }
 
     fn config_with_routes(
@@ -525,6 +557,7 @@ mod tests {
         let router = Router::new(
             config_with_route(L4Action::TcpRelay(vec![backend(&backend_addr.to_string())])),
             registry(),
+            sni_context(),
         );
 
         let relay = tokio::spawn(async move {
@@ -597,11 +630,12 @@ mod tests {
 
         let routes = vec![CompiledL4Route {
             listener_id: "l1".into(),
+            listener_hostname: HostnameMatch::Exact("test.example.com".into()),
             match_: L4Match::Sni(HostnameMatch::Exact("test.example.com".into())),
             action: L4Action::TlsPassthrough(vec![backend(&backend_addr.to_string())]),
             priority: 0,
         }];
-        let router = Router::new(config_with_routes(routes), registry());
+        let router = Router::new(config_with_routes(routes), registry(), sni_context());
         let ctx = L4Context::from_udp(
             "l1".into(),
             SocketAddr::from(([127, 0, 0, 1], 443)),
@@ -644,6 +678,7 @@ mod tests {
         let router = Router::new(
             config_with_route(L4Action::UdpRelay(vec![backend(&backend_addr.to_string())])),
             registry(),
+            sni_context(),
         );
         let ctx = L4Context::from_udp("l1".into(), inbound_addr, peer, Protocol::Udp);
 
@@ -669,7 +704,7 @@ mod tests {
     #[test]
     fn router_new_stores_config() {
         let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config::default()));
-        let router = Router::new(Arc::clone(&config), registry());
+        let router = Router::new(Arc::clone(&config), registry(), sni_context());
         assert!(router.config().tcp_routes.is_empty());
         assert!(config.load().tcp_routes.is_empty());
     }
@@ -691,7 +726,8 @@ mod tests {
             Protocol::Https,
         );
         drop(client);
-        let result = terminate_and_http(&ctx, inbound, &Arc::from("127.0.0.1:1"), &registry).await;
+        let sni_ctx = sni_context();
+        let result = terminate_and_http(&ctx, inbound, &Arc::from("127.0.0.1:1"), &registry, &sni_ctx).await;
         assert!(result.is_err());
     }
 
@@ -780,6 +816,7 @@ XgdEFjRXMOS5FmfbOMU3zxVS0l6xeA6kvA9tWDbvAoGADGdEQYBm1xaoQlb2F6TY
                 backend_addr.to_string().as_str(),
             ))),
             registry,
+            sni_context(),
         );
 
         let relay = tokio::spawn(async move {

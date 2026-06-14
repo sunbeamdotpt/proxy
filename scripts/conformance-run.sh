@@ -32,7 +32,8 @@ GATEWAY_ADDR="${GATEWAY_ADDR:-192.168.252.19}"
 MULTIPASS_VM="${MULTIPASS_VM:-sunbeam-proxy-dev}"
 DOCKER_TAG="${DOCKER_TAG:-}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
-SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,ReferenceGrant,GatewayPort8080,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode}"
+GATEWAY_API_CHANNEL="${GATEWAY_API_CHANNEL:-experimental}"
+SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,ReferenceGrant,GatewayPort8080,GatewayHTTPListenerIsolation,ListenerSet,TCPRoute,UDPRoute,TLSRoute,TLSRouteModeTerminate,TLSRouteModeMixed,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRouteCORS,HTTPRouteRequestMirror,HTTPRouteRequestMultipleMirrors,HTTPRouteRequestPercentageMirror,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 
 STABLE_TAG="sunbeam-proxy:conformance"
@@ -110,8 +111,30 @@ build_image() {
 }
 
 install_crds() {
-    log "installing Gateway API CRDs (${GATEWAY_API_VERSION})"
-    kubectl_cmd apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+    log "installing Gateway API CRDs (${GATEWAY_API_VERSION} ${GATEWAY_API_CHANNEL})"
+    # Remove the safe-upgrades admission policy so that switching between
+    # standard and experimental channel CRDs does not fail.
+    kubectl_cmd delete validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io --ignore-not-found=true >/dev/null 2>&1 || true
+    kubectl_cmd delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found=true >/dev/null 2>&1 || true
+    # Wipe any previously-installed Gateway API CRDs so that switching channels
+    # or re-running after a partial install does not leave mixed channel/version
+    # annotations that the conformance suite rejects.
+    log "removing previously-installed Gateway API CRDs"
+    kubectl_cmd delete crd --ignore-not-found=true \
+        gatewayclasses.gateway.networking.k8s.io \
+        gateways.gateway.networking.k8s.io \
+        httproutes.gateway.networking.k8s.io \
+        grpcroutes.gateway.networking.k8s.io \
+        tlsroutes.gateway.networking.k8s.io \
+        tcproutes.gateway.networking.k8s.io \
+        udproutes.gateway.networking.k8s.io \
+        listenersets.gateway.networking.k8s.io \
+        backendtlspolicies.gateway.networking.k8s.io \
+        referencegrants.gateway.networking.k8s.io \
+        xbackendtrafficpolicies.gateway.networking.x-k8s.io \
+        xmeshes.gateway.networking.x-k8s.io \
+        >/dev/null 2>&1 || true
+    kubectl_cmd apply --server-side --force-conflicts -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/${GATEWAY_API_CHANNEL}-install.yaml"
 }
 
 cleanup_leftovers() {
@@ -181,6 +204,10 @@ clone_upstream() {
 
 run_tests() {
     log "running conformance tests with features: ${SUPPORTED_FEATURES}"
+    local skip_tests_arg=()
+    if [[ -n "${SKIP_TESTS:-}" ]]; then
+        skip_tests_arg=(-skip-tests "${SKIP_TESTS}")
+    fi
     cd "${GATEWAY_API_DIR}/conformance"
     go test . -v \
         -gateway-class sunbeam \
@@ -192,6 +219,7 @@ run_tests() {
         -contact "conformance@sunbeam.sh" \
         -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
         -cleanup-base-resources=false \
+        "${skip_tests_arg[@]}" \
         "$@"
 }
 

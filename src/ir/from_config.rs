@@ -172,6 +172,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         backend: Arc::from(pr.backend.as_str()),
                         weight: 1,
                         request_filters: vec![],
+                        protocol: BackendProtocol::Http,
                     }]
                 } else {
                     pr.weighted_backends
@@ -180,13 +181,17 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                             backend: Arc::from(wb.backend.as_str()),
                             weight: wb.weight,
                             request_filters: vec![],
+                            protocol: BackendProtocol::Http,
                         })
                         .collect()
                 };
 
                 Action::Route(RouteAction {
                     backends,
-                    timeout: pr.timeout_secs.map(Duration::from_secs),
+                    timeout: pr
+                        .timeout_ms
+                        .map(Duration::from_millis)
+                        .or(pr.timeout_secs.map(Duration::from_secs)),
                     request_filters,
                     response_filters,
                     mirror_backends: pr
@@ -194,6 +199,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         .iter()
                         .map(|s| Arc::from(s.as_str()))
                         .collect(),
+                    mirror_fractions: vec![],
                     cache: route.cache.as_ref().map(|c| CachePolicy {
                         enabled: c.enabled,
                         default_ttl_secs: c.default_ttl_secs,
@@ -239,6 +245,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         backend: Arc::from(route.backend.as_str()),
                         weight: 1,
                         request_filters: vec![],
+                        protocol: BackendProtocol::Http,
                     }],
                     timeout: route.timeout_secs.map(Duration::from_secs),
                     request_filters: vec![],
@@ -263,6 +270,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                         )
                         .collect(),
                     mirror_backends: vec![],
+                    mirror_fractions: vec![],
                     cache: route.cache.as_ref().map(|c| CachePolicy {
                         enabled: c.enabled,
                         default_ttl_secs: c.default_ttl_secs,
@@ -331,6 +339,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     HostnameMatch::Exact(Arc::from(s.as_str()))
                 }
             }),
+            listener_port: None,
             gateway_api: route.gateway_api,
             disable_secure_redirection: route.disable_secure_redirection,
             rules,
@@ -470,6 +479,7 @@ mod tests {
     impl Default for PathRoute {
         fn default() -> Self {
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: String::new(),
                 strip_prefix: false,
@@ -882,11 +892,13 @@ mod tests {
                 WeightedBackend {
                     backend: "a".into(),
                     weight: 3,
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![]
                 },
                 WeightedBackend {
                     backend: "b".into(),
                     weight: 7,
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![]
                 },
             ]
@@ -1061,11 +1073,13 @@ mod tests {
         let routes = vec![RouteConfig {
             paths: vec![
                 PathRoute {
+                    timeout_ms: None,
                     prefix: "/a".into(),
                     backend: "a".into(),
                     ..Default::default()
                 },
                 PathRoute {
+                    timeout_ms: None,
                     prefix: "/b".into(),
                     backend: "b".into(),
                     ..Default::default()

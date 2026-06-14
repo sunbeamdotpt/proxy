@@ -244,8 +244,8 @@ mod tests {
 
         let mut exts = Vec::new();
         exts.extend_from_slice(&[0x00, 0x00]);
-        exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes());
-        exts.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        exts.extend_from_slice(&sni_data_len.to_be_bytes());
+        exts.extend_from_slice(&entry_len.to_be_bytes());
         exts.push(0x00);
         exts.extend_from_slice(&name_len.to_be_bytes());
         exts.extend_from_slice(hostname);
@@ -289,8 +289,8 @@ mod tests {
         let entry_len = 1 + 2 + name_len;
         let sni_data_len = 2 + entry_len;
         exts.extend_from_slice(&[0x00, 0x00]);
-        exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes());
-        exts.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        exts.extend_from_slice(&sni_data_len.to_be_bytes());
+        exts.extend_from_slice(&entry_len.to_be_bytes());
         exts.push(0x00);
         exts.extend_from_slice(&name_len.to_be_bytes());
         exts.extend_from_slice(hostname);

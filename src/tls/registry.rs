@@ -180,6 +180,54 @@ pub fn parse_private_key(pem: &[u8]) -> anyhow::Result<PrivateKeyDer<'static>> {
         .ok_or_else(|| anyhow::anyhow!("no private key found in PEM"))
 }
 
+/// Validate that the end-entity certificate is temporally valid, suitable for
+/// server authentication, and that its public key matches the supplied private
+/// key.
+fn validate_cert_key_pair(
+    certs: &[CertificateDer<'static>],
+    key: &PrivateKeyDer<'static>,
+) -> anyhow::Result<()> {
+    let first = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no certificates"))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(first.as_ref())
+        .map_err(|e| anyhow::anyhow!("failed to parse certificate: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let not_before = cert.validity().not_before.timestamp();
+    let not_after = cert.validity().not_after.timestamp();
+    if now < not_before {
+        return Err(anyhow::anyhow!("certificate is not yet valid"));
+    }
+    if now > not_after {
+        return Err(anyhow::anyhow!("certificate has expired"));
+    }
+
+    // Reject certificates that explicitly forbid TLS server authentication.
+    if let Ok(Some(eku)) = cert.extended_key_usage() {
+        if !eku.value.server_auth {
+            return Err(anyhow::anyhow!(
+                "certificate lacks TLS server authentication extended key usage"
+            ));
+        }
+    }
+
+    let signer = rustls::crypto::aws_lc_rs::sign::any_supported_type(key)
+        .map_err(|e| anyhow::anyhow!("unsupported private key: {e}"))?;
+    let key_spki = signer
+        .public_key()
+        .ok_or_else(|| anyhow::anyhow!("could not extract public key from private key"))?;
+    let cert_spki = cert.tbs_certificate.subject_pki.raw;
+    if key_spki.as_ref() != cert_spki {
+        return Err(anyhow::anyhow!("private key does not match certificate"));
+    }
+
+    Ok(())
+}
+
 /// Build a `CertifiedKey` from PEM-encoded cert chain + key.
 pub fn certified_key_from_pem(
     cert_pem: &[u8],
@@ -195,6 +243,7 @@ pub fn certified_key_from_parts(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> anyhow::Result<Arc<CertifiedKey>> {
+    validate_cert_key_pair(&certs, &key)?;
     let signer = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
         .map_err(|e| anyhow::anyhow!("unsupported private key: {e}"))?;
     Ok(Arc::new(CertifiedKey::new(certs, signer)))
@@ -355,8 +404,10 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
     fn cert_store_falls_back_to_default() {
         ensure_provider();
         let default_key = test_key();
-        let mut store = CertStore::default();
-        store.default = Some(Arc::clone(&default_key));
+        let store = CertStore {
+            default: Some(Arc::clone(&default_key)),
+            ..Default::default()
+        };
         assert!(Arc::ptr_eq(
             &store.resolve("anything.example.com").unwrap(),
             &default_key
@@ -367,8 +418,10 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
     fn registry_apply_and_resolve() {
         ensure_provider();
         let registry = TlsRegistry::new();
-        let mut store = CertStore::default();
-        store.default = Some(test_key());
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
         registry.apply(store);
         assert!(registry.resolve("missing.example.com").is_some());
     }
@@ -377,8 +430,10 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
     fn registry_server_config_builds() {
         ensure_provider();
         let registry = TlsRegistry::new();
-        let mut store = CertStore::default();
-        store.default = Some(test_key());
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
         registry.apply(store);
         let config = registry.server_config();
         assert!(config.is_ok());
@@ -415,6 +470,13 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
         ensure_provider();
         let result = certified_key_from_pem(TEST_CERT_PEM.as_bytes(), b"not a key");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_pem_rejects_key_mismatch() {
+        ensure_provider();
+        let result = certified_key_from_pem(TEST_CERT_PEM.as_bytes(), WILD_KEY_PEM.as_bytes());
+        assert!(result.is_err(), "expected key mismatch error");
     }
 
     #[test]

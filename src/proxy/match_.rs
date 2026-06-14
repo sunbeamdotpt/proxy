@@ -31,31 +31,37 @@ pub fn path_prefix_matches(req_path: &str, prefix: &str) -> bool {
 }
 
 /// Check if an Origin matches the CORS allow_origins list.
+///
+/// An empty `allow_origins` list is treated as "deny all" when credentials are
+/// enabled, so that a route with `allow_credentials: true` does not reflect
+/// arbitrary origins.
 pub fn cors_allow_origin(
     origin: &str,
     allow_origins: &[impl AsRef<str>],
     allow_credentials: bool,
 ) -> bool {
     if allow_origins.is_empty() {
-        return true;
+        return !allow_credentials;
     }
     for allowed in allow_origins {
         let allowed = allowed.as_ref();
         if allowed == "*" {
-            // With credentials, `*` is not a valid Access-Control-Allow-Origin value.
-            return !allow_credentials;
+            return true;
         }
         if allowed.eq_ignore_ascii_case(origin) {
             return true;
         }
-        // Wildcard matching: e.g. "*.example.com" matches "foo.example.com"
-        if let Some(suffix) = allowed.strip_prefix("*.") {
-            if origin
-                .strip_suffix(suffix)
-                .and_then(|rest| rest.strip_suffix('.'))
-                .is_some_and(|rest| !rest.is_empty())
-            {
-                return true;
+        // Wildcard matching: e.g. "*.example.com" or "https://*.example.com"
+        // matches "foo.example.com" or "https://foo.example.com" respectively.
+        if let Some((prefix, suffix)) = allowed.split_once("*.") {
+            if let Some(rest) = origin.strip_prefix(prefix) {
+                if rest
+                    .strip_suffix(suffix)
+                    .and_then(|rest| rest.strip_suffix('.'))
+                    .is_some_and(|rest| !rest.is_empty())
+                {
+                    return true;
+                }
             }
         }
     }
@@ -321,6 +327,7 @@ mod tests {
     fn select_path_route_prefers_longest_prefix() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "root".into(),
                 strip_prefix: false,
@@ -350,6 +357,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api".into(),
                 strip_prefix: false,
@@ -388,6 +396,7 @@ mod tests {
     fn select_path_route_respects_method_constraint() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api-read".into(),
                 strip_prefix: false,
@@ -417,6 +426,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "api-write".into(),
                 strip_prefix: false,
@@ -466,6 +476,7 @@ mod tests {
     fn select_path_route_earlier_rule_wins_on_prefix_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "first".into(),
                 strip_prefix: false,
@@ -495,6 +506,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "second".into(),
                 strip_prefix: false,
@@ -532,6 +544,7 @@ mod tests {
     #[test]
     fn select_path_route_respects_exact_match() {
         let paths = vec![PathRoute {
+            timeout_ms: None,
             prefix: "/api".into(),
             backend: "exact".into(),
             strip_prefix: false,
@@ -575,6 +588,7 @@ mod tests {
     fn select_path_route_prefers_more_header_matches_on_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "no-header".into(),
                 strip_prefix: false,
@@ -604,6 +618,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "with-header".into(),
                 strip_prefix: false,
@@ -646,6 +661,7 @@ mod tests {
     fn select_path_route_prefers_method_match_on_tie() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "any-method".into(),
                 strip_prefix: false,
@@ -675,6 +691,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/api".into(),
                 backend: "post-only".into(),
                 strip_prefix: false,
@@ -713,6 +730,7 @@ mod tests {
     fn select_path_route_matches_conformance_path_prefix_cases() {
         let paths = vec![
             PathRoute {
+                timeout_ms: None,
                 prefix: "/".into(),
                 backend: "root".into(),
                 strip_prefix: false,
@@ -742,6 +760,7 @@ mod tests {
                 response_headers_remove: vec![],
             },
             PathRoute {
+                timeout_ms: None,
                 prefix: "/v2".into(),
                 backend: "v2".into(),
                 strip_prefix: false,
@@ -813,6 +832,7 @@ mod tests {
     #[test]
     fn select_path_route_header_match_is_case_insensitive() {
         let paths = vec![PathRoute {
+            timeout_ms: None,
             prefix: "/".into(),
             backend: "matched".into(),
             strip_prefix: false,
@@ -1105,16 +1125,89 @@ mod tests {
     }
 
     #[test]
+    fn cors_allow_origin_empty_list_denies_when_credentials_enabled() {
+        assert!(!cors_allow_origin(
+            "https://evil.com",
+            &[] as &[String],
+            true
+        ));
+    }
+
+    #[test]
+    fn cors_allow_origin_empty_list_allows_without_credentials() {
+        assert!(cors_allow_origin(
+            "https://anything.com",
+            &[] as &[String],
+            false
+        ));
+    }
+
+    #[test]
+    fn cors_allow_origin_wildcard_allows_with_credentials() {
+        assert!(cors_allow_origin("https://foo.example.com", &["*"], true));
+    }
+
+    #[test]
+    fn cors_allow_origin_wildcard_allows_without_credentials() {
+        assert!(cors_allow_origin("https://foo.example.com", &["*"], false));
+    }
+
+    #[test]
+    fn cors_allow_origin_exact_match_ignores_case() {
+        assert!(cors_allow_origin(
+            "https://EXAMPLE.COM",
+            &["https://example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn cors_allow_origin_wildcard_suffix_matches() {
+        assert!(cors_allow_origin(
+            "https://www.bar.com",
+            &["https://*.bar.com"],
+            true
+        ));
+        assert!(cors_allow_origin(
+            "https://xpto.www.bar.com",
+            &["https://*.bar.com"],
+            true
+        ));
+        assert!(!cors_allow_origin(
+            "http://www.bar.com",
+            &["https://*.bar.com"],
+            true
+        ));
+        assert!(!cors_allow_origin(
+            "https://bar.com",
+            &["https://*.bar.com"],
+            true
+        ));
+    }
+
+    #[test]
+    fn cors_allow_origin_wildcard_without_scheme_matches() {
+        assert!(cors_allow_origin(
+            "https://www.bar.com",
+            &["*.bar.com"],
+            false
+        ));
+        assert!(!cors_allow_origin("https://bar.com", &["*.bar.com"], false));
+    }
+
+    #[test]
     fn pick_weighted_backend_ir_index_distributes_by_weight() {
         let backends = vec![
             crate::ir::WeightedBackend {
                 backend: "a".into(),
                 weight: 1,
+                protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
             },
             crate::ir::WeightedBackend {
                 backend: "b".into(),
                 weight: 2,
+                protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
             },
         ];

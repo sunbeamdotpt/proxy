@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// Maximum response body size that will be buffered for in-memory find/replace
+/// rewrites. Responses larger than this are streamed through without rewriting
+/// to avoid OOM kills.
+const MAX_BODY_REWRITE_BYTES: usize = 10 * 1024 * 1024;
+
 impl SunbeamProxy {
     pub(crate) async fn upstream_request_filter_inner(
         &self,
@@ -123,13 +128,31 @@ impl SunbeamProxy {
             return Ok(None);
         }
 
-        // Accumulate chunks into the buffer.
+        // Accumulate chunks into the buffer, but stop buffering if the response
+        // exceeds the rewrite limit. Earlier chunks are dropped and the rest of
+        // the body is streamed through unmodified to prevent OOM.
         if let Some(data) = body.take() {
-            ctx.body_buffer.as_mut().unwrap().extend_from_slice(&data);
+            let Some(buf) = ctx.body_buffer.as_mut() else {
+                *body = Some(data);
+                return Ok(None);
+            };
+            if buf.len().saturating_add(data.len()) > MAX_BODY_REWRITE_BYTES {
+                tracing::warn!(
+                    len = buf.len(),
+                    chunk = data.len(),
+                    "response body exceeds rewrite buffer limit; disabling rewrite"
+                );
+                ctx.body_buffer = None;
+                *body = Some(data);
+                return Ok(None);
+            }
+            buf.extend_from_slice(&data);
         }
 
         if end_of_stream {
-            let buffer = ctx.body_buffer.take().unwrap();
+            let Some(buffer) = ctx.body_buffer.take() else {
+                return Ok(None);
+            };
             let mut result = String::from_utf8_lossy(&buffer).into_owned();
             if let Some(plan) = &ctx.plan {
                 for br in &plan.body_rewrites {
@@ -152,6 +175,26 @@ impl SunbeamProxy {
 
         Ok(None)
     }
+}
+
+/// Normalize a URI path by resolving `.` and `..` segments and rejecting
+/// traversal above the root. Returns `None` if the path escapes the root.
+fn normalize_path(path: &str) -> Option<String> {
+    // Reject paths that are not absolute; relative paths should not reach upstream.
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut stack = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                stack.pop()?;
+            }
+            s => stack.push(s),
+        }
+    }
+    Some(format!("/{}", stack.join("/")))
 }
 
 fn apply_upstream_request_mutation(
@@ -191,6 +234,12 @@ fn apply_upstream_request_mutation(
             let old_path = old_uri.path();
             if let Some(stripped) = old_path.strip_prefix(prefix.as_ref()) {
                 let new_path = if stripped.is_empty() { "/" } else { stripped };
+                let new_path = normalize_path(new_path).ok_or_else(|| {
+                    pingora_core::Error::explain(
+                        pingora_core::ErrorType::HTTPStatus(400),
+                        "invalid path after prefix strip",
+                    )
+                })?;
                 let query_part = old_uri.query().map(|q| format!("?{q}")).unwrap_or_default();
                 let new_pq: http::uri::PathAndQuery =
                     format!("{new_path}{query_part}").parse().map_err(|e| {
@@ -202,18 +251,30 @@ fn apply_upstream_request_mutation(
                     })?;
                 let mut parts = old_uri.into_parts();
                 parts.path_and_query = Some(new_pq);
-                upstream_req.set_uri(http::Uri::from_parts(parts).expect("valid uri parts"));
+                upstream_req.set_uri(http::Uri::from_parts(parts).map_err(|e| {
+                    pingora_core::Error::because(
+                        pingora_core::ErrorType::InternalError,
+                        "invalid uri parts after prefix strip",
+                        e,
+                    )
+                })?);
             }
         }
         UpstreamRequestMutation::PrependPath(prefix) => {
             let old_uri = upstream_req.uri.clone();
             let old_path = old_uri.path();
             let trimmed = old_path.strip_prefix('/').unwrap_or(old_path);
-            let new_path = if prefix.ends_with('/') {
+            let raw_path = if prefix.ends_with('/') {
                 format!("{prefix}{trimmed}")
             } else {
                 format!("{prefix}/{trimmed}")
             };
+            let new_path = normalize_path(&raw_path).ok_or_else(|| {
+                pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(400),
+                    "invalid path after prefix prepend",
+                )
+            })?;
             let query_part = old_uri.query().map(|q| format!("?{q}")).unwrap_or_default();
             let new_pq: http::uri::PathAndQuery =
                 format!("{new_path}{query_part}").parse().map_err(|e| {
@@ -225,12 +286,18 @@ fn apply_upstream_request_mutation(
                 })?;
             let mut parts = old_uri.into_parts();
             parts.path_and_query = Some(new_pq);
-            upstream_req.set_uri(http::Uri::from_parts(parts).expect("valid uri parts"));
+            upstream_req.set_uri(http::Uri::from_parts(parts).map_err(|e| {
+                pingora_core::Error::because(
+                    pingora_core::ErrorType::InternalError,
+                    "invalid uri parts after prefix prepend",
+                    e,
+                )
+            })?);
         }
         UpstreamRequestMutation::RewritePath(path_rewrite) => {
             let old_uri = upstream_req.uri.clone();
             let old_path = old_uri.path();
-            let new_path = match path_rewrite {
+            let raw_path = match path_rewrite {
                 crate::ir::PathRewrite::FullReplace(path) => path.to_string(),
                 crate::ir::PathRewrite::PrefixReplace {
                     prefix,
@@ -253,6 +320,12 @@ fn apply_upstream_request_mutation(
                     })
                     .unwrap_or_else(|| old_path.to_string()),
             };
+            let new_path = normalize_path(&raw_path).ok_or_else(|| {
+                pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(400),
+                    "invalid path after path rewrite",
+                )
+            })?;
             let query_part = old_uri.query().map(|q| format!("?{q}")).unwrap_or_default();
             let new_pq: http::uri::PathAndQuery =
                 format!("{new_path}{query_part}").parse().map_err(|e| {
@@ -264,7 +337,13 @@ fn apply_upstream_request_mutation(
                 })?;
             let mut parts = old_uri.into_parts();
             parts.path_and_query = Some(new_pq);
-            upstream_req.set_uri(http::Uri::from_parts(parts).expect("valid uri parts"));
+            upstream_req.set_uri(http::Uri::from_parts(parts).map_err(|e| {
+                pingora_core::Error::because(
+                    pingora_core::ErrorType::InternalError,
+                    "invalid uri parts after path rewrite",
+                    e,
+                )
+            })?);
         }
         UpstreamRequestMutation::RewriteHostname(hostname) => {
             upstream_req
@@ -303,7 +382,7 @@ fn apply_upstream_request_mutation(
     Ok(())
 }
 
-fn apply_response_mutation(
+pub(crate) fn apply_response_mutation(
     session: &Session,
     upstream_response: &mut ResponseHeader,
     mutation: &crate::ir::compile::ResponseMutation,
@@ -326,46 +405,76 @@ fn apply_response_mutation(
                 .headers
                 .get("origin")
                 .and_then(|v| v.to_str().ok());
-            if let Some(origin) = origin {
-                if cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials) {
+            let requested_method = session
+                .req_header()
+                .headers
+                .get("access-control-request-method")
+                .and_then(|v| v.to_str().ok());
+            let requested_headers = session
+                .req_header()
+                .headers
+                .get("access-control-request-headers")
+                .and_then(|v| v.to_str().ok());
+            let allowed = origin.is_some_and(|origin| {
+                cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials)
+            });
+            if allowed {
+                if let Some(origin) = origin {
                     let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
                     let _ = upstream_response.insert_header("Vary", "Origin");
                     if cors.allow_credentials {
                         let _ = upstream_response
                             .insert_header("Access-Control-Allow-Credentials", "true");
                     }
+                    if !cors.allow_methods.is_empty() {
+                        let methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
+                            if cors.allow_credentials {
+                                requested_method.unwrap_or("*").to_string()
+                            } else {
+                                "*".to_string()
+                            }
+                        } else {
+                            cors.allow_methods
+                                .iter()
+                                .map(|s| s.as_ref())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let _ = upstream_response
+                            .insert_header("Access-Control-Allow-Methods", methods);
+                    }
+                    if !cors.allow_headers.is_empty() {
+                        let headers = if cors.allow_headers.iter().any(|h| h.as_ref() == "*") {
+                            if cors.allow_credentials {
+                                requested_headers.unwrap_or("*").to_string()
+                            } else {
+                                "*".to_string()
+                            }
+                        } else {
+                            cors.allow_headers
+                                .iter()
+                                .map(|s| s.as_ref())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let _ = upstream_response
+                            .insert_header("Access-Control-Allow-Headers", headers);
+                    }
+                    if !cors.expose_headers.is_empty() {
+                        let headers: String = cors
+                            .expose_headers
+                            .iter()
+                            .map(|s| s.as_ref())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let _ = upstream_response
+                            .insert_header("Access-Control-Expose-Headers", headers);
+                    }
+                    if let Some(max_age) = cors.max_age {
+                        let _ = upstream_response
+                            .insert_header("Access-Control-Max-Age", max_age.to_string());
+                    }
                 }
-            }
-            if !cors.allow_methods.is_empty() {
-                let methods: String = cors
-                    .allow_methods
-                    .iter()
-                    .map(|s| s.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = upstream_response.insert_header("Access-Control-Allow-Methods", methods);
-            }
-            if !cors.allow_headers.is_empty() {
-                let headers: String = cors
-                    .allow_headers
-                    .iter()
-                    .map(|s| s.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = upstream_response.insert_header("Access-Control-Allow-Headers", headers);
-            }
-            if !cors.expose_headers.is_empty() {
-                let headers: String = cors
-                    .expose_headers
-                    .iter()
-                    .map(|s| s.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = upstream_response.insert_header("Access-Control-Expose-Headers", headers);
-            }
-            if let Some(max_age) = cors.max_age {
-                let _ =
-                    upstream_response.insert_header("Access-Control-Max-Age", max_age.to_string());
             }
         }
     }
@@ -620,6 +729,7 @@ mod tests {
             l4_config: Arc::new(arc_swap::ArcSwap::new(Arc::new(
                 crate::ir::compile::CompiledL4Config::empty(),
             ))),
+            sni_context: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             acme_routes: crate::acme::AcmeRoutes::default(),
             ddos_detector: None,
             scanner_detector: None,
@@ -628,6 +738,7 @@ mod tests {
             compiled_rewrites: Arc::new(arc_swap::ArcSwap::new(Arc::new(vec![]))),
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
+            trusted_proxy_cidrs: vec![],
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -726,10 +837,12 @@ mod tests {
             backends: vec![crate::ir::WeightedBackend {
                 backend: "http://127.0.0.1:1".into(),
                 weight: 1,
+                protocol: crate::ir::BackendProtocol::Http,
                 request_filters: vec![],
             }],
             timeout: None,
             mirror: vec![],
+            mirror_fractions: vec![],
             backend_request_mutations: vec![vec![UpstreamRequestMutation::SetHeader {
                 name: "x-backend".into(),
                 value: "first".into(),
@@ -949,5 +1062,86 @@ mod tests {
         assert!(resp.headers.get("access-control-allow-headers").is_some());
         assert!(resp.headers.get("access-control-expose-headers").is_some());
         assert!(resp.headers.get("access-control-max-age").is_some());
+    }
+
+    #[tokio::test]
+    async fn apply_response_mutation_cors_wildcard_origin_with_scheme() {
+        let session = session_with_headers("GET", "/", &[("origin", "https://www.bar.com")]).await;
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        let cors = CorsConfig {
+            allow_origins: vec!["https://*.bar.com".into()],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            max_age: None,
+            allow_credentials: true,
+        };
+        apply_response_mutation(&session, &mut resp, &ResponseMutation::Cors(cors)).unwrap();
+
+        assert_eq!(
+            resp.headers
+                .get("access-control-allow-origin")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "https://www.bar.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_response_mutation_cors_wildcard_methods_echo_with_credentials() {
+        let session = session_with_headers(
+            "OPTIONS",
+            "/",
+            &[
+                ("origin", "https://other.foo.com"),
+                ("access-control-request-method", "PUT"),
+                ("access-control-request-headers", "x-header-1, x-header-2"),
+            ],
+        )
+        .await;
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        let cors = CorsConfig {
+            allow_origins: vec!["*".into()],
+            allow_methods: vec!["*".into()],
+            allow_headers: vec!["*".into()],
+            expose_headers: vec![],
+            max_age: None,
+            allow_credentials: true,
+        };
+        apply_response_mutation(&session, &mut resp, &ResponseMutation::Cors(cors)).unwrap();
+
+        assert_eq!(
+            resp.headers
+                .get("access-control-allow-origin")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "https://other.foo.com"
+        );
+        assert_eq!(
+            resp.headers
+                .get("access-control-allow-methods")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "PUT"
+        );
+        assert_eq!(
+            resp.headers
+                .get("access-control-allow-headers")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "x-header-1, x-header-2"
+        );
+        assert_eq!(
+            resp.headers
+                .get("access-control-allow-credentials")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "true"
+        );
     }
 }

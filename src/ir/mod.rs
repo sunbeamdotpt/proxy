@@ -79,6 +79,8 @@ pub struct HostRoute {
     pub listener_ids: Vec<Arc<str>>,
     /// Listener hostname for isolation (matches request host when set).
     pub listener_hostname: Option<HostnameMatch>,
+    /// Listener port for port-aware parentRef matching. `None` matches any port.
+    pub listener_port: Option<u16>,
     /// True if this host route came from the Gateway API (strict 404 on no-match).
     /// False for legacy TOML routes (fall through to host-level backend).
     pub gateway_api: bool,
@@ -93,6 +95,8 @@ pub struct HostRoute {
 pub struct L4Route {
     /// Listener this route is attached to.
     pub listener_id: Arc<str>,
+    /// Listener hostname for SNI-based listener isolation.
+    pub listener_hostname: HostnameMatch,
     /// Match condition for this route.
     pub match_: L4Match,
     /// Action to take when the route matches.
@@ -152,7 +156,7 @@ pub enum TlsCertSource {
 }
 
 /// Hostname matching strategy.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HostnameMatch {
     /// Exact hostname match.
     Exact(Arc<str>),
@@ -161,6 +165,7 @@ pub enum HostnameMatch {
     /// Wildcard suffix match (e.g. *.example.com).
     Wildcard(Arc<str>),
     /// Match any hostname.
+    #[default]
     Any,
 }
 
@@ -201,6 +206,8 @@ pub struct RouteAction {
     pub response_filters: Vec<ResponseFilter>,
     /// Backends to mirror traffic to (fire-and-forget).
     pub mirror_backends: Vec<Arc<str>>,
+    /// Optional fraction for each mirror backend (aligned by index).
+    pub mirror_fractions: Vec<Option<Fraction>>,
     /// Cache policy, if any.
     pub cache: Option<CachePolicy>,
     /// Body find/replace rules.
@@ -211,6 +218,13 @@ pub struct RouteAction {
     pub websocket: bool,
     /// When true, disable the proxy-level HTTP→HTTPS redirect for this route.
     pub disable_https_redirect: bool,
+}
+
+/// A fractional value used for probabilistic request mirroring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Fraction {
+    pub numerator: u32,
+    pub denominator: u32,
 }
 
 /// Return a redirect response to the client.
@@ -409,6 +423,22 @@ pub struct WeightedBackend {
     pub weight: u32,
     /// Request filters applied only when this backend is selected.
     pub request_filters: Vec<RequestFilter>,
+    /// Protocol to use when communicating with the backend.
+    pub protocol: BackendProtocol,
+}
+
+/// Application protocol to use for a backend connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum BackendProtocol {
+    /// Plain HTTP/1.1 (default).
+    #[default]
+    Http,
+    /// HTTP/2 prior knowledge without TLS (H2C).
+    H2c,
+    /// WebSocket over cleartext.
+    WebSocket,
+    /// WebSocket over TLS.
+    WebSocketSecure,
 }
 
 /// CORS response header configuration.
@@ -510,6 +540,7 @@ mod tests {
         rt.acme_routes.insert("/challenge".into(), "backend".into());
         rt.l4_routes.push(L4Route {
             listener_id: "l1".into(),
+            listener_hostname: HostnameMatch::Any,
             match_: L4Match::Any,
             action: L4Action::TcpRelay(vec![]),
         });
@@ -572,10 +603,12 @@ mod tests {
     fn l4_route_construction() {
         let route = L4Route {
             listener_id: "l1".into(),
+            listener_hostname: HostnameMatch::Exact("tcp.example.com".into()),
             match_: L4Match::Sni(HostnameMatch::Exact("tcp.example.com".into())),
             action: L4Action::TcpRelay(vec![WeightedBackend {
                 backend: "tcp://svc:8080".into(),
                 weight: 1,
+                protocol: BackendProtocol::Http,
                 request_filters: vec![],
             }]),
         };
@@ -639,11 +672,13 @@ mod tests {
             hostname: HostnameMatch::Exact("example.com".into()),
             listener_ids: vec!["l1".into()],
             listener_hostname: None,
+            listener_port: Some(80),
             gateway_api: true,
             disable_secure_redirection: false,
             rules: vec![],
         };
         assert_eq!(hr.hostname, HostnameMatch::Exact("example.com".into()));
+        assert_eq!(hr.listener_port, Some(80));
     }
 
     // ── HostnameMatch ───────────────────────────────────────────────────
@@ -690,13 +725,14 @@ mod tests {
             backends: vec![WeightedBackend {
                 backend: "http://svc".into(),
                 weight: 1,
-
+                protocol: BackendProtocol::Http,
                 request_filters: vec![],
             }],
             timeout: None,
             request_filters: vec![],
             response_filters: vec![],
             mirror_backends: vec![],
+            mirror_fractions: vec![],
             cache: None,
             body_rewrites: vec![],
             auth: None,
@@ -741,13 +777,13 @@ mod tests {
                 WeightedBackend {
                     backend: "a".into(),
                     weight: 3,
-
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![],
                 },
                 WeightedBackend {
                     backend: "b".into(),
                     weight: 7,
-
+                    protocol: BackendProtocol::Http,
                     request_filters: vec![],
                 },
             ],
@@ -767,6 +803,7 @@ mod tests {
                 ResponseFilter::Cors(CorsConfig::default()),
             ],
             mirror_backends: vec!["http://mirror".into()],
+            mirror_fractions: vec![None],
             cache: Some(CachePolicy {
                 enabled: true,
                 default_ttl_secs: 60,
@@ -980,11 +1017,13 @@ mod tests {
         let a = WeightedBackend {
             backend: "http://a".into(),
             weight: 5,
+            protocol: BackendProtocol::Http,
             request_filters: vec![],
         };
         let b = WeightedBackend {
             backend: "http://a".into(),
             weight: 5,
+            protocol: BackendProtocol::Http,
             request_filters: vec![],
         };
         assert_eq!(a, b);

@@ -49,6 +49,12 @@ pub struct Config {
     /// Gateway API control plane configuration.
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// Optional list of CIDRs for trusted downstream proxies. When the immediate
+    /// TCP peer falls inside one of these ranges, `CF-Connecting-IP`,
+    /// `X-Real-IP`, and `X-Forwarded-For` are used to determine the client IP.
+    /// Otherwise the socket address is used, preventing header spoofing.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -295,6 +301,9 @@ pub struct PathRoute {
     /// Upstream read/write timeout in seconds (default: inherits from parent route, then 60).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Upstream read/write timeout in milliseconds, used by Gateway API translation.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
     /// Optional mirror backend addresses for request mirroring (fire-and-forget).
     #[serde(default)]
     pub mirror_backends: Vec<String>,

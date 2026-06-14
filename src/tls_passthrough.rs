@@ -72,8 +72,15 @@ fn find_passthrough_route<'a>(
     sni_host: &str,
     routes: &'a [TlsPassthroughRoute],
 ) -> Option<&'a TlsPassthroughRoute> {
-    let prefix = sni_host.split('.').next().unwrap_or("");
-    routes.iter().find(|r| r.host_prefix == prefix)
+    // Match the full SNI hostname using the same prefix semantics as the IR:
+    // exact match, or the hostname begins with "<prefix>.".  This prevents a
+    // first-label-only bypass (e.g. "build" matching "build.evil.com") and
+    // supports multi-label prefixes such as "build.staging".
+    let sni = sni_host.to_lowercase();
+    routes.iter().find(|r| {
+        let prefix = r.host_prefix.to_lowercase();
+        sni == prefix || sni.starts_with(&format!("{}.", prefix))
+    })
 }
 
 /// Pure decision helper: given a peeked ClientHello buffer, return the matching
@@ -126,14 +133,8 @@ mod tests {
             host_prefix: "build".to_string(),
             backend: "127.0.0.1:1234".to_string(),
         }];
-        // Simulate what handle_connection does
-        let sni = "build.sunbeam.pt";
-        let prefix = sni.split('.').next().unwrap();
-        assert!(routes.iter().any(|r| r.host_prefix == prefix));
-
-        let sni = "docs.sunbeam.pt";
-        let prefix = sni.split('.').next().unwrap();
-        assert!(!routes.iter().any(|r| r.host_prefix == prefix));
+        assert!(find_passthrough_route("build.sunbeam.pt", &routes).is_some());
+        assert!(find_passthrough_route("docs.sunbeam.pt", &routes).is_none());
     }
 
     #[test]
@@ -209,6 +210,27 @@ mod tests {
         assert!(find_passthrough_route("build.sunbeam.pt", &[]).is_none());
     }
 
+    #[test]
+    fn test_find_passthrough_route_case_insensitive() {
+        let routes = vec![TlsPassthroughRoute {
+            host_prefix: "BUILD".to_string(),
+            backend: "10.0.0.1:22".to_string(),
+        }];
+        assert!(find_passthrough_route("build.sunbeam.pt", &routes).is_some());
+        assert!(find_passthrough_route("BUILD.SUNBEAM.PT", &routes).is_some());
+    }
+
+    #[test]
+    fn test_find_passthrough_route_multi_label_prefix() {
+        let routes = vec![TlsPassthroughRoute {
+            host_prefix: "build.staging".to_string(),
+            backend: "10.0.0.1:22".to_string(),
+        }];
+        assert!(find_passthrough_route("build.staging.sunbeam.pt", &routes).is_some());
+        assert!(find_passthrough_route("build.sunbeam.pt", &routes).is_none());
+        assert!(find_passthrough_route("build.staging.evil.com", &routes).is_some());
+    }
+
     /// Build a minimal TLS ClientHello with the given SNI hostname.
     fn build_client_hello(sni: &str) -> Vec<u8> {
         let mut ch = Vec::new();
@@ -224,8 +246,8 @@ mod tests {
         let entry_len = 1 + 2 + name_len;
         let sni_data_len = 2 + entry_len;
         exts.extend_from_slice(&[0x00, 0x00]);
-        exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes());
-        exts.extend_from_slice(&((entry_len) as u16).to_be_bytes());
+        exts.extend_from_slice(&sni_data_len.to_be_bytes());
+        exts.extend_from_slice(&entry_len.to_be_bytes());
         exts.push(0x00);
         exts.extend_from_slice(&name_len.to_be_bytes());
         exts.extend_from_slice(name_bytes);

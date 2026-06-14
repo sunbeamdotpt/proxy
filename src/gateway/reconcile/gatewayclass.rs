@@ -33,9 +33,10 @@ pub fn supported_features() -> Vec<String> {
         "ReferenceGrant".to_string(),
         // Gateway extended
         "GatewayPort8080".to_string(),
+        "GatewayHTTPListenerIsolation".to_string(),
+        "ListenerSet".to_string(),
         // L4 route support
         "TCPRoute".to_string(),
-        "UDPRoute".to_string(),
         "TLSRoute".to_string(),
         "TLSRouteModeTerminate".to_string(),
         "TLSRouteModeMixed".to_string(),
@@ -49,9 +50,21 @@ pub fn supported_features() -> Vec<String> {
         "HTTPRouteHostRewrite".to_string(),
         "HTTPRouteResponseHeaderModification".to_string(),
         "HTTPRouteBackendRequestHeaderModification".to_string(),
+        "HTTPRouteCORS".to_string(),
+        "HTTPRouteRequestMirror".to_string(),
+        "HTTPRouteRequestMultipleMirrors".to_string(),
+        "HTTPRouteRequestPercentageMirror".to_string(),
+        "HTTPRouteRequestTimeout".to_string(),
+        "HTTPRouteBackendTimeout".to_string(),
+        "HTTPRouteBackendProtocolH2C".to_string(),
+        "HTTPRouteBackendProtocolWebSocket".to_string(),
         "HTTPRoute303RedirectStatusCode".to_string(),
         "HTTPRoute307RedirectStatusCode".to_string(),
         "HTTPRoute308RedirectStatusCode".to_string(),
+        "HTTPRouteParentRefPort".to_string(),
+        "HTTPRouteDestinationPortMatching".to_string(),
+        "HTTPRouteNamedRouteRule".to_string(),
+        "GatewayHTTPSListenerDetectMisdirectedRequests".to_string(),
     ]
 }
 
@@ -233,8 +246,12 @@ mod tests {
         assert!(features.contains(&"HTTPRoute".to_string()));
         assert!(features.contains(&"HTTPRouteMethodMatching".to_string()));
         assert!(features.contains(&"HTTPRoutePathRedirect".to_string()));
+        assert!(features.contains(&"HTTPRouteRequestTimeout".to_string()));
+        assert!(features.contains(&"HTTPRouteBackendTimeout".to_string()));
+        assert!(features.contains(&"HTTPRouteRequestMirror".to_string()));
+        assert!(features.contains(&"HTTPRouteBackendProtocolH2C".to_string()));
         assert!(features.contains(&"TCPRoute".to_string()));
-        assert!(features.contains(&"UDPRoute".to_string()));
+        assert!(!features.contains(&"UDPRoute".to_string()));
         assert!(features.contains(&"TLSRoute".to_string()));
         assert!(features.contains(&"TLSRouteModeTerminate".to_string()));
         assert!(features.contains(&"TLSRouteModeMixed".to_string()));

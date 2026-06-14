@@ -33,7 +33,8 @@ use crate::gateway::reconcile::httproute::run_httproute_controller;
 use crate::gateway::reconcile::l4route::{
     maybe_run_tcproute_controller, maybe_run_tlsroute_controller, maybe_run_udproute_controller,
 };
-use crate::gateway::reconcile::reconcile_tick;
+use crate::gateway::reconcile::listenerset::run_listenerset_controller;
+use crate::gateway::reconcile::reconcile_tick_with_leader;
 use crate::gateway::translate::translate_view_to_ir;
 use crate::ir;
 use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry};
@@ -65,9 +66,13 @@ pub async fn run_reconcile_loop(
     let _gc_handle = run_gatewayclass_controller(client.clone(), is_leader.clone());
     let _gw_handle = run_gateway_controller(client.clone(), is_leader.clone());
     let _hr_handle = run_httproute_controller(client.clone(), is_leader.clone());
+    let _ls_handle = run_listenerset_controller(client.clone(), is_leader.clone());
     let _tcp_handle = maybe_run_tcproute_controller(client.clone(), is_leader.clone()).await;
     let _udp_handle = maybe_run_udproute_controller(client.clone(), is_leader.clone()).await;
     let _tls_handle = maybe_run_tlsroute_controller(client.clone(), is_leader.clone()).await;
+    // ListenerSet status is written both by an event-driven controller and by
+    // the reconcile tick. The event controller handles newly created resources
+    // quickly, while the tick provides a periodic sweep that repairs any drift.
 
     // -- Digest publisher & resource notifier --------------------------------
     let node_id = cluster_handle
@@ -188,7 +193,8 @@ pub async fn run_reconcile_loop(
         }
 
         // Full reconcile tick: fetch, translate, and send to proxy.
-        if let Some(view) = reconcile_tick(&client).await {
+        let leader = is_leader.load(Ordering::Relaxed);
+        if let Some(view) = reconcile_tick_with_leader(&client, leader).await {
             let routes = translate_view_to_ir(&view);
             let _ = routes_tx.send(routes);
 
@@ -401,12 +407,9 @@ mod tests {
     ) -> ReconciledView {
         ReconciledView {
             gateways,
-            routes: vec![],
             http_routes: routes,
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
             reference_grants: grants,
+            ..Default::default()
         }
     }
 

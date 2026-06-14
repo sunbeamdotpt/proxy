@@ -209,15 +209,7 @@ mod tests {
     use super::*;
 
     fn sample_view() -> ReconciledView {
-        ReconciledView {
-            gateways: vec![],
-            routes: vec![],
-            http_routes: vec![],
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
-            reference_grants: vec![],
-        }
+        ReconciledView::default()
     }
 
     #[tokio::test]

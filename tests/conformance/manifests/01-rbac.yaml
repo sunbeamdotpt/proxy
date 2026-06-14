@@ -10,23 +10,60 @@ metadata:
   name: sunbeam-proxy-gateway
 rules:
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "tlsroutes", "tcproutes", "udproutes", "referencegrants"]
+    resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "tlsroutes", "tcproutes", "udproutes", "referencegrants", "listenersets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status"]
+    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status", "listenersets/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["namespaces", "services", "endpoints", "secrets", "configmaps", "pods"]
+    resources: ["namespaces", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  # Secrets may be referenced by Gateway certificateRefs in other namespaces when
+  # permitted by a ReferenceGrant. Limiting to named resources is impractical for
+  # dynamic Gateway API usage, so this is scoped to read-only verbs.
+  - apiGroups: [""]
+    resources: ["secrets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
+    resourceNames: ["sunbeam-proxy-gateway"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Namespaced access for the proxy's own hot-reload ConfigMap and TLS Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sunbeam-proxy-config
+  namespace: gateway-conformance
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["sunbeam-proxy-config", "pingora-config"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["pingora-tls"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sunbeam-proxy-config
+  namespace: gateway-conformance
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sunbeam-proxy-config
+subjects:
+  - kind: ServiceAccount
+    name: sunbeam-proxy
+    namespace: gateway-conformance
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

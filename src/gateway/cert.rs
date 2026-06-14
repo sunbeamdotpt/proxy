@@ -6,6 +6,7 @@
 
 use crate::gateway::api::Gateway;
 use crate::gateway::model::GatewayView;
+use crate::gateway::reconcile::refgrant::GrantIndex;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::Api;
 
@@ -21,6 +22,8 @@ pub async fn maybe_write_gateway_certs(
     cert_path: &str,
     key_path: &str,
 ) -> anyhow::Result<bool> {
+    let grant_index = GrantIndex::new(view.reference_grants.clone());
+
     for gw_state in &view.gateways {
         let gateways_api: Api<Gateway> = Api::namespaced(client.clone(), &gw_state.namespace);
         let gw = match gateways_api.get(&gw_state.name).await {
@@ -80,6 +83,28 @@ pub async fn maybe_write_gateway_certs(
                     .get("namespace")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&gw_state.namespace);
+
+                if secret_ns != gw_state.namespace.as_ref()
+                    && !grant_index.is_permitted(
+                        &gw_state.namespace,
+                        "gateway.networking.k8s.io",
+                        "Gateway",
+                        secret_ns,
+                        "",
+                        "Secret",
+                        secret_name,
+                    )
+                {
+                    tracing::warn!(
+                        gateway = %gw_state.name,
+                        namespace = %gw_state.namespace,
+                        listener = %obj.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        %secret_name,
+                        %secret_ns,
+                        "cross-namespace Gateway certificateRef denied by ReferenceGrant"
+                    );
+                    continue;
+                }
 
                 let secret_api: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
                 let secret = match secret_api.get(secret_name).await {
@@ -202,12 +227,7 @@ mod tests {
         let _ = gw;
         ReconciledView {
             gateways: vec![state],
-            routes: vec![],
-            http_routes: vec![],
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
-            reference_grants: vec![],
+            ..Default::default()
         }
     }
 
@@ -296,12 +316,7 @@ mod tests {
                     tls_mode: None,
                 }],
             }],
-            routes: vec![],
-            http_routes: vec![],
-            tcp_routes: vec![],
-            udp_routes: vec![],
-            tls_routes: vec![],
-            reference_grants: vec![],
+            ..Default::default()
         };
         let client = kube::Client::new(
             tower::service_fn(|_req| async {

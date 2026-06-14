@@ -27,6 +27,13 @@ pub struct GatewaySpec {
     /// Addresses requested for this Gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<serde_json::Value>>,
+    /// ListenerSets that may attach listeners to this Gateway.
+    #[serde(
+        default,
+        rename = "allowedListeners",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_listeners: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -42,6 +49,9 @@ pub struct GatewayStatus {
     /// defined in the Spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listeners: Option<Vec<serde_json::Value>>,
+    /// Number of ListenerSets successfully attached to this Gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_listener_sets: Option<i32>,
 }
 
 #[cfg(test)]
