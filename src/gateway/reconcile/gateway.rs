@@ -2755,4 +2755,50 @@ mod tests {
             .unwrap();
         assert_eq!(programmed["status"].as_str(), Some("False"));
     }
+
+    #[test]
+    fn is_frontend_ca_error_detects_ca_reasons() {
+        assert!(is_frontend_ca_error("InvalidCACertificateRef"));
+        assert!(is_frontend_ca_error("InvalidCACertificateKind"));
+        assert!(is_frontend_ca_error("RefNotPermitted"));
+        assert!(!is_frontend_ca_error("InvalidCertificateRef"));
+        assert!(!is_frontend_ca_error("InvalidFrontendClientCertificateValidation"));
+    }
+
+    #[test]
+    fn build_listener_status_maps_frontend_ca_error_to_accepted_no_valid_ca() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let features: std::collections::HashSet<String> = supported_features()
+            .into_iter()
+            .collect();
+        let err = Some(CertValidation {
+            reason: "InvalidCACertificateRef",
+            message: "Frontend CA certificate ConfigMap not found",
+        });
+        let statuses = build_listener_status(&gw, None, 1, &[err], &[0], &features);
+        let accepted = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("Accepted"))
+            .unwrap();
+        assert_eq!(accepted["status"].as_str(), Some("False"));
+        assert_eq!(accepted["reason"].as_str(), Some("NoValidCACertificate"));
+    }
 }
