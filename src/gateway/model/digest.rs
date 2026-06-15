@@ -766,6 +766,7 @@ fn encode_option_str(buf: &mut Vec<u8>, opt: &Option<impl AsRef<str>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::model::BackendTLSPolicyState;
     use std::sync::Arc;
 
     fn arc(s: &str) -> Arc<str> {
@@ -781,6 +782,7 @@ mod tests {
                 generation: 1,
                 listeners: vec![
                     ListenerState {
+                        programmed: true,
                         name: arc("http"),
                         protocol: arc("HTTP"),
                         port: 80,
@@ -789,6 +791,7 @@ mod tests {
                         frontend_validation: None,
                     },
                     ListenerState {
+                        programmed: true,
                         name: arc("https"),
                         protocol: arc("HTTPS"),
                         port: 443,
@@ -1452,5 +1455,155 @@ mod tests {
         let mut reversed = base.clone();
         reversed.http_routes[0].rules[0].filters.reverse();
         assert_eq!(compute_digest(&base), compute_digest(&reversed));
+    }
+
+    #[test]
+    fn full_view_digest_is_stable() {
+        use crate::gateway::model::routing::{
+            GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, MethodMatch, MethodMatchType,
+            TCPRouteState, TLSRouteState, UDPRouteState,
+        };
+
+        let mut view = sample_view();
+        view.listener_sets.push(ListenerSetState {
+            namespace: arc("default"),
+            name: arc("ls-1"),
+            generation: 1,
+            created_at: 1,
+            parent_ref: ParentRef {
+                group: arc("gateway.networking.k8s.io"),
+                kind: arc("Gateway"),
+                namespace: Some(arc("default")),
+                name: arc("gw-1"),
+                section_name: None,
+                port: None,
+            },
+            listeners: vec![ListenerState {
+                programmed: true,
+                name: arc("extra"),
+                protocol: arc("HTTP"),
+                port: 8080,
+                hostname: None,
+                tls_mode: None,
+                frontend_validation: None,
+            }],
+            conflicts: [(arc("extra"), arc("HostnameConflict"))]
+                .into_iter()
+                .collect(),
+            accepted: true,
+            programmed: true,
+            reason: arc("Accepted"),
+            listener_cert_errors: vec![],
+            listener_kind_errors: vec![],
+        });
+        view.grpc_routes.push(GRPCRouteState {
+            namespace: arc("default"),
+            name: arc("grpc-1"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Exact(arc("grpc.example.com"))],
+            rules: vec![GRPCRouteRule {
+                name: Some(arc("rule-1")),
+                matches: vec![GRPCRouteMatch {
+                    method: Some(MethodMatch {
+                        match_type: MethodMatchType::Exact,
+                        service: arc("example.Greeter"),
+                        method: Some(arc("SayHello")),
+                        case_sensitive: true,
+                    }),
+                    headers: vec![],
+                }],
+                backends: vec![WeightedBackend {
+                    backend: arc("grpc-svc:50051"),
+                    weight: 1,
+                    filters: vec![],
+                    protocol: crate::ir::BackendProtocol::Http,
+                    tls: None,
+                }],
+                filters: vec![],
+                programmed: true,
+            }],
+            parent_refs: vec![],
+            programmed: true,
+        });
+        view.tcp_routes.push(TCPRouteState {
+            namespace: arc("default"),
+            name: arc("tcp-1"),
+            generation: 1,
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
+        });
+        view.udp_routes.push(UDPRouteState {
+            namespace: arc("default"),
+            name: arc("udp-1"),
+            generation: 1,
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
+        });
+        view.tls_routes.push(TLSRouteState {
+            namespace: arc("default"),
+            name: arc("tls-1"),
+            generation: 1,
+            hostnames: vec![HostnameMatch::Wildcard(arc("*.example.com"))],
+            parent_refs: vec![],
+            backends: vec![],
+            programmed: true,
+        });
+        view.backend_tls_policies.push(BackendTLSPolicyState {
+            namespace: arc("default"),
+            name: arc("btp-1"),
+            generation: 1,
+            ..Default::default()
+        });
+        view.namespace_labels.insert(
+            arc("default"),
+            [(arc("team"), arc("gateway"))].into_iter().collect(),
+        );
+        view.listener_allowed.insert(
+            (arc("default"), arc("gw-1"), arc("http")),
+            AllowedRoutes {
+                kinds: vec![RouteGroupKind {
+                    group: arc("gateway.networking.k8s.io"),
+                    kind: arc("HTTPRoute"),
+                }],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::All,
+                    selector: None,
+                },
+            },
+        );
+        view.listener_set_allowed.insert(
+            (arc("default"), arc("ls-1"), arc("extra")),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::Selector,
+                    selector: Some([("team".into(), "gateway".into())].into_iter().collect()),
+                },
+            },
+        );
+
+        let a = compute_digest(&view);
+        // Reordering top-level collections must not change the digest.
+        view.gateways.reverse();
+        view.listener_sets.reverse();
+        view.routes.reverse();
+        view.http_routes.reverse();
+        view.grpc_routes.reverse();
+        view.tcp_routes.reverse();
+        view.udp_routes.reverse();
+        view.tls_routes.reverse();
+        view.reference_grants.reverse();
+        view.backend_tls_policies.reverse();
+        let b = compute_digest(&view);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_view_digest() {
+        let view = ReconciledView::default();
+        let h = compute_digest(&view);
+        assert_eq!(compute_digest(&view), h);
     }
 }

@@ -555,6 +555,9 @@ fn resolve_l4_parent_ref(
         .listeners
         .iter()
         .filter(|l| {
+            if !l.programmed {
+                return false;
+            }
             let section_matches = parsed
                 .section_name
                 .as_deref()
@@ -991,6 +994,9 @@ fn build_status_parents(parent_statuses: &[L4ParentStatus]) -> Vec<Value> {
                             ConditionType::NoMatchingParent => "NoMatchingParent",
                             ConditionType::RefNotPermitted => "RefNotPermitted",
                             ConditionType::UnsupportedFeature => "UnsupportedFeature",
+                            ConditionType::InsecureFrontendValidationMode => {
+                                "InsecureFrontendValidationMode"
+                            }
                         },
                         "status": match c.status {
                             ConditionStatus::True => "True",
@@ -1153,6 +1159,7 @@ pub async fn reconcile_tcproute(
         .await;
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1228,6 +1235,7 @@ pub async fn reconcile_udproute(
         .await;
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1303,6 +1311,7 @@ pub async fn reconcile_tlsroute(
         .await;
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1473,6 +1482,7 @@ mod tests {
             name: Arc::from(name),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from(listener),
                 protocol: Arc::from("TCP"),
                 port,
@@ -1496,6 +1506,7 @@ mod tests {
             name: Arc::from(name),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from(listener),
                 protocol: Arc::from("TLS"),
                 port,
@@ -1647,6 +1658,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
