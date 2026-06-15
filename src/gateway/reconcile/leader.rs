@@ -152,10 +152,11 @@ pub async fn run_reconcile_loop(
 
     // -- Main reconcile loop -------------------------------------------------
     let mut token: Option<crate::gateway::election::LeaderToken> = None;
-    let mut tick = interval(Duration::from_millis(500));
+    let mut tick = interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let force_notify = Arc::new(Notify::new());
+    crate::gateway::reconcile::trigger::init(Arc::clone(&force_notify));
     let mut prev_view: Option<ReconciledView> = None;
 
     loop {
@@ -409,6 +410,7 @@ fn diff_view(old: &Option<ReconciledView>, new: &ReconciledView) -> Vec<GatewayR
 mod tests {
     use super::*;
     use crate::gateway::model::{GatewayState, HTTPRouteState, ListenerState, ReferenceGrantState};
+    use http::Request as HttpRequest;
 
     fn gw(ns: &str, name: &str, generation: i64) -> GatewayState {
         GatewayState {
@@ -416,6 +418,7 @@ mod tests {
             name: Arc::from(name),
             generation,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -603,5 +606,255 @@ mod tests {
         assert!(notifies
             .iter()
             .any(|n| n.kind == "UDPRoute" && n.name == "udp-2"));
+    }
+
+    #[test]
+    fn diff_view_emits_backend_tls_policy_changes() {
+        let mut old = view(vec![], vec![], vec![]);
+        old.backend_tls_policies
+            .push(crate::gateway::model::BackendTLSPolicyState {
+                namespace: Arc::from("default"),
+                name: Arc::from("btp-1"),
+                generation: 1,
+                ..Default::default()
+            });
+        let mut new = view(vec![], vec![], vec![]);
+        new.backend_tls_policies
+            .push(crate::gateway::model::BackendTLSPolicyState {
+                namespace: Arc::from("default"),
+                name: Arc::from("btp-1"),
+                generation: 2,
+                ..Default::default()
+            });
+        let notifies = diff_view(&Some(old), &new);
+        assert_eq!(notifies.len(), 1);
+        assert_eq!(notifies[0].kind, "BackendTLSPolicy");
+        assert_eq!(notifies[0].generation, 2);
+    }
+
+    #[tokio::test]
+    async fn run_reconcile_loop_executes_ticks_and_becomes_leader() {
+        use crate::tls::{DiskCertSource, GatewayCertSource, TlsRegistry};
+        use std::time::Duration;
+
+        let client = kube::Client::new(
+            tower::service_fn(|req: HttpRequest<kube::client::Body>| async move {
+                let path = req.uri().path();
+                let body = if path.contains("/leases/") && req.method() == "PATCH" {
+                    serde_json::json!({
+                        "apiVersion": "coordination.k8s.io/v1",
+                        "kind": "Lease",
+                        "metadata": { "name": "sunbeam-proxy-leader", "namespace": "default" }
+                    })
+                } else if path.contains("/namespaces") {
+                    serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []})
+                } else {
+                    serde_json::json!({"items": []})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+
+        let (routes_tx, _routes_rx) = std::sync::mpsc::channel::<crate::ir::RouteTable>();
+        let election = Election::new(
+            client.clone(),
+            "default".into(),
+            "sunbeam-proxy-leader".into(),
+            "test".into(),
+        );
+        let tls_registry = Arc::new(TlsRegistry::new());
+        let gateway_cert_source = Arc::new(GatewayCertSource::new());
+        let disk_cert_source = Arc::new(DiskCertSource::new(
+            "/tmp/sunbeam-test-cert.pem".into(),
+            "/tmp/sunbeam-test-key.pem".into(),
+        ));
+
+        // run_reconcile_loop holds a !Send LeaderToken across await points, so
+        // run it on a single-thread runtime exactly like production does.
+        let thread_handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::task::LocalSet::new()
+                    .run_until(async {
+                        let task = tokio::task::spawn_local(async move {
+                            run_reconcile_loop(
+                                election,
+                                client,
+                                routes_tx,
+                                None,
+                                tls_registry,
+                                gateway_cert_source,
+                                disk_cert_source,
+                            )
+                            .await;
+                        });
+                        tokio::time::sleep(Duration::from_millis(5500)).await;
+                        task.abort();
+                    })
+                    .await;
+            });
+        });
+
+        tokio::task::spawn_blocking(move || thread_handle.join().unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_reconcile_loop_broadcasts_digest_and_notify_events() {
+        use crate::cluster::{
+            bandwidth::{
+                BandwidthLimiter, BandwidthMeter, BandwidthTracker, ClusterBandwidthState,
+            },
+            ClusterHandle,
+        };
+        use crate::tls::{DiskCertSource, GatewayCertSource, TlsRegistry};
+        use std::time::Duration;
+
+        let gateway = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": { "name": "gw-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }]
+            }
+        });
+        let httproute = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "name": "gw-1" }],
+                "rules": [{ "backendRefs": [{ "name": "svc", "port": 80 }] }]
+            }
+        });
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: HttpRequest<kube::client::Body>| {
+                let gw = gateway.clone();
+                let hr = httproute.clone();
+                async move {
+                    let path = req.uri().path();
+                    let body = if path.contains("/leases/") && req.method() == "PATCH" {
+                        serde_json::json!({
+                            "apiVersion": "coordination.k8s.io/v1",
+                            "kind": "Lease",
+                            "metadata": { "name": "sunbeam-proxy-leader", "namespace": "default" }
+                        })
+                    } else if path.contains("/gateways") {
+                        serde_json::json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayList", "items": [gw] })
+                    } else if path.contains("/httproutes") {
+                        serde_json::json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRouteList", "items": [hr] })
+                    } else if path.contains("/namespaces") {
+                        serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []})
+                    } else {
+                        serde_json::json!({"items": []})
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let (routes_tx, _routes_rx) = std::sync::mpsc::channel::<crate::ir::RouteTable>();
+        let (state_tx, mut state_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let cluster_handle = Arc::new(ClusterHandle {
+            bandwidth: Arc::new(BandwidthTracker::new()),
+            cluster_bandwidth: Arc::new(ClusterBandwidthState::new(30)),
+            meter: Arc::new(BandwidthMeter::new(30)),
+            limiter: Arc::new(BandwidthLimiter::new(
+                Arc::new(BandwidthMeter::new(30)),
+                crate::cluster::bandwidth::gbps_to_bytes_per_sec(1.0),
+            )),
+            endpoint_id: secret.public(),
+            gateway_state_tx: Some(state_tx),
+            gateway_notify_tx: Some(notify_tx),
+            shutdown_tx,
+        });
+
+        let election = Election::new(
+            client.clone(),
+            "default".into(),
+            "sunbeam-proxy-leader".into(),
+            "test".into(),
+        );
+        let tls_registry = Arc::new(TlsRegistry::new());
+        let gateway_cert_source = Arc::new(GatewayCertSource::new());
+        let disk_cert_source = Arc::new(DiskCertSource::new(
+            "/tmp/sunbeam-test-cert.pem".into(),
+            "/tmp/sunbeam-test-key.pem".into(),
+        ));
+
+        let thread_handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::task::LocalSet::new()
+                    .run_until(async {
+                        let task = tokio::task::spawn_local(async move {
+                            run_reconcile_loop(
+                                election,
+                                client,
+                                routes_tx,
+                                Some(cluster_handle),
+                                tls_registry,
+                                gateway_cert_source,
+                                disk_cert_source,
+                            )
+                            .await;
+                        });
+
+                        let verify = tokio::task::spawn_local(async move {
+                            let mut got_state = false;
+                            let mut got_notify = false;
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                            // Trigger a forced reconcile to exercise the gossip wake path.
+                            crate::gateway::reconcile::trigger::trigger();
+                            while !got_state || !got_notify {
+                                if tokio::time::Instant::now() > deadline {
+                                    panic!("timed out waiting for gossip broadcasts");
+                                }
+                                if state_rx.try_recv().is_ok() {
+                                    got_state = true;
+                                }
+                                if notify_rx.try_recv().is_ok() {
+                                    got_notify = true;
+                                }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                            task.abort();
+                        });
+                        verify.await.unwrap();
+                    })
+                    .await;
+            });
+        });
+
+        tokio::task::spawn_blocking(move || thread_handle.join().unwrap())
+            .await
+            .unwrap();
     }
 }

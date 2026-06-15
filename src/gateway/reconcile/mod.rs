@@ -17,6 +17,7 @@ pub mod l4route;
 pub mod leader;
 pub mod listenerset;
 pub mod refgrant;
+pub mod trigger;
 
 pub use leader::run_reconcile_loop;
 
@@ -192,14 +193,15 @@ pub async fn reconcile_tick_with_leader(
     };
 
     let mut gateway_states: Vec<_> = gateway_list.iter().map(build_gateway_state).collect();
+    let grant_states = reconcile_reference_grants(&grant_list.items);
+    let grant_index = GrantIndex::new(grant_states.clone());
     crate::gateway::reconcile::gateway::load_gateway_frontend_validations(
         client,
         &gateway_list.items,
         &mut gateway_states,
+        &grant_index,
     )
     .await;
-    let grant_states = reconcile_reference_grants(&grant_list.items);
-    let grant_index = GrantIndex::new(grant_states.clone());
 
     let namespace_labels: HashMap<String, HashMap<String, String>> = namespace_list
         .iter()
@@ -555,6 +557,26 @@ mod tests {
                         map.get("namespaces")
                             .cloned()
                             .unwrap_or(serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []}))
+                    } else if path.contains("/grpcroutes") {
+                        map.get("grpcroutes")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
+                    } else if path.contains("/listenersets") {
+                        map.get("listenersets")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
+                    } else if path.contains("/tcproutes") {
+                        map.get("tcproutes")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
+                    } else if path.contains("/udproutes") {
+                        map.get("udproutes")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
+                    } else if path.contains("/tlsroutes") {
+                        map.get("tlsroutes")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"items": []}))
                     } else if path.contains("/services") {
                         serde_json::json!({"apiVersion": "v1", "kind": "ServiceList", "items": []})
                     } else if path.contains("/endpointslices") {
@@ -884,5 +906,213 @@ mod tests {
             .unwrap()
             .contains_key("lastTransitionTime"));
         assert_eq!(stripped["nested"]["value"], 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_with_leader_includes_listener_sets_and_grpc_routes() {
+        let gateway = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": { "name": "gw-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }],
+                "allowedListeners": { "namespaces": { "from": "All" } }
+            }
+        });
+        let listenerset = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ListenerSet",
+            "metadata": { "name": "ls-1", "namespace": "default", "generation": 1, "creationTimestamp": "2026-01-01T00:00:00Z" },
+            "spec": {
+                "parentRef": { "name": "gw-1" },
+                "listeners": [{ "name": "extra", "protocol": "HTTP", "port": 8080 }]
+            }
+        });
+        let grpcroute = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "GRPCRoute",
+            "metadata": { "name": "grpc-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "name": "gw-1" }],
+                "hostnames": ["grpc.example.com"],
+                "rules": [{ "backendRefs": [{ "name": "svc", "port": 50051 }] }]
+            }
+        });
+
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "gateways".to_string(),
+            list_response("GatewayList", vec![gateway]),
+        );
+        responses.insert(
+            "httproutes".to_string(),
+            list_response("HTTPRouteList", vec![]),
+        );
+        responses.insert(
+            "grpcroutes".to_string(),
+            list_response("GRPCRouteList", vec![grpcroute]),
+        );
+        responses.insert(
+            "referencegrants".to_string(),
+            list_response("ReferenceGrantList", vec![]),
+        );
+        responses.insert(
+            "listenersets".to_string(),
+            list_response("ListenerSetList", vec![listenerset]),
+        );
+        responses.insert(
+            "namespaces".to_string(),
+            serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": []}),
+        );
+
+        let client = mock_client(responses);
+        let view = reconcile_tick_with_leader(&client, false).await;
+        assert!(view.is_some());
+        let view = view.unwrap();
+        assert_eq!(view.gateways.len(), 1);
+        assert_eq!(view.listener_sets.len(), 1);
+        assert_eq!(view.grpc_routes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tick_leader_patches_attached_listener_sets() {
+        let gateway = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": { "name": "gw-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }],
+                "allowedListeners": { "namespaces": { "from": "All" } }
+            },
+            "status": { "attachedListenerSets": 0 }
+        });
+        let listenerset = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ListenerSet",
+            "metadata": { "name": "ls-1", "namespace": "default", "generation": 1, "creationTimestamp": "2026-01-01T00:00:00Z" },
+            "spec": {
+                "parentRef": { "name": "gw-1" },
+                "listeners": [{ "name": "extra", "protocol": "HTTP", "port": 8080 }]
+            }
+        });
+        let namespace = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": { "name": "default", "labels": { "team": "gateway" } }
+        });
+
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "gateways".to_string(),
+            list_response("GatewayList", vec![gateway]),
+        );
+        responses.insert(
+            "httproutes".to_string(),
+            list_response("HTTPRouteList", vec![]),
+        );
+        responses.insert(
+            "grpcroutes".to_string(),
+            list_response("GRPCRouteList", vec![]),
+        );
+        responses.insert(
+            "referencegrants".to_string(),
+            list_response("ReferenceGrantList", vec![]),
+        );
+        responses.insert(
+            "listenersets".to_string(),
+            list_response("ListenerSetList", vec![listenerset]),
+        );
+        responses.insert(
+            "namespaces".to_string(),
+            serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "items": [namespace]}),
+        );
+        let tcproute = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "TCPRoute",
+            "metadata": { "name": "tcp-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "name": "gw-1" }],
+                "rules": [{ "backendRefs": [{ "name": "svc", "port": 8080 }] }]
+            }
+        });
+        let udproute = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "UDPRoute",
+            "metadata": { "name": "udp-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{ "name": "gw-1" }],
+                "rules": [{ "backendRefs": [{ "name": "svc", "port": 9090 }] }]
+            }
+        });
+        let tlsroute = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "TLSRoute",
+            "metadata": { "name": "tls-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "hostnames": ["*.example.com"],
+                "parentRefs": [{ "name": "gw-1" }],
+                "rules": [{ "backendRefs": [{ "name": "svc", "port": 8443 }] }]
+            }
+        });
+        responses.insert(
+            "tcproutes".to_string(),
+            list_response("TCPRouteList", vec![tcproute]),
+        );
+        responses.insert(
+            "udproutes".to_string(),
+            list_response("UDPRouteList", vec![udproute]),
+        );
+        responses.insert(
+            "tlsroutes".to_string(),
+            list_response("TLSRouteList", vec![tlsroute]),
+        );
+
+        let client = mock_client(responses);
+        let view = reconcile_tick_with_leader(&client, true).await;
+        assert!(view.is_some());
+        let view = view.unwrap();
+        assert_eq!(
+            view.namespace_labels.get("default").unwrap().get("team"),
+            Some(&Arc::from("gateway"))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_l4_routes_treats_missing_crd_as_empty() {
+        let client = kube::Client::new(
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let api: kube::Api<TCPRoute> = kube::Api::all(client);
+        let result = list_l4_routes(&api, "TCPRoute").await;
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_l4_routes_propagates_other_errors() {
+        let client = kube::Client::new(
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(500)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let api: kube::Api<TCPRoute> = kube::Api::all(client);
+        let result = list_l4_routes(&api, "TCPRoute").await;
+        assert!(result.is_none());
     }
 }
