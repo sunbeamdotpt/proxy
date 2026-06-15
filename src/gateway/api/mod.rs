@@ -23,6 +23,36 @@ pub use tcproute::TCPRoute;
 pub use tlsroute::TLSRoute;
 pub use udproute::UDPRoute;
 
+/// Generate type aliases and a basic deserialization test for a Gateway API
+/// route CRD re-exported from the official `gateway-api` crate.
+#[macro_export]
+macro_rules! gateway_api_route_alias {
+    (
+        $doc:literal,
+        $Route:ident,
+        $Spec:ident,
+        $Status:ident,
+        $SourceRoute:ty,
+        $SourceSpec:ty,
+        $SourceStatus:ty,
+        $yaml:literal
+    ) => {
+        pub type $Route = $SourceRoute;
+        pub type $Spec = $SourceSpec;
+        pub type $Status = $SourceStatus;
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn test_deserialize() {
+                let _: $Route = serde_yaml::from_str($yaml).expect("deserializes");
+            }
+        }
+    };
+}
+
 pub use gateway_api::backendtlspolicies::{
     BackendTLSPolicy, BackendTlsPolicySpec, BackendTlsPolicyStatus,
     BackendTlsPolicyStatusAncestors, BackendTlsPolicyStatusAncestorsAncestorRef,
