@@ -126,9 +126,10 @@ impl UpstreamCaBundle {
 mod tests {
     use super::*;
     use crate::gateway::model::{
-        GatewayState, ListenerState, ReconciledView, TlsMode,
+        GatewayState, ListenerSetState, ListenerState, ParentRef, ReconciledView, TlsMode,
     };
     use crate::gateway::model::view::FrontendValidation;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     #[test]
@@ -174,5 +175,93 @@ mod tests {
         assert!(written.contains("AA"));
         assert!(written.contains("BB"));
         assert!(!bundle.write_from_view(&view).unwrap());
+    }
+
+    #[test]
+    fn write_skips_unprogrammed_backend_tls_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca.crt");
+        let bundle = UpstreamCaBundle::new(&path);
+        bundle.ensure_exists().unwrap();
+
+        let mut view = ReconciledView::default();
+        view.backend_tls_policies.push(crate::gateway::model::BackendTLSPolicyState {
+            programmed: false,
+            ca_bundle_pem: Arc::from("-----BEGIN CERTIFICATE-----\nZZ\n-----END CERTIFICATE-----\n"),
+            ..Default::default()
+        });
+
+        assert!(!bundle.write_from_view(&view).unwrap());
+        assert!(bundle.is_empty());
+    }
+
+    #[test]
+    fn write_adds_trailing_newline_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca.crt");
+        let bundle = UpstreamCaBundle::new(&path);
+
+        let ca = "-----BEGIN CERTIFICATE-----\nCC\n-----END CERTIFICATE-----";
+        assert!(bundle.write(&[Arc::from(ca)]).unwrap());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with('\n'));
+        assert!(!bundle.write(&[Arc::from(ca)]).unwrap());
+    }
+
+    #[test]
+    fn write_collects_listener_set_frontend_validation_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca.crt");
+        let bundle = UpstreamCaBundle::new(&path);
+
+        let ca = "-----BEGIN CERTIFICATE-----\nDD\n-----END CERTIFICATE-----\n";
+        let mut view = ReconciledView::default();
+        view.listener_sets.push(ListenerSetState {
+            namespace: Arc::from("default"),
+            name: Arc::from("ls"),
+            generation: 1,
+            created_at: 0,
+            parent_ref: ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: Some(Arc::from("default")),
+                name: Arc::from("gw"),
+                section_name: None,
+                port: None,
+            },
+            listeners: vec![ListenerState {
+                protocol: Arc::from("HTTPS"),
+                tls_mode: Some(TlsMode::Terminate),
+                frontend_validation: Some(FrontendValidation {
+                    ca_bundle_pem: Arc::from(ca),
+                    allow_insecure_fallback: false,
+                }),
+                ..Default::default()
+            }],
+            conflicts: BTreeMap::new(),
+            accepted: true,
+            programmed: true,
+            reason: Arc::from(""),
+            listener_cert_errors: vec![],
+            listener_kind_errors: vec![],
+        });
+
+        assert!(bundle.write_from_view(&view).unwrap());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("DD"));
+    }
+
+    #[test]
+    fn is_empty_tracks_written_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca.crt");
+        let bundle = UpstreamCaBundle::new(&path);
+        assert!(bundle.is_empty());
+        bundle.ensure_exists().unwrap();
+        assert!(bundle.is_empty());
+        bundle.write(&[Arc::from("-----BEGIN CERTIFICATE-----\nEE\n-----END CERTIFICATE-----\n")]).unwrap();
+        assert!(!bundle.is_empty());
+        bundle.write(&[]).unwrap();
+        assert!(bundle.is_empty());
     }
 }

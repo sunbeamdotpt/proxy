@@ -211,26 +211,29 @@ pub async fn run_reconcile_loop(
             }
             prev_view = Some(view.clone());
 
-            // Refresh Gateway API certificates and merge them with the disk
-            // certificate into the central TLS registry. L4 termination uses
-            // the registry directly, so no graceful upgrade is required.
-            gateway_cert_source.refresh(&client, &view).await;
-            disk_cert_source.refresh();
-            let mut store = disk_cert_source
-                .snapshot()
-                .map(|s| (*s).clone())
-                .unwrap_or_default();
-            if let Some(gw) = gateway_cert_source.snapshot() {
-                merge_cert_store(&mut store, &gw);
-            }
-            tls_registry.apply(store);
+            // Only refresh certificates and the upstream CA bundle when the
+            // reconciled view changed. This avoids repeatedly fetching Secrets
+            // and ConfigMaps from the API server on every 500ms tick.
+            let view_changed = prev_view.as_ref() != Some(&view);
+            if view_changed {
+                gateway_cert_source.refresh(&client, &view).await;
+                disk_cert_source.refresh();
+                let mut store = disk_cert_source
+                    .snapshot()
+                    .map(|s| (*s).clone())
+                    .unwrap_or_default();
+                if let Some(gw) = gateway_cert_source.snapshot() {
+                    merge_cert_store(&mut store, &gw);
+                }
+                tls_registry.apply(store);
 
-            // Update the process-wide upstream CA bundle from BackendTLSPolicy
-            // and frontend validation configuration. Pingora's rustls connector
-            // reads SSL_CERT_FILE once at startup; the file is written before
-            // bootstrap so the initial upstream trust store includes these roots.
-            if let Err(e) = upstream_ca_bundle.write_from_view(&view) {
-                tracing::warn!(error = %e, "failed to write upstream CA bundle");
+                // Update the process-wide upstream CA bundle from BackendTLSPolicy
+                // and frontend validation configuration. Pingora's rustls connector
+                // reads SSL_CERT_FILE once at startup; the file is written before
+                // bootstrap so the initial upstream trust store includes these roots.
+                if let Err(e) = upstream_ca_bundle.write_from_view(&view) {
+                    tracing::warn!(error = %e, "failed to write upstream CA bundle");
+                }
             }
 
             // Gateway status (including Programmed=True) is written by the

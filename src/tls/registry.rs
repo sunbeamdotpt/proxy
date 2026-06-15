@@ -412,6 +412,18 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
 -----END PRIVATE KEY-----
 "#;
 
+    const CLIENT_AUTH_CA_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBeDCCAR+gAwIBAgIUVEmEW3EToBLbEJ0PXAetEXtdhTgwCgYIKoZIzj0EAwIw
+EjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNjA2MTUwMDMwNThaFw0yNjA2MjIwMDMw
+NThaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+AATQQOy8c4IYRCvF+2eyqo7OgqYyM0ZoXp7VrKdIt6PZjWv3WRkt4wdS9Nd9r1bm
+RG+K5XyNXgVsE9k62oBgnkzco1MwUTAdBgNVHQ4EFgQUpmCMSWMz9mnBS79SEzE4
+jtV5PwQwHwYDVR0jBBgwFoAUpmCMSWMz9mnBS79SEzE4jtV5PwQwDwYDVR0TAQH/
+BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiB1dsAxvQaz62broeomlS+UCWde6fL3
+nVURdix68mNEZgIgE1aRqiWqS3uFqMmNUAbUYo+5H8twXAUaPr48yKs8t9A=
+-----END CERTIFICATE-----
+"#;
+
     fn test_key() -> Arc<CertifiedKey> {
         certified_key_from_pem(TEST_CERT_PEM.as_bytes(), TEST_KEY_PEM.as_bytes()).unwrap()
     }
@@ -615,6 +627,45 @@ Z1T+wZ5BhcaJwKvUw5VjYp+vsUP7nNMO7EwmiIRL9Oh27vkGMxj3scvD
             ..Default::default()
         };
         assert!(certified_key_from_secret(&secret).is_err());
+    }
+
+    #[test]
+    fn server_config_with_empty_client_auth_bundle_ignores_client_auth() {
+        ensure_provider();
+        let registry = TlsRegistry::new();
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
+        registry.apply(store);
+        let config = registry.server_config_with_client_auth("", false);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn server_config_with_client_auth_bundle_builds_verifier() {
+        ensure_provider();
+        let registry = TlsRegistry::new();
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
+        registry.apply(store);
+        let config = registry.server_config_with_client_auth(CLIENT_AUTH_CA_PEM, false);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn server_config_with_client_auth_allow_unauthenticated() {
+        ensure_provider();
+        let registry = TlsRegistry::new();
+        let store = CertStore {
+            default: Some(test_key()),
+            ..Default::default()
+        };
+        registry.apply(store);
+        let config = registry.server_config_with_client_auth(CLIENT_AUTH_CA_PEM, true);
+        assert!(config.is_ok());
     }
 
     #[tokio::test]
