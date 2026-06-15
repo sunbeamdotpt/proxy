@@ -34,7 +34,7 @@ MULTIPASS_VM="${MULTIPASS_VM:-sunbeam-proxy-dev}"
 DOCKER_TAG="${DOCKER_TAG:-}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GATEWAY_API_CHANNEL="${GATEWAY_API_CHANNEL:-experimental}"
-SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,GRPCRoute,ReferenceGrant,BackendTLSPolicy,GatewayPort8080,GatewayHTTPListenerIsolation,ListenerSet,TCPRoute,UDPRoute,TLSRoute,TLSRouteModeTerminate,TLSRouteModeMixed,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRouteCORS,HTTPRouteRequestMirror,HTTPRouteRequestMultipleMirrors,HTTPRouteRequestPercentageMirror,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteParentRefPort,HTTPRouteDestinationPortMatching,HTTPRouteNamedRouteRule,GatewayStaticAddresses,GatewayAddressEmpty,GatewayInfrastructurePropagation,GatewayBackendClientCertificate,GatewayFrontendClientCertificateValidation,GatewayFrontendClientCertificateValidationInsecureFallback,GatewayInvalidFrontendClientCertificateValidation,GatewayFrontendInvalidDefaultClientCertificateValidation,GatewayInvalidTLSBackendConfiguration,GatewayHTTPSListenerDetectMisdirectedRequests,GRPCExactMethodMatching,GRPCRouteHeaderMatching,GRPCRouteListenerHostnameMatching,GRPCRouteNamedRouteRule,GRPCRouteWeight}"
+SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,GRPCRoute,ReferenceGrant,BackendTLSPolicy,BackendTLSPolicySANValidation,GatewayPort8080,GatewayHTTPListenerIsolation,ListenerSet,TCPRoute,UDPRoute,TLSRoute,TLSRouteModeTerminate,TLSRouteModeMixed,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRouteCORS,HTTPRouteRequestMirror,HTTPRouteRequestMultipleMirrors,HTTPRouteRequestPercentageMirror,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteParentRefPort,HTTPRouteDestinationPortMatching,HTTPRouteNamedRouteRule,GatewayStaticAddresses,GatewayAddressEmpty,GatewayInfrastructurePropagation,GatewayBackendClientCertificate,GatewayFrontendClientCertificateValidation,GatewayFrontendClientCertificateValidationInsecureFallback,GatewayInvalidFrontendClientCertificateValidation,GatewayFrontendInvalidDefaultClientCertificateValidation,GatewayInvalidTLSBackendConfiguration,GatewayHTTPSListenerDetectMisdirectedRequests,GRPCExactMethodMatching,GRPCRouteHeaderMatching,GRPCRouteListenerHostnameMatching,GRPCRouteNamedRouteRule,GRPCRouteWeight}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_CRDS="${SKIP_CRDS:-0}"
@@ -130,12 +130,12 @@ build_image() {
     log "using container runtime: ${CONTAINER_CMD}"
     if [[ "${DEBUG_BUILD}" == "1" ]]; then
         log "building debug binary"
-        cargo build --target aarch64-unknown-linux-musl
+        cargo build --locked --target aarch64-unknown-linux-musl
         cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/debug/sunbeam-proxy" \
             "${FIXTURES_DIR}/sunbeam-proxy"
     else
         log "building release binary"
-        cargo build --release --target aarch64-unknown-linux-musl
+        cargo build --locked --release --target aarch64-unknown-linux-musl
         cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/release/sunbeam-proxy" \
             "${FIXTURES_DIR}/sunbeam-proxy"
     fi
@@ -307,11 +307,11 @@ run_tests() {
             -supported-features "${SUPPORTED_FEATURES}" \
             -usable-address "${GATEWAY_ADDR}" \
             -unusable-address "240.0.0.1" \
-            -organization "Sunbeam" \
+            -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
-            -url "https://sunbeam.sh" \
+            -url "https://sunbeam.pt" \
             -version "v0.1.0" \
-            -contact "conformance@sunbeam.sh" \
+            -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
             "${args[@]}"
@@ -322,11 +322,11 @@ run_tests() {
             -supported-features "${SUPPORTED_FEATURES}" \
             -usable-address "${GATEWAY_ADDR}" \
             -unusable-address "240.0.0.1" \
-            -organization "Sunbeam" \
+            -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
-            -url "https://sunbeam.sh" \
+            -url "https://sunbeam.pt" \
             -version "v0.1.0" \
-            -contact "conformance@sunbeam.sh" \
+            -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
             "${args[@]}"
@@ -363,6 +363,8 @@ run_command() {
     if [[ ${#target_tests[@]} -eq 0 && "${target_set}" -eq 1 ]]; then
         target_tests=("${DEFAULT_TARGET_TESTS[@]}")
     fi
+
+    clone_upstream
 
     SKIP_TESTS=""
     if [[ ${#target_tests[@]} -gt 0 ]]; then
