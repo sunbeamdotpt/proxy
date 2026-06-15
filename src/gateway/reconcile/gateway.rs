@@ -24,6 +24,7 @@ use crate::gateway::reconcile::httproute::{
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::ir::compile::CompiledL4Config;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{Api, ListParams, Patch, PatchParams};
@@ -85,6 +86,7 @@ pub fn build_listener_model(gw: &Gateway) -> Vec<ListenerState> {
                 hostname,
                 tls_mode,
                 frontend_validation: None,
+                programmed: true,
             });
         }
     }
@@ -162,11 +164,20 @@ pub fn parse_allowed_routes(
     AllowedRoutes { kinds, namespaces }
 }
 
+/// Raw CA certificate reference extracted from a listener validation block.
+#[derive(Clone, Debug)]
+struct CaCertificateRefRaw {
+    group: Arc<str>,
+    kind: Arc<str>,
+    name: Arc<str>,
+    namespace: Option<Arc<str>>,
+}
+
 /// Raw frontend validation configuration parsed from a Gateway listener.
 #[derive(Clone, Debug)]
 struct FrontendValidationSpec {
-    ca_certificate_refs: Vec<(Arc<str>, Arc<str>)>,
-    no_default_validation: bool,
+    ca_certificate_refs: Vec<CaCertificateRefRaw>,
+    allow_insecure_fallback: bool,
 }
 
 fn parse_frontend_validation_obj(
@@ -176,24 +187,25 @@ fn parse_frontend_validation_obj(
     let mut ca_certificate_refs = Vec::new();
     for r in refs {
         let r = r.as_object()?;
-        let group = r.get("group").and_then(|v| v.as_str()).unwrap_or("");
-        let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if !group.is_empty() || kind != "ConfigMap" {
-            return None;
-        }
         let name = r.get("name").and_then(|v| v.as_str())?;
         if name.is_empty() {
             return None;
         }
-        ca_certificate_refs.push((Arc::from(""), Arc::from(name)));
+        ca_certificate_refs.push(CaCertificateRefRaw {
+            group: Arc::from(r.get("group").and_then(|v| v.as_str()).unwrap_or("")),
+            kind: Arc::from(r.get("kind").and_then(|v| v.as_str()).unwrap_or("")),
+            name: Arc::from(name),
+            namespace: r.get("namespace").and_then(|v| v.as_str()).map(Arc::from),
+        });
     }
-    let no_default_validation = obj
-        .get("noDefaultValidation")
-        .and_then(|v| v.as_bool())
+    let allow_insecure_fallback = obj
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "AllowInsecureFallback")
         .unwrap_or(false);
     Some(FrontendValidationSpec {
         ca_certificate_refs,
-        no_default_validation,
+        allow_insecure_fallback,
     })
 }
 
@@ -204,22 +216,109 @@ fn listener_frontend_validation(
     port: u16,
 ) -> Option<FrontendValidationSpec> {
     let tls = gw_tls?.as_object()?;
-    if let Some(per_port) = tls.get("perPort").and_then(|v| v.as_array()) {
+    let frontend = tls.get("frontend").and_then(|v| v.as_object())?;
+    if let Some(per_port) = frontend.get("perPort").and_then(|v| v.as_array()) {
         for entry in per_port {
             let entry_port = entry.get("port").and_then(|v| v.as_u64())? as u16;
             if entry_port == port {
                 return entry
-                    .get("frontendValidation")
+                    .get("tls")
+                    .and_then(|v| v.as_object())?
+                    .get("validation")
                     .and_then(|v| v.as_object())
                     .and_then(parse_frontend_validation_obj);
             }
         }
     }
-    tls.get("default")
+    frontend
+        .get("default")
         .and_then(|v| v.as_object())?
-        .get("frontendValidation")
+        .get("validation")
         .and_then(|v| v.as_object())
         .and_then(parse_frontend_validation_obj)
+}
+
+/// Returns true when any TLS-terminated listener on the Gateway uses a frontend
+/// validation mode of `AllowInsecureFallback`.
+fn gateway_insecure_frontend_mode(gw: &Gateway) -> bool {
+    let gw_tls = gw.spec.tls.as_ref();
+    for listener in &gw.spec.listeners {
+        let Some(obj) = listener.as_object() else {
+            continue;
+        };
+        let protocol = obj
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("HTTP");
+        let tls_mode = parse_tls_mode(obj, protocol);
+        if !matches!(protocol, "HTTPS" | "TLS") || tls_mode != Some(TlsMode::Terminate) {
+            continue;
+        }
+        let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+        if let Some(spec) = listener_frontend_validation(gw_tls, port) {
+            if spec.allow_insecure_fallback {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true when the compiled L4 dataplane has applied this Gateway's
+/// TLS-terminated listeners with a matching frontend validation mode.
+///
+/// This prevents the Gateway from reporting `Programmed=True` before the
+/// listener socket is actually enforcing the requested client-certificate
+/// policy.  Listeners with unresolved certificate references are skipped so
+/// that invalid configs still get their status patched promptly.
+fn gateway_l4_ready(
+    gw: &Gateway,
+    l4_config: &CompiledL4Config,
+    cert_errors: &[Option<CertValidation>],
+) -> bool {
+    let gw_tls = gw.spec.tls.as_ref();
+    for (idx, listener) in gw.spec.listeners.iter().enumerate() {
+        let Some(obj) = listener.as_object() else {
+            continue;
+        };
+        // A listener that failed validation is not expected to be programmed
+        // into the dataplane with the requested frontend validation.
+        if cert_errors.get(idx).copied().flatten().is_some() {
+            continue;
+        }
+        let protocol = obj
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("HTTP");
+        let tls_mode = parse_tls_mode(obj, protocol);
+        if !matches!(protocol, "HTTPS" | "TLS") || tls_mode != Some(TlsMode::Terminate) {
+            continue;
+        }
+        let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+        let ir_protocol = match protocol {
+            "HTTPS" => crate::ir::Protocol::Https,
+            "TLS" => crate::ir::Protocol::Tls,
+            _ => continue,
+        };
+        let id: Arc<str> = format!("0.0.0.0:{}#{:?}", port, ir_protocol).into();
+        let expected =
+            listener_frontend_validation(gw_tls, port).map(|spec| spec.allow_insecure_fallback);
+        let actual = l4_config
+            .listeners
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| {
+                l.frontend_validation
+                    .as_ref()
+                    .map(|v| v.allow_insecure_fallback)
+            });
+        match (expected, actual) {
+            (None, None) => {}
+            (Some(expected), Some(actual)) if expected == actual => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn ca_bundle_valid(pem: &[u8]) -> bool {
@@ -233,13 +332,15 @@ fn ca_bundle_valid(pem: &[u8]) -> bool {
 /// break plain HTTP listeners.
 ///
 /// Returns `Some(CertValidation)` when the listener references an unsupported
-/// resource kind, a missing ConfigMap, or a ConfigMap that does not contain a
-/// valid `ca.crt` entry.
+/// resource kind, a missing ConfigMap, a ConfigMap that does not contain a
+/// valid `ca.crt` entry, or a cross-namespace reference without a matching
+/// ReferenceGrant.
 pub async fn validate_listener_frontend_validation(
     client: &Client,
     gw_ns: &str,
     listener: &serde_json::Map<String, serde_json::Value>,
     gw_tls: Option<&serde_json::Value>,
+    grant_index: &crate::gateway::reconcile::refgrant::GrantIndex,
 ) -> Option<CertValidation> {
     let protocol = listener
         .get("protocol")
@@ -256,20 +357,32 @@ pub async fn validate_listener_frontend_validation(
         None => return None,
     };
 
-    for (ref_ns, name) in &spec.ca_certificate_refs {
-        let ns = if ref_ns.is_empty() {
-            gw_ns
-        } else {
-            ref_ns.as_ref()
-        };
-        if ns != gw_ns {
+    for r in &spec.ca_certificate_refs {
+        if r.kind.as_ref() != "ConfigMap" || !r.group.as_ref().is_empty() {
             return Some(CertValidation {
-                reason: "InvalidCACertificateRef",
-                message: "Frontend CA certificate reference must be in the Gateway namespace",
+                reason: "InvalidCACertificateKind",
+                message: "Frontend CA certificate reference must be a core ConfigMap",
             });
         }
-        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-        let cm = match cms.get(name.as_ref()).await {
+        let ref_ns = r.namespace.as_deref().unwrap_or(gw_ns);
+        if ref_ns != gw_ns
+            && !grant_index.is_permitted(
+                gw_ns,
+                "gateway.networking.k8s.io",
+                "Gateway",
+                ref_ns,
+                "",
+                "ConfigMap",
+                r.name.as_ref(),
+            )
+        {
+            return Some(CertValidation {
+                reason: "RefNotPermitted",
+                message: "Frontend CA certificate reference is not permitted by ReferenceGrant",
+            });
+        }
+        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ref_ns);
+        let cm = match cms.get(r.name.as_ref()).await {
             Ok(c) => c,
             Err(_) => {
                 return Some(CertValidation {
@@ -309,39 +422,68 @@ pub async fn validate_listener_frontend_validation(
 
 /// Load the PEM CA bundle for each listener's frontend validation and store
 /// it in the corresponding [`ListenerState`]. Invalid or missing references
-/// are left as `None` so the listener is not configured with broken trust.
+/// mark the listener as unprogrammed so routes do not attach to it.
 pub async fn load_gateway_frontend_validations(
     client: &Client,
     gateways: &[Gateway],
     states: &mut [GatewayState],
+    grant_index: &crate::gateway::reconcile::refgrant::GrantIndex,
 ) {
     for (gw, state) in gateways.iter().zip(states.iter_mut()) {
         let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
         let gw_tls = gw.spec.tls.as_ref();
-        for listener in &mut state.listeners {
+        for (idx, listener) in state.listeners.iter_mut().enumerate() {
             if !matches!(listener.protocol.as_ref(), "HTTPS" | "TLS")
                 || listener.tls_mode != Some(TlsMode::Terminate)
             {
                 continue;
             }
-            let spec = match listener_frontend_validation(gw_tls, listener.port) {
-                Some(s) => s,
-                None => continue,
-            };
-            let mut bundle = String::new();
+
             let mut valid = true;
-            for (ref_ns, name) in &spec.ca_certificate_refs {
-                let ns = if ref_ns.is_empty() {
-                    gw_ns
-                } else {
-                    ref_ns.as_ref()
-                };
-                if ns != gw_ns {
+            if let Some(obj) = gw.spec.listeners.get(idx).and_then(|v| v.as_object()) {
+                if validate_listener_certificates(client, gw_ns, "Gateway", obj, grant_index)
+                    .await
+                    .is_some()
+                {
+                    valid = false;
+                }
+            } else {
+                valid = false;
+            }
+
+            let spec = match listener_frontend_validation(gw_tls, listener.port) {
+                Some(s) if valid => s,
+                _ => {
+                    if !valid {
+                        listener.programmed = false;
+                    }
+                    continue;
+                }
+            };
+
+            let mut bundle = String::new();
+            for r in &spec.ca_certificate_refs {
+                if r.kind.as_ref() != "ConfigMap" || !r.group.as_ref().is_empty() {
                     valid = false;
                     break;
                 }
-                let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-                let cm = match cms.get(name.as_ref()).await {
+                let ref_ns = r.namespace.as_deref().unwrap_or(gw_ns);
+                if ref_ns != gw_ns
+                    && !grant_index.is_permitted(
+                        gw_ns,
+                        "gateway.networking.k8s.io",
+                        "Gateway",
+                        ref_ns,
+                        "",
+                        "ConfigMap",
+                        r.name.as_ref(),
+                    )
+                {
+                    valid = false;
+                    break;
+                }
+                let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ref_ns);
+                let cm = match cms.get(r.name.as_ref()).await {
                     Ok(c) => c,
                     Err(_) => {
                         valid = false;
@@ -365,12 +507,14 @@ pub async fn load_gateway_frontend_validations(
                     bundle.push('\n');
                 }
             }
+
             if !valid {
+                listener.programmed = false;
                 continue;
             }
             listener.frontend_validation = Some(FrontendValidation {
                 ca_bundle_pem: Arc::from(bundle),
-                allow_insecure_fallback: spec.no_default_validation,
+                allow_insecure_fallback: spec.allow_insecure_fallback,
             });
         }
     }
@@ -1201,6 +1345,7 @@ pub(crate) fn compute_gateway_conditions(
     gateway_class: Option<&GatewayClass>,
     address_validation: &AddressValidation,
     backend_tls_error: Option<CertValidation>,
+    insecure_frontend_mode: bool,
     observed_generation: i64,
 ) -> Vec<StatusCondition> {
     let mut conditions = Vec::new();
@@ -1304,6 +1449,16 @@ pub(crate) fn compute_gateway_conditions(
         }
     };
     conditions.push(resolved_refs);
+
+    if insecure_frontend_mode {
+        conditions.push(StatusCondition {
+            condition_type: ConditionType::InsecureFrontendValidationMode,
+            status: ConditionStatus::True,
+            reason: "ConfigurationChanged".into(),
+            message: "Frontend validation mode is AllowInsecureFallback".into(),
+            observed_generation,
+        });
+    }
 
     conditions
 }
@@ -1418,13 +1573,18 @@ pub async fn reconcile_gateway(
     let requested_addresses = parse_gateway_addresses(&gw);
     let address_validation = validate_gateway_addresses(&requested_addresses);
     let backend_tls_error = validate_gateway_backend_tls(&ctx.client, &gw, &grant_index).await;
+    let insecure_frontend_mode = gateway_insecure_frontend_mode(&gw);
     let conditions = compute_gateway_conditions(
         &gw,
         gc.as_ref(),
         &address_validation,
         backend_tls_error,
+        insecure_frontend_mode,
         observed_generation,
     );
+    let programmed_true = conditions.iter().any(|c| {
+        c.condition_type == ConditionType::Programmed && c.status == ConditionStatus::True
+    });
     let _gateway_state = build_gateway_state(&gw);
 
     if ctx.is_leader.load(Ordering::Relaxed) {
@@ -1455,7 +1615,14 @@ pub async fn reconcile_gateway(
             let err =
                 validate_listener_certificates(&ctx.client, &ns, "Gateway", obj, &grant_index)
                     .await
-                    .or(validate_listener_frontend_validation(&ctx.client, &ns, obj, gw_tls).await);
+                    .or(validate_listener_frontend_validation(
+                        &ctx.client,
+                        &ns,
+                        obj,
+                        gw_tls,
+                        &grant_index,
+                    )
+                    .await);
             cert_errors.push(err);
         } else {
             cert_errors.push(None);
@@ -1505,6 +1672,15 @@ pub async fn reconcile_gateway(
         );
 
     if ctx.is_leader.load(Ordering::Relaxed) {
+        if programmed_true {
+            if let Some(l4_swap) = crate::l4::current::get() {
+                let l4_config = l4_swap.load();
+                if !gateway_l4_ready(&gw, &l4_config, &cert_errors) {
+                    return Ok(Action::requeue(Duration::from_millis(100)));
+                }
+            }
+        }
+
         let k8s_conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> =
             conditions.iter().map(to_k8s_condition).collect();
         let feature_set: std::collections::HashSet<String> =
@@ -1561,6 +1737,7 @@ pub async fn reconcile_gateway(
         }
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1595,6 +1772,8 @@ pub fn run_gateway_controller(
 mod tests {
     use super::*;
     use crate::gateway::api::gatewayclass::GatewayClassSpec;
+    use crate::gateway::model::{GrantSubject, ReferenceGrantState};
+    use crate::ir::compile::{CompiledFrontendValidation, CompiledL4Config, CompiledListener};
 
     fn sample_gw(gateway_class_name: &str) -> Gateway {
         let yaml = format!(
@@ -1651,7 +1830,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, false, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1664,7 +1843,7 @@ mod tests {
     fn accepted_false_when_gatewayclass_missing() {
         let gw = sample_gw("missing-gc");
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, None, &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, None, &validation, None, false, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1678,7 +1857,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc("other/controller");
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, false, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1692,7 +1871,7 @@ mod tests {
         let gw = sample_gw("test-gc");
         let gc = sample_gc(CONTROLLER_NAME);
         let validation = AddressValidation::default();
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, false, 1);
         let programmed = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Programmed)
@@ -1974,7 +2153,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, false, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -1999,7 +2178,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, 1);
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, false, 1);
         let accepted = conds
             .iter()
             .find(|c| c.condition_type == ConditionType::Accepted)
@@ -2644,19 +2823,19 @@ mod tests {
                 {"group": "", "kind": "ConfigMap", "name": "ca-1"},
                 {"group": "", "kind": "ConfigMap", "name": "ca-2"}
             ],
-            "noDefaultValidation": true
+            "mode": "AllowInsecureFallback"
         })
         .as_object()
         .unwrap()
         .clone();
         let spec = parse_frontend_validation_obj(&obj).unwrap();
         assert_eq!(spec.ca_certificate_refs.len(), 2);
-        assert_eq!(spec.ca_certificate_refs[0].1.as_ref(), "ca-1");
-        assert!(spec.no_default_validation);
+        assert_eq!(spec.ca_certificate_refs[0].name.as_ref(), "ca-1");
+        assert!(spec.allow_insecure_fallback);
     }
 
     #[test]
-    fn parse_frontend_validation_obj_rejects_non_configmap_kind() {
+    fn parse_frontend_validation_obj_preserves_non_configmap_kind() {
         let obj = serde_json::json!({
             "caCertificateRefs": [
                 {"group": "", "kind": "Secret", "name": "ca-1"}
@@ -2665,50 +2844,76 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        assert!(parse_frontend_validation_obj(&obj).is_none());
+        let spec = parse_frontend_validation_obj(&obj).unwrap();
+        assert_eq!(spec.ca_certificate_refs[0].kind.as_ref(), "Secret");
     }
 
     #[test]
     fn listener_frontend_validation_default_applies_to_listener() {
         let tls = serde_json::json!({
-            "default": {
-                "frontendValidation": {
-                    "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}],
-                    "noDefaultValidation": false
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}],
+                        "mode": "AllowValidOnly"
+                    }
                 }
             }
         });
         let spec = listener_frontend_validation(Some(&tls), 443).unwrap();
-        assert_eq!(spec.ca_certificate_refs[0].1.as_ref(), "ca");
-        assert!(!spec.no_default_validation);
+        assert_eq!(spec.ca_certificate_refs[0].name.as_ref(), "ca");
+        assert!(!spec.allow_insecure_fallback);
     }
 
     #[test]
     fn listener_frontend_validation_per_port_overrides_default() {
         let tls = serde_json::json!({
-            "default": {
-                "frontendValidation": {
-                    "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "default-ca"}]
-                }
-            },
-            "perPort": [
-                {
-                    "port": 8443,
-                    "frontendValidation": {
-                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "port-ca"}]
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "default-ca"}]
                     }
-                }
-            ]
+                },
+                "perPort": [
+                    {
+                        "port": 8443,
+                        "tls": {
+                            "validation": {
+                                "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "port-ca"}]
+                            }
+                        }
+                    }
+                ]
+            }
         });
         let default_spec = listener_frontend_validation(Some(&tls), 443).unwrap();
-        assert_eq!(default_spec.ca_certificate_refs[0].1.as_ref(), "default-ca");
+        assert_eq!(
+            default_spec.ca_certificate_refs[0].name.as_ref(),
+            "default-ca"
+        );
         let port_spec = listener_frontend_validation(Some(&tls), 8443).unwrap();
-        assert_eq!(port_spec.ca_certificate_refs[0].1.as_ref(), "port-ca");
+        assert_eq!(port_spec.ca_certificate_refs[0].name.as_ref(), "port-ca");
     }
 
     #[test]
     fn listener_frontend_validation_returns_none_without_tls() {
         assert!(listener_frontend_validation(None, 443).is_none());
+    }
+
+    #[test]
+    fn listener_frontend_validation_insecure_mode() {
+        let tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}],
+                        "mode": "AllowInsecureFallback"
+                    }
+                }
+            }
+        });
+        let spec = listener_frontend_validation(Some(&tls), 443).unwrap();
+        assert!(spec.allow_insecure_fallback);
     }
 
     #[test]
@@ -2802,5 +3007,2260 @@ mod tests {
             .unwrap();
         assert_eq!(accepted["status"].as_str(), Some("False"));
         assert_eq!(accepted["reason"].as_str(), Some("NoValidCACertificate"));
+    }
+
+    #[test]
+    fn build_listener_status_maps_invalid_ca_kind_to_accepted_no_valid_ca() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let features: std::collections::HashSet<String> =
+            supported_features().into_iter().collect();
+        let err = Some(CertValidation {
+            reason: "InvalidCACertificateKind",
+            message: "Frontend CA certificate reference must be a core ConfigMap",
+        });
+        let statuses = build_listener_status(&gw, None, 1, &[err], &[0], &features);
+        let resolved = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("ResolvedRefs"))
+            .unwrap();
+        assert_eq!(resolved["status"].as_str(), Some("False"));
+        assert_eq!(
+            resolved["reason"].as_str(),
+            Some("InvalidCACertificateKind")
+        );
+        let accepted = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("Accepted"))
+            .unwrap();
+        assert_eq!(accepted["status"].as_str(), Some("False"));
+        assert_eq!(accepted["reason"].as_str(), Some("NoValidCACertificate"));
+    }
+
+    #[test]
+    fn build_listener_status_maps_ref_not_permitted_to_accepted_no_valid_ca() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let features: std::collections::HashSet<String> =
+            supported_features().into_iter().collect();
+        let err = Some(CertValidation {
+            reason: "RefNotPermitted",
+            message: "Frontend CA certificate reference is not permitted by ReferenceGrant",
+        });
+        let statuses = build_listener_status(&gw, None, 1, &[err], &[0], &features);
+        let resolved = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("ResolvedRefs"))
+            .unwrap();
+        assert_eq!(resolved["status"].as_str(), Some("False"));
+        assert_eq!(resolved["reason"].as_str(), Some("RefNotPermitted"));
+        let accepted = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"].as_str() == Some("Accepted"))
+            .unwrap();
+        assert_eq!(accepted["status"].as_str(), Some("False"));
+        assert_eq!(accepted["reason"].as_str(), Some("NoValidCACertificate"));
+    }
+
+    #[test]
+    fn gateway_insecure_frontend_mode_detects_allow_insecure_fallback() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      mode: AllowInsecureFallback
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        assert!(gateway_insecure_frontend_mode(&gw));
+    }
+
+    #[test]
+    fn gateway_insecure_frontend_mode_false_for_allow_valid_only() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        assert!(!gateway_insecure_frontend_mode(&gw));
+    }
+
+    #[test]
+    fn compute_gateway_conditions_adds_insecure_frontend_mode() {
+        let gw = sample_gw("test-gc");
+        let gc = sample_gc(CONTROLLER_NAME);
+        let validation = AddressValidation::default();
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, None, true, 1);
+        let cond = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::InsecureFrontendValidationMode)
+            .unwrap();
+        assert_eq!(cond.status, ConditionStatus::True);
+        assert_eq!(cond.reason, "ConfigurationChanged");
+    }
+
+    const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBijCCATGgAwIBAgIUae+5bMkQvXZI8kjz4yoGasBrilYwCgYIKoZIzj0EAwIw
+GzEZMBcGA1UEAwwQdGVzdC5leGFtcGxlLmNvbTAeFw0yNjA2MTMxMDExMTJaFw0y
+NzA2MTMxMDExMTJaMBsxGTAXBgNVBAMMEHRlc3QuZXhhbXBsZS5jb20wWTATBgcq
+hkjOPQIBBggqhkjOPQMBBwNCAASnTjZLqwGQj3b8xkyDFQe38SBzfsyxNUEy5fzO
+54cks0X7K9JIWJLigltzP4Jh5OwYUSD0UrKXSukj/LRKkL5Eo1MwUTAdBgNVHQ4E
+FgQUyoVck0knQWBZB4na42ZOz3Ke/ykwHwYDVR0jBBgwFoAUyoVck0knQWBZB4na
+42ZOz3Ke/ykwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiAFHJQe
+Ltr83KS7tC2NbWRybv6NdUG5fuzrS61t06Yi6wIgOkoD6+KlR4UOP4dFIojV5uz4
+huKv4WWxIg9T0tCH/yU=
+-----END CERTIFICATE-----
+"#;
+
+    const CERT_B64: &str = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJpakNDQVRHZ0F3SUJBZ0lVYWUrNWJNa1F2WFpJOGtqejR5b0dhc0JyaWxZd0NnWUlLb1pJemowRUF3SXcKR3pFWk1CY0dBMVVFQXd3UWRHVnpkQzVsZUdGdGNHeGxMbU52YlRBZUZ3MHlOakEyTVRNeE1ERXhNVEphRncweQpOekEyTVRNeE1ERXhNVEphTUJzeEdUQVhCZ05WQkFNTUVIUmxjM1F1WlhoaGJYQnNaUzVqYjIwd1dUQVRCZ2NxCmhrak9QUUlCQmdncWhrak9QUU1CQndOQ0FBU25UalpMcXdHUWozYjh4a3lERlFlMzhTQnpmc3l4TlVFeTVmek8KNTRja3MwWDdLOUpJV0pMaWdsdHpQNEpoNU93WVVTRDBVcktYU3Vrai9MUktrTDVFbzFNd1VUQWRCZ05WSFE0RQpGZ1FVeW9WY2swa25RV0JaQjRuYTQyWk96M0tlL3lrd0h3WURWUjBqQkJnd0ZvQVV5b1ZjazBrblFXQlpCNG5hCjQyWk96M0tlL3lrd0R3WURWUjBUQVFIL0JBVXdBd0VCL3pBS0JnZ3Foa2pPUFFRREFnTkhBREJFQWlBRkhKUWUKTHRyODNLUzd0QzJOYldSeWJ2Nk5kVUc1ZnV6clM2MXQwNllpNndJZ09rb0Q2K0tsUjRVT1A0ZEZJb2pWNXV6NApodUt2NFdXeElnOVQwdENIL3lVPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==";
+    const KEY_B64: &str = "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZzkvT2h2a2E0NFdqYXlXRHAKeHozYnVwekphNWpvWmxyL081NXF1QTI4VUpXaFJBTkNBQVNuVGpaTHF3R1FqM2I4eGt5REZRZTM4U0J6ZnN5eApOVUV5NWZ6TzU0Y2tzMFg3SzlKSVdKTGlnbHR6UDRKaDVPd1lVU0QwVXJLWFN1a2ovTFJLa0w1RQotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==";
+
+    fn fake_kube_client(response_body: String) -> Client {
+        Client::new(
+            tower::service_fn(move |_req| {
+                let body = response_body.clone();
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .body(kube::client::Body::from(bytes::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        )
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_non_configmap_ref() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "example.com", "kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let client = fake_kube_client(String::new());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateKind"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_returns_none_for_http() {
+        let listener = serde_json::json!({
+            "name": "http",
+            "protocol": "HTTP",
+            "port": 80
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let client = fake_kube_client(String::new());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_missing_configmap() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "missing"}]
+                    }
+                }
+            }
+        });
+        let client = Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_accepts_valid_configmap() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "default"},
+            "data": {"ca.crt": TEST_CERT_PEM}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_marks_listener_unprogrammed_on_invalid_ca() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: missing-ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+                  tls:
+                    certificateRefs:
+                    - kind: Secret
+                      name: cert
+        "#,
+        )
+        .unwrap();
+
+        let mut state = GatewayState {
+            namespace: Arc::from("default"),
+            name: Arc::from("gw"),
+            generation: 1,
+            listeners: vec![ListenerState {
+                name: Arc::from("https"),
+                protocol: Arc::from("HTTPS"),
+                port: 443,
+                hostname: None,
+                tls_mode: Some(TlsMode::Terminate),
+                frontend_validation: None,
+                programmed: true,
+            }],
+            backend_client_cert_id: None,
+        };
+
+        let client = Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &grant_index,
+        )
+        .await;
+        assert!(!state.listeners[0].programmed);
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_rejects_invalid_kind() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: ConfigMap
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = fake_kube_client(String::new());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_gateway_backend_tls(&client, &gw, &grant_index).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidClientCertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_rejects_missing_secret() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: missing
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = Client::new(
+            tower::service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_gateway_backend_tls(&client, &gw, &grant_index).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidClientCertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_accepts_valid_secret() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "cert", "namespace": "default"},
+            "data": {"tls.crt": CERT_B64, "tls.key": KEY_B64}
+        });
+        let client = fake_kube_client(serde_json::to_string(&secret).unwrap());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_gateway_backend_tls(&client, &gw, &grant_index).await;
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn gateway_backend_client_cert_ref_extracts_secret() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let (ns, name, kind) = gateway_backend_client_cert_ref(&gw).unwrap();
+        assert_eq!(ns.as_ref(), "default");
+        assert_eq!(name.as_ref(), "cert");
+        assert_eq!(kind.as_ref(), "Secret");
+    }
+
+    // Additional coverage tests for error branches, boundary cases, and
+    // functions that currently lack coverage.
+
+    #[test]
+    fn parse_tls_mode_unknown_protocol_returns_none() {
+        let obj = serde_json::Map::new();
+        assert_eq!(parse_tls_mode(&obj, "TCP"), None);
+        assert_eq!(parse_tls_mode(&obj, "UDP"), None);
+    }
+
+    #[test]
+    fn parse_tls_mode_tls_explicit_modes() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("tls".into(), serde_json::json!({"mode": "Terminate"}));
+        assert_eq!(parse_tls_mode(&obj, "TLS"), Some(TlsMode::Terminate));
+        obj.insert("tls".into(), serde_json::json!({"mode": "Passthrough"}));
+        assert_eq!(parse_tls_mode(&obj, "TLS"), Some(TlsMode::Passthrough));
+    }
+
+    #[test]
+    fn build_listener_model_skips_non_object_listener() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - http
+                - name: real
+                  protocol: HTTP
+                  port: 80
+        "#,
+        )
+        .unwrap();
+        let listeners = build_listener_model(&gw);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].name.as_ref(), "real");
+    }
+
+    #[test]
+    fn parse_allowed_routes_empty_kind_skipped() {
+        let obj = serde_json::json!({
+            "allowedRoutes": {
+                "kinds": [
+                    {"group": "gateway.networking.k8s.io", "kind": ""},
+                    {"kind": "HTTPRoute"}
+                ]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let allowed = parse_allowed_routes(&obj);
+        assert_eq!(allowed.kinds.len(), 1);
+        assert_eq!(allowed.kinds[0].kind.as_ref(), "HTTPRoute");
+    }
+
+    #[test]
+    fn parse_allowed_routes_unknown_from_defaults_same() {
+        let obj = serde_json::json!({
+            "allowedRoutes": {
+                "namespaces": {"from": "Unknown"}
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let allowed = parse_allowed_routes(&obj);
+        assert_eq!(allowed.namespaces.from, NamespaceFrom::Same);
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_missing_refs_returns_none() {
+        assert!(parse_frontend_validation_obj(&serde_json::Map::new()).is_none());
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_non_object_ref_returns_none() {
+        let obj = serde_json::json!({"caCertificateRefs": ["not-object"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(parse_frontend_validation_obj(&obj).is_none());
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_empty_name_returns_none() {
+        let obj = serde_json::json!({"caCertificateRefs": [{"kind": "ConfigMap", "name": ""}]})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(parse_frontend_validation_obj(&obj).is_none());
+    }
+
+    #[test]
+    fn parse_frontend_validation_obj_default_mode_false() {
+        let obj = serde_json::json!({"caCertificateRefs": [{"kind": "ConfigMap", "name": "ca"}]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let spec = parse_frontend_validation_obj(&obj).unwrap();
+        assert!(!spec.allow_insecure_fallback);
+    }
+
+    #[test]
+    fn listener_frontend_validation_port_mismatch_uses_default() {
+        let tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"kind": "ConfigMap", "name": "default-ca"}]
+                    }
+                },
+                "perPort": [
+                    {
+                        "port": 9999,
+                        "tls": {
+                            "validation": {
+                                "caCertificateRefs": [{"kind": "ConfigMap", "name": "port-ca"}]
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+        let spec = listener_frontend_validation(Some(&tls), 443).unwrap();
+        assert_eq!(spec.ca_certificate_refs[0].name.as_ref(), "default-ca");
+    }
+
+    #[test]
+    fn listener_frontend_validation_per_port_missing_validation_returns_none() {
+        let tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"kind": "ConfigMap", "name": "default-ca"}]
+                    }
+                },
+                "perPort": [{"port": 8443, "tls": {}}]
+            }
+        });
+        assert!(listener_frontend_validation(Some(&tls), 8443).is_none());
+    }
+
+    #[test]
+    fn listener_frontend_validation_tls_not_object_returns_none() {
+        assert!(
+            listener_frontend_validation(Some(&serde_json::json!("not-object")), 443).is_none()
+        );
+        assert!(listener_frontend_validation(
+            Some(&serde_json::json!({"frontend": "not-object"})),
+            443
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn gateway_insecure_frontend_mode_ignores_non_object_listener() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      mode: AllowInsecureFallback
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - not-an-object
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        assert!(gateway_insecure_frontend_mode(&gw));
+    }
+
+    #[test]
+    fn gateway_insecure_frontend_mode_ignores_non_tls() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      mode: AllowInsecureFallback
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 80
+        "#,
+        )
+        .unwrap();
+        assert!(!gateway_insecure_frontend_mode(&gw));
+    }
+
+    fn cross_ns_grant(to_ns: &str, to_kind: &str, to_name: Option<&str>) -> ReferenceGrantState {
+        ReferenceGrantState {
+            namespace: Arc::from(to_ns),
+            name: Arc::from("grant"),
+            generation: 1,
+            from: vec![GrantSubject {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: Some(Arc::from("default")),
+                name: None,
+            }],
+            to: vec![GrantSubject {
+                group: Arc::from(""),
+                kind: Arc::from(to_kind),
+                namespace: None,
+                name: to_name.map(Arc::from),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_non_configmap_kind() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "Secret", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let client = fake_kube_client(String::new());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateKind"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_cross_namespace_without_grant() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{
+                            "group": "",
+                            "kind": "ConfigMap",
+                            "name": "ca",
+                            "namespace": "other"
+                        }]
+                    }
+                }
+            }
+        });
+        let client = fake_kube_client(String::new());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("RefNotPermitted"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_accepts_cross_namespace_with_grant() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{
+                            "group": "",
+                            "kind": "ConfigMap",
+                            "name": "ca",
+                            "namespace": "other"
+                        }]
+                    }
+                }
+            }
+        });
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "other"},
+            "data": {"ca.crt": TEST_CERT_PEM}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        let grant_index = GrantIndex::new(vec![cross_ns_grant("other", "ConfigMap", Some("ca"))]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_missing_configmap_data() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "default"}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_missing_ca_crt() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "default"},
+            "data": {}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_listener_frontend_validation_rejects_invalid_pem() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let gw_tls = serde_json::json!({
+            "frontend": {
+                "default": {
+                    "validation": {
+                        "caCertificateRefs": [{"group": "", "kind": "ConfigMap", "name": "ca"}]
+                    }
+                }
+            }
+        });
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "default"},
+            "data": {"ca.crt": "not a pem"}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        let grant_index = GrantIndex::new(vec![]);
+        let err = validate_listener_frontend_validation(
+            &client,
+            "default",
+            &listener,
+            Some(&gw_tls),
+            &grant_index,
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCACertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_loads_valid_bundle() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let mut state = build_gateway_state(&gw);
+        let cm = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "ca", "namespace": "default"},
+            "data": {"ca.crt": TEST_CERT_PEM}
+        });
+        let client = fake_kube_client(serde_json::to_string(&cm).unwrap());
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(state.listeners[0].programmed);
+        let fv = state.listeners[0].frontend_validation.as_ref().unwrap();
+        assert!(!fv.ca_bundle_pem.is_empty());
+        assert!(fv.ca_bundle_pem.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_skips_http_listener() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 80
+        "#,
+        )
+        .unwrap();
+        let mut state = build_gateway_state(&gw);
+        let client = fake_kube_client(String::new());
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(state.listeners[0].programmed);
+        assert!(state.listeners[0].frontend_validation.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_marks_invalid_kind_unprogrammed() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: Secret
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let mut state = build_gateway_state(&gw);
+        let client = fake_kube_client(String::new());
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(!state.listeners[0].programmed);
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_marks_cross_namespace_unprogrammed() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+                        namespace: other
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let mut state = build_gateway_state(&gw);
+        let client = fake_kube_client(String::new());
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(!state.listeners[0].programmed);
+    }
+
+    #[tokio::test]
+    async fn load_gateway_frontend_validations_marks_non_object_listener_unprogrammed() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - not-an-object
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let mut state = build_gateway_state(&gw);
+        let client = fake_kube_client(String::new());
+        load_gateway_frontend_validations(
+            &client,
+            &[gw],
+            std::slice::from_mut(&mut state),
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(!state.listeners[0].programmed);
+    }
+
+    #[test]
+    fn listener_supported_kinds_returns_expected_kinds() {
+        let empty = empty_features();
+        assert_eq!(
+            listener_supported_kinds("TCP", None, &empty)[0]["kind"],
+            "TCPRoute"
+        );
+        assert_eq!(
+            listener_supported_kinds("UDP", None, &empty)[0]["kind"],
+            "UDPRoute"
+        );
+        assert_eq!(
+            listener_supported_kinds("TLS", None, &empty)[0]["kind"],
+            "TLSRoute"
+        );
+        let http = listener_supported_kinds("HTTP", None, &empty);
+        assert!(http.iter().any(|k| k["kind"] == "HTTPRoute"));
+        assert!(http.iter().any(|k| k["kind"] == "GRPCRoute"));
+    }
+
+    #[test]
+    fn validate_listener_kinds_empty_array_defaults() {
+        let obj = serde_json::json!({"protocol": "HTTP", "allowedRoutes": {"kinds": []}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let (kinds, status, reason, _) = validate_listener_kinds(&obj);
+        assert_eq!(kinds[0]["kind"], "HTTPRoute");
+        assert_eq!(status, "True");
+        assert_eq!(reason, "ResolvedRefs");
+    }
+
+    #[test]
+    fn validate_listener_kinds_invalid_group() {
+        let obj = serde_json::json!({
+            "protocol": "HTTP",
+            "allowedRoutes": {
+                "kinds": [{"group": "example.com", "kind": "HTTPRoute"}]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let (kinds, status, reason, _) = validate_listener_kinds(&obj);
+        assert!(kinds.is_empty());
+        assert_eq!(status, "False");
+        assert_eq!(reason, "InvalidRouteKinds");
+    }
+
+    #[test]
+    fn validate_listener_kinds_tcp_valid() {
+        let obj = serde_json::json!({
+            "protocol": "TCP",
+            "allowedRoutes": {"kinds": [{"kind": "TCPRoute"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let (kinds, status, _, _) = validate_listener_kinds(&obj);
+        assert_eq!(kinds[0]["kind"], "TCPRoute");
+        assert_eq!(status, "True");
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_no_tls_returns_none() {
+        let listener = serde_json::json!({"name": "http", "protocol": "HTTP", "port": 80})
+            .as_object()
+            .unwrap()
+            .clone();
+        let client = fake_kube_client(String::new());
+        let err = validate_listener_certificates(
+            &client,
+            "default",
+            "Gateway",
+            &listener,
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_empty_certs_returns_none() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": []}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let client = fake_kube_client(String::new());
+        let err = validate_listener_certificates(
+            &client,
+            "default",
+            "Gateway",
+            &listener,
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_accepts_cross_namespace_with_grant() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {
+                "certificateRefs": [{"kind": "Secret", "name": "cert", "namespace": "other"}]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "cert", "namespace": "other"},
+            "data": {"tls.crt": CERT_B64, "tls.key": KEY_B64}
+        });
+        let client = fake_kube_client(serde_json::to_string(&secret).unwrap());
+        let grant_index = GrantIndex::new(vec![cross_ns_grant("other", "Secret", Some("cert"))]);
+        let err =
+            validate_listener_certificates(&client, "default", "Gateway", &listener, &grant_index)
+                .await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_listener_certificates_rejects_invalid_secret_data() {
+        let listener = serde_json::json!({
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "tls": {"certificateRefs": [{"kind": "Secret", "name": "cert"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "cert", "namespace": "default"},
+            "data": {"tls.crt": "bm90", "tls.key": "bm90"}
+        });
+        let client = fake_kube_client(serde_json::to_string(&secret).unwrap());
+        let err = validate_listener_certificates(
+            &client,
+            "default",
+            "Gateway",
+            &listener,
+            &GrantIndex::new(vec![]),
+        )
+        .await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidCertificateRef"));
+    }
+
+    #[test]
+    fn gateway_backend_client_cert_ref_rejects_non_secret() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: ConfigMap
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        assert!(gateway_backend_client_cert_ref(&gw).is_none());
+    }
+
+    #[test]
+    fn gateway_backend_client_cert_ref_rejects_empty_name() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: ""
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        assert!(gateway_backend_client_cert_ref(&gw).is_none());
+    }
+
+    #[test]
+    fn gateway_backend_client_cert_ref_uses_default_namespace() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let (ns, name, kind) = gateway_backend_client_cert_ref(&gw).unwrap();
+        assert_eq!(ns.as_ref(), "default");
+        assert_eq!(name.as_ref(), "cert");
+        assert_eq!(kind.as_ref(), "Secret");
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_no_tls_returns_none() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = fake_kube_client(String::new());
+        let err = validate_gateway_backend_tls(&client, &gw, &GrantIndex::new(vec![])).await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_no_backend_returns_none() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls: {}
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = fake_kube_client(String::new());
+        let err = validate_gateway_backend_tls(&client, &gw, &GrantIndex::new(vec![])).await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_no_cert_ref_returns_none() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend: {}
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = fake_kube_client(String::new());
+        let err = validate_gateway_backend_tls(&client, &gw, &GrantIndex::new(vec![])).await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_rejects_empty_name() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: ""
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let client = fake_kube_client(String::new());
+        let err = validate_gateway_backend_tls(&client, &gw, &GrantIndex::new(vec![])).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidClientCertificateRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_accepts_cross_namespace_with_grant() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: cert
+                    namespace: other
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "cert", "namespace": "other"},
+            "data": {"tls.crt": CERT_B64, "tls.key": KEY_B64}
+        });
+        let client = fake_kube_client(serde_json::to_string(&secret).unwrap());
+        let grant_index = GrantIndex::new(vec![cross_ns_grant("other", "Secret", Some("cert"))]);
+        let err = validate_gateway_backend_tls(&client, &gw, &grant_index).await;
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_gateway_backend_tls_rejects_invalid_secret_data() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                backend:
+                  clientCertificateRef:
+                    kind: Secret
+                    name: cert
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "cert", "namespace": "default"},
+            "data": {"tls.crt": "bm90", "tls.key": "bm90"}
+        });
+        let client = fake_kube_client(serde_json::to_string(&secret).unwrap());
+        let err = validate_gateway_backend_tls(&client, &gw, &GrantIndex::new(vec![])).await;
+        assert_eq!(err.map(|e| e.reason), Some("InvalidClientCertificateRef"));
+    }
+
+    #[test]
+    fn parse_gateway_addresses_filters_and_defaults() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              addresses:
+                - type: IPAddress
+                  value: 10.0.0.1
+                - not-an-object
+                - value: 10.0.0.2
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        let addrs = parse_gateway_addresses(&gw);
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0].type_, "IPAddress");
+        assert_eq!(addrs[0].value.as_deref(), Some("10.0.0.1"));
+        assert_eq!(addrs[1].type_, "IPAddress");
+        assert_eq!(addrs[1].value.as_deref(), Some("10.0.0.2"));
+    }
+
+    #[test]
+    fn parse_gateway_addresses_missing_returns_empty() {
+        let gw = sample_gw("test-gc");
+        assert!(parse_gateway_addresses(&gw).is_empty());
+    }
+
+    #[test]
+    fn compute_gateway_conditions_resolved_refs_false_on_backend_tls_error() {
+        let gw = sample_gw("test-gc");
+        let gc = sample_gc(CONTROLLER_NAME);
+        let validation = AddressValidation::default();
+        let err = CertValidation {
+            reason: "InvalidClientCertificateRef",
+            message: "bad",
+        };
+        let conds = compute_gateway_conditions(&gw, Some(&gc), &validation, Some(err), false, 1);
+        let resolved = conds
+            .iter()
+            .find(|c| c.condition_type == ConditionType::ResolvedRefs)
+            .unwrap();
+        assert_eq!(resolved.status, ConditionStatus::False);
+        assert_eq!(resolved.reason, "InvalidClientCertificateRef");
+    }
+
+    #[test]
+    fn mixed_tls_conflict_names_detects_and_ignores() {
+        let listeners = vec![
+            serde_json::json!({"name": "a", "protocol": "TLS", "port": 8443, "tls": {"mode": "Terminate"}}),
+            serde_json::json!({"name": "b", "protocol": "TLS", "port": 8443, "tls": {"mode": "Passthrough"}}),
+            serde_json::json!({"name": "c", "protocol": "TLS", "port": 8443, "tls": {"mode": "Terminate"}}),
+            serde_json::json!({"name": "http", "protocol": "HTTP", "port": 80}),
+        ];
+        let conflicts = mixed_tls_conflict_names(&listeners);
+        assert!(conflicts.contains("a"));
+        assert!(conflicts.contains("b"));
+        assert!(conflicts.contains("c"));
+        assert!(!conflicts.contains("http"));
+    }
+
+    #[test]
+    fn build_listener_status_skips_non_object_listener() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - not-an-object
+        "#,
+        )
+        .unwrap();
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn build_listener_status_clears_supported_kinds_on_unsupported_tls() {
+        let gw = tls_gateway_yaml("Terminate", None);
+        let statuses = build_listener_status(&gw, None, 1, &[], &[0], &empty_features());
+        assert_eq!(
+            accepted_reason(&statuses, "tls-a"),
+            Some("UnsupportedValue".to_string())
+        );
+        assert!(statuses[0]["supportedKinds"].as_array().unwrap().is_empty());
+    }
+
+    fn sa_client(status: u16) -> Client {
+        Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let method = req.method().clone();
+                async move {
+                    if method == http::Method::PATCH
+                        && path.contains("/serviceaccounts/sunbeam-gateway-")
+                    {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(status)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    } else {
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(404)
+                                .body(kube::client::Body::empty())
+                                .unwrap(),
+                        )
+                    }
+                }
+            }),
+            "default",
+        )
+    }
+
+    #[tokio::test]
+    async fn reconcile_infrastructure_serviceaccount_with_infrastructure() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              infrastructure:
+                labels:
+                  app: sunbeam
+                annotations:
+                  note: test
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        reconcile_infrastructure_serviceaccount(&gw, &sa_client(200)).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_infrastructure_serviceaccount_with_non_object_infrastructure() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              infrastructure: not-an-object
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        reconcile_infrastructure_serviceaccount(&gw, &sa_client(200)).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_infrastructure_serviceaccount_without_infrastructure() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        reconcile_infrastructure_serviceaccount(&gw, &sa_client(200)).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_infrastructure_serviceaccount_warns_on_patch_error() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners: []
+        "#,
+        )
+        .unwrap();
+        reconcile_infrastructure_serviceaccount(&gw, &sa_client(500)).await;
+    }
+
+    #[tokio::test]
+    async fn count_attached_routes_filters_and_counts_all_kinds() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw-1
+              namespace: default
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 80
+                  hostname: example.com
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+                  hostname: secure.example.com
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+                - name: tcp
+                  protocol: TCP
+                  port: 8080
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+                - name: tls
+                  protocol: TLS
+                  port: 8443
+                  hostname: tls.example.com
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+                - name: http-same
+                  protocol: HTTP
+                  port: 8081
+                  hostname: same.example.com
+                - name: http-kinds
+                  protocol: HTTP
+                  port: 8082
+                  hostname: kinds.example.com
+                  allowedRoutes:
+                    kinds:
+                      - kind: TCPRoute
+                - name: udp
+                  protocol: UDP
+                  port: 9090
+                  allowedRoutes:
+                    namespaces:
+                      from: All
+        "#,
+        )
+        .unwrap();
+
+        let http_route_ok: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-ok
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  sectionName: http
+                  port: 80
+              hostnames:
+                - example.com
+        "#,
+        )
+        .unwrap();
+        let http_route_port_mismatch: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-port
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 9999
+        "#,
+        )
+        .unwrap();
+        let http_route_section_mismatch: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-section
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  sectionName: other
+        "#,
+        )
+        .unwrap();
+        let http_route_wrong_name: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-wrong-name
+              namespace: default
+            spec:
+              parentRefs:
+                - name: other-gw
+        "#,
+        )
+        .unwrap();
+        let http_route_not_gateway: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-not-gw
+              namespace: default
+            spec:
+              parentRefs:
+                - group: example.com
+                  kind: Gateway
+                  name: gw-1
+        "#,
+        )
+        .unwrap();
+        let http_route_other_ns: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-other-ns
+              namespace: other
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 8081
+        "#,
+        )
+        .unwrap();
+        let http_route_kind_not_allowed: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-kind
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 8082
+              hostnames:
+                - kinds.example.com
+        "#,
+        )
+        .unwrap();
+        let http_route_no_hostname: HTTPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: HTTPRoute
+            metadata:
+              name: route-no-hostname
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 80
+              hostnames:
+                - other.com
+        "#,
+        )
+        .unwrap();
+        let http_routes = vec![
+            http_route_ok,
+            http_route_port_mismatch,
+            http_route_section_mismatch,
+            http_route_wrong_name,
+            http_route_not_gateway,
+            http_route_other_ns,
+            http_route_kind_not_allowed,
+            http_route_no_hostname,
+        ];
+
+        let tcp_route: TCPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1alpha2
+            kind: TCPRoute
+            metadata:
+              name: tcp-route
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 8080
+              rules:
+                - backendRefs:
+                    - name: svc
+                      port: 8080
+        "#,
+        )
+        .unwrap();
+        let udp_route: UDPRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1alpha2
+            kind: UDPRoute
+            metadata:
+              name: udp-route
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 9090
+              rules:
+                - backendRefs:
+                    - name: svc
+                      port: 53
+        "#,
+        )
+        .unwrap();
+        let tls_route: TLSRoute = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1alpha2
+            kind: TLSRoute
+            metadata:
+              name: tls-route
+              namespace: default
+            spec:
+              parentRefs:
+                - name: gw-1
+                  port: 8443
+              hostnames:
+                - tls.example.com
+              rules:
+                - backendRefs:
+                    - name: svc
+                      port: 443
+        "#,
+        )
+        .unwrap();
+
+        let http_body = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRouteList",
+            "metadata": {},
+            "items": serde_json::to_value(&http_routes).unwrap()
+        })
+        .to_string();
+        let tcp_body = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "TCPRouteList",
+            "metadata": {},
+            "items": [serde_json::to_value(&tcp_route).unwrap()]
+        })
+        .to_string();
+        let udp_body = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "UDPRouteList",
+            "metadata": {},
+            "items": [serde_json::to_value(&udp_route).unwrap()]
+        })
+        .to_string();
+        let tls_body = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1alpha2",
+            "kind": "TLSRouteList",
+            "metadata": {},
+            "items": [serde_json::to_value(&tls_route).unwrap()]
+        })
+        .to_string();
+        let empty_body =
+            serde_json::json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": []})
+                .to_string();
+
+        let client = Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let http_body = http_body.clone();
+                let tcp_body = tcp_body.clone();
+                let udp_body = udp_body.clone();
+                let tls_body = tls_body.clone();
+                let empty_body = empty_body.clone();
+                async move {
+                    let body = if path.contains("/httproutes") {
+                        http_body
+                    } else if path.contains("/tcproutes") {
+                        tcp_body
+                    } else if path.contains("/udproutes") {
+                        udp_body
+                    } else if path.contains("/tlsroutes") {
+                        tls_body
+                    } else {
+                        empty_body
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(bytes::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+        let listeners = listener_matches(&gw);
+        let namespace_labels = HashMap::<String, HashMap<String, String>>::new();
+        let counts =
+            count_attached_routes(&client, "default", "gw-1", &listeners, &namespace_labels).await;
+        assert_eq!(counts, vec![1, 0, 1, 1, 0, 0, 1]);
+    }
+
+    #[test]
+    fn gateway_l4_ready_true_when_validation_matches() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let l4 = CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "0.0.0.0:443#Https".into(),
+                bind_addr: "0.0.0.0:443".into(),
+                protocol: crate::ir::Protocol::Https,
+                tls: None,
+                redirect_http_to_https: false,
+                frontend_validation: Some(CompiledFrontendValidation {
+                    ca_bundle_pem: TEST_CERT_PEM.into(),
+                    allow_insecure_fallback: false,
+                }),
+            }],
+            ..Default::default()
+        };
+        assert!(gateway_l4_ready(&gw, &l4, &[None]));
+    }
+
+    #[test]
+    fn gateway_l4_ready_false_when_validation_mode_mismatches() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      mode: AllowInsecureFallback
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: ca
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let l4 = CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "0.0.0.0:443#Https".into(),
+                bind_addr: "0.0.0.0:443".into(),
+                protocol: crate::ir::Protocol::Https,
+                tls: None,
+                redirect_http_to_https: false,
+                frontend_validation: Some(CompiledFrontendValidation {
+                    ca_bundle_pem: TEST_CERT_PEM.into(),
+                    allow_insecure_fallback: false,
+                }),
+            }],
+            ..Default::default()
+        };
+        assert!(!gateway_l4_ready(&gw, &l4, &[None]));
+    }
+
+    #[test]
+    fn gateway_l4_ready_skips_listener_with_cert_error() {
+        let gw: Gateway = serde_yaml::from_str(
+            r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              tls:
+                frontend:
+                  default:
+                    validation:
+                      caCertificateRefs:
+                      - kind: ConfigMap
+                        group: ""
+                        name: does-not-exist
+              listeners:
+                - name: https
+                  protocol: HTTPS
+                  port: 443
+        "#,
+        )
+        .unwrap();
+        let l4 = CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "0.0.0.0:443#Https".into(),
+                bind_addr: "0.0.0.0:443".into(),
+                protocol: crate::ir::Protocol::Https,
+                tls: None,
+                redirect_http_to_https: false,
+                frontend_validation: None,
+            }],
+            ..Default::default()
+        };
+        let err = Some(CertValidation {
+            reason: "InvalidCACertificateRef",
+            message: "missing",
+        });
+        assert!(gateway_l4_ready(&gw, &l4, &[err]));
     }
 }

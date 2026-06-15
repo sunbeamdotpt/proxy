@@ -68,6 +68,7 @@ fn to_k8s_condition(c: &StatusCondition) -> Condition {
         super::ConditionType::NoMatchingParent => "NoMatchingParent",
         super::ConditionType::RefNotPermitted => "RefNotPermitted",
         super::ConditionType::UnsupportedFeature => "UnsupportedFeature",
+        super::ConditionType::InsecureFrontendValidationMode => "InsecureFrontendValidationMode",
     };
 
     Condition {
@@ -382,6 +383,10 @@ mod tests {
             (ConditionType::NoMatchingParent, "NoMatchingParent"),
             (ConditionType::RefNotPermitted, "RefNotPermitted"),
             (ConditionType::UnsupportedFeature, "UnsupportedFeature"),
+            (
+                ConditionType::InsecureFrontendValidationMode,
+                "InsecureFrontendValidationMode",
+            ),
         ];
         for (ct, expected) in types {
             let sc = StatusCondition {

@@ -23,6 +23,7 @@ pub enum ConditionType {
     NoMatchingParent,
     RefNotPermitted,
     UnsupportedFeature,
+    InsecureFrontendValidationMode,
 }
 
 /// Condition status values.

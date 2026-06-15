@@ -79,7 +79,7 @@ pub enum TlsMode {
 }
 
 /// Stub for a listener attached to a [`GatewayState`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListenerState {
     pub name: Arc<str>,
     pub protocol: Arc<str>,
@@ -92,6 +92,24 @@ pub struct ListenerState {
     pub tls_mode: Option<TlsMode>,
     /// Optional frontend client-certificate validation configuration.
     pub frontend_validation: Option<FrontendValidation>,
+    /// Whether the listener is healthy enough to receive traffic. A listener
+    /// with unresolved certificate references or broken frontend validation is
+    /// marked unprogrammed so routes do not attach to it.
+    pub programmed: bool,
+}
+
+impl Default for ListenerState {
+    fn default() -> Self {
+        Self {
+            name: Arc::from(""),
+            protocol: Arc::from("HTTP"),
+            port: 80,
+            hostname: None,
+            tls_mode: None,
+            frontend_validation: None,
+            programmed: true,
+        }
+    }
 }
 
 /// Stub for the reconciled state of a single HTTPRoute / TLSRoute /
