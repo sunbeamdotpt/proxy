@@ -1477,38 +1477,14 @@ fn translate_rule_to_ir(
     result
 }
 
-fn build_ir_rule(
-    rule: &HTTPRouteRule,
-    req_match: ir::RequestMatch,
-    rule_idx: usize,
-    client_cert_id: Option<Arc<str>>,
-) -> ir::Rule {
-    let mut request_filters: Vec<ir::RequestFilter> = Vec::new();
-    let mut response_filters: Vec<ir::ResponseFilter> = Vec::new();
-    let mut mirror_backends: Vec<Arc<str>> = Vec::new();
-    let mut mirror_fractions: Vec<Option<ir::Fraction>> = Vec::new();
-    let mut redirect: Option<ir::RedirectAction> = None;
-
-    // Gateway API ReplacePrefixMatch uses the matched PathPrefix as the prefix
-    // to replace. The reconciler hardcodes "/" because it lacks access to the
-    // route match at parse time; fix it here using the request match path.
-    let matched_prefix = req_match.path.as_ref().and_then(|p| match p {
-        ir::PathMatch::Prefix(s) => Some(Arc::clone(s)),
-        _ => None,
-    });
-
-    for filter in &rule.filters {
+/// Apply header-modifier filters that are common to HTTP and GRPC routes.
+fn apply_header_filters(
+    filters: &[RouteFilter],
+    request_filters: &mut Vec<ir::RequestFilter>,
+    response_filters: &mut Vec<ir::ResponseFilter>,
+) {
+    for filter in filters {
         match filter {
-            RouteFilter::UrlRewrite { hostname, path } => {
-                if let Some(h) = hostname {
-                    request_filters.push(ir::RequestFilter::RewriteHostname(Arc::clone(h)));
-                }
-                if let Some(path) = path {
-                    request_filters.push(ir::RequestFilter::RewritePath(
-                        ir::PathRewrite::from(path).with_matched_prefix(matched_prefix.as_ref()),
-                    ));
-                }
-            }
             RouteFilter::RequestHeaderSet { name, value } => {
                 request_filters.push(ir::RequestFilter::SetHeader {
                     name: Arc::clone(name),
@@ -1538,6 +1514,45 @@ fn build_ir_rule(
             }
             RouteFilter::ResponseHeaderRemove { name } => {
                 response_filters.push(ir::ResponseFilter::RemoveHeader(Arc::clone(name)));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn build_ir_rule(
+    rule: &HTTPRouteRule,
+    req_match: ir::RequestMatch,
+    rule_idx: usize,
+    client_cert_id: Option<Arc<str>>,
+) -> ir::Rule {
+    let mut request_filters: Vec<ir::RequestFilter> = Vec::new();
+    let mut response_filters: Vec<ir::ResponseFilter> = Vec::new();
+    let mut mirror_backends: Vec<Arc<str>> = Vec::new();
+    let mut mirror_fractions: Vec<Option<ir::Fraction>> = Vec::new();
+    let mut redirect: Option<ir::RedirectAction> = None;
+
+    // Gateway API ReplacePrefixMatch uses the matched PathPrefix as the prefix
+    // to replace. The reconciler hardcodes "/" because it lacks access to the
+    // route match at parse time; fix it here using the request match path.
+    let matched_prefix = req_match.path.as_ref().and_then(|p| match p {
+        ir::PathMatch::Prefix(s) => Some(Arc::clone(s)),
+        _ => None,
+    });
+
+    apply_header_filters(&rule.filters, &mut request_filters, &mut response_filters);
+
+    for filter in &rule.filters {
+        match filter {
+            RouteFilter::UrlRewrite { hostname, path } => {
+                if let Some(h) = hostname {
+                    request_filters.push(ir::RequestFilter::RewriteHostname(Arc::clone(h)));
+                }
+                if let Some(path) = path {
+                    request_filters.push(ir::RequestFilter::RewritePath(
+                        ir::PathRewrite::from(path).with_matched_prefix(matched_prefix.as_ref()),
+                    ));
+                }
             }
             RouteFilter::RequestRedirect {
                 scheme,
@@ -1580,6 +1595,7 @@ fn build_ir_rule(
                     allow_credentials: *allow_credentials,
                 }));
             }
+            _ => {}
         }
     }
 
@@ -1707,41 +1723,7 @@ fn build_ir_rule_from_grpc(
     let mut request_filters: Vec<ir::RequestFilter> = Vec::new();
     let mut response_filters: Vec<ir::ResponseFilter> = Vec::new();
 
-    for filter in &rule.filters {
-        match filter {
-            RouteFilter::RequestHeaderSet { name, value } => {
-                request_filters.push(ir::RequestFilter::SetHeader {
-                    name: Arc::clone(name),
-                    value: Arc::clone(value),
-                });
-            }
-            RouteFilter::RequestHeaderAdd { name, value } => {
-                request_filters.push(ir::RequestFilter::AddHeader {
-                    name: Arc::clone(name),
-                    value: Arc::clone(value),
-                });
-            }
-            RouteFilter::RequestHeaderRemove { name } => {
-                request_filters.push(ir::RequestFilter::RemoveHeader(Arc::clone(name)));
-            }
-            RouteFilter::ResponseHeaderSet { name, value } => {
-                response_filters.push(ir::ResponseFilter::SetHeader {
-                    name: Arc::clone(name),
-                    value: Arc::clone(value),
-                });
-            }
-            RouteFilter::ResponseHeaderAdd { name, value } => {
-                response_filters.push(ir::ResponseFilter::AddHeader {
-                    name: Arc::clone(name),
-                    value: Arc::clone(value),
-                });
-            }
-            RouteFilter::ResponseHeaderRemove { name } => {
-                response_filters.push(ir::ResponseFilter::RemoveHeader(Arc::clone(name)));
-            }
-            _ => {}
-        }
-    }
+    apply_header_filters(&rule.filters, &mut request_filters, &mut response_filters);
 
     let action = ir::Action::Route(ir::RouteAction {
         backends: rule
