@@ -14,12 +14,15 @@ use crate::gateway::model::{
     RouteState, WeightedBackend,
 };
 use crate::gateway::reconcile::backend::{
-    resolve_backend_refs, resolve_backend_refs_async, BackendResolution, BackendResolutionStatus,
-    RouteLike,
+    build_backend_resolution_conditions, resolve_backend_refs, resolve_backend_refs_async,
+    BackendResolution, BackendResolutionStatus, RouteLike,
 };
 use crate::gateway::reconcile::httproute::{resolve_parent_ref, ParsedParentRef};
 use crate::gateway::reconcile::refgrant::GrantIndex;
-use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::gateway::status::StatusCondition;
+
+#[cfg(test)]
+use crate::gateway::status::{ConditionStatus, ConditionType};
 use crate::impl_backend_ref_like;
 use gateway_api::grpcroutes::{
     GrpcRouteRules, GrpcRouteRulesBackendRefs, GrpcRouteRulesFilters,
@@ -168,51 +171,11 @@ pub fn reconcile_single(
         }
 
         // Merge backend ref resolution into the parent status.
-        let resolved_refs = match &backend_resolution.overall {
-            BackendResolutionStatus::Ok => resolved_refs_true(generation),
-            BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "RefNotPermitted".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
-            BackendResolutionStatus::Unsupported(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "InvalidKind".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
-            BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
-                condition_type: ConditionType::ResolvedRefs,
-                status: ConditionStatus::False,
-                reason: "BackendNotFound".to_string(),
-                message: msg.clone(),
-                observed_generation: generation,
-            },
-        };
-        conditions.push(resolved_refs);
-
-        let programmed =
-            if matches!(&backend_resolution.overall, BackendResolutionStatus::Ok) && accepted {
-                StatusCondition {
-                    condition_type: ConditionType::Programmed,
-                    status: ConditionStatus::True,
-                    reason: "Programmed".to_string(),
-                    message: "Route programmed into proxy".to_string(),
-                    observed_generation: generation,
-                }
-            } else {
-                StatusCondition {
-                    condition_type: ConditionType::Programmed,
-                    status: ConditionStatus::False,
-                    reason: "NotProgrammed".to_string(),
-                    message: "Route not programmed into proxy".to_string(),
-                    observed_generation: generation,
-                }
-            };
-        conditions.push(programmed);
+        conditions.extend(build_backend_resolution_conditions(
+            &backend_resolution,
+            accepted,
+            generation,
+        ));
 
         parent_statuses.push(GRPCRouteParentStatus {
             parent_ref: status_parent_ref,
@@ -234,16 +197,6 @@ pub fn reconcile_single(
         route_state,
         parent_statuses,
         programmed,
-    }
-}
-
-fn resolved_refs_true(observed_generation: i64) -> StatusCondition {
-    StatusCondition {
-        condition_type: ConditionType::ResolvedRefs,
-        status: ConditionStatus::True,
-        reason: "ResolvedRefs".to_string(),
-        message: "All references resolved".to_string(),
-        observed_generation,
     }
 }
 

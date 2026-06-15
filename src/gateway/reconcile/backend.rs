@@ -4,6 +4,7 @@
 //! Shared backend-ref resolution logic for Gateway API routes.
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
+use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 
 /// Status of resolving backend references for a route.
 #[derive(Clone, Debug)]
@@ -36,6 +37,65 @@ impl BackendResolution {
             rules: Vec::new(),
         }
     }
+}
+
+/// Build the `ResolvedRefs` and `Programmed` conditions from a backend
+/// resolution result.
+pub fn build_backend_resolution_conditions(
+    resolution: &BackendResolution,
+    accepted: bool,
+    generation: i64,
+) -> Vec<StatusCondition> {
+    let resolved_refs = match &resolution.overall {
+        BackendResolutionStatus::Ok => StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::True,
+            reason: "ResolvedRefs".to_string(),
+            message: "All backend references resolved".to_string(),
+            observed_generation: generation,
+        },
+        BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::False,
+            reason: "RefNotPermitted".to_string(),
+            message: msg.clone(),
+            observed_generation: generation,
+        },
+        BackendResolutionStatus::Unsupported(msg) => StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::False,
+            reason: "InvalidKind".to_string(),
+            message: msg.clone(),
+            observed_generation: generation,
+        },
+        BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
+            condition_type: ConditionType::ResolvedRefs,
+            status: ConditionStatus::False,
+            reason: "BackendNotFound".to_string(),
+            message: msg.clone(),
+            observed_generation: generation,
+        },
+    };
+
+    let programmed = if matches!(resolution.overall, BackendResolutionStatus::Ok) && accepted {
+        StatusCondition {
+            condition_type: ConditionType::Programmed,
+            status: ConditionStatus::True,
+            reason: "Programmed".to_string(),
+            message: "Route programmed into proxy".to_string(),
+            observed_generation: generation,
+        }
+    } else {
+        StatusCondition {
+            condition_type: ConditionType::Programmed,
+            status: ConditionStatus::False,
+            reason: "NotProgrammed".to_string(),
+            message: "Route not programmed into proxy".to_string(),
+            observed_generation: generation,
+        }
+    };
+
+    vec![resolved_refs, programmed]
 }
 
 /// Abstraction over the generated backend-ref types from each route kind.
