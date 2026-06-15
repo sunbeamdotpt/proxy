@@ -22,8 +22,7 @@ use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
 use pingora_cache::{
     CacheKey, CacheMeta, ForcedFreshness, HitHandler, NoCacheReason, RespCacheable,
 };
-use pingora_core::protocols::tls::ALPN;
-use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::upstreams::peer::{HttpPeer, Scheme};
 use pingora_core::utils::tls::CertKey;
 use pingora_core::Result;
 use pingora_http::{RequestHeader, ResponseHeader};
@@ -41,9 +40,11 @@ mod logging;
 mod match_;
 mod request_filter;
 mod routing;
+mod upstream_tls;
 
 pub use ctx::RequestCtx;
 use match_::{build_redirect_location_ir, cors_allow_origin, pick_weighted_backend_ir_index};
+use upstream_tls::{alpn_for_protocol, DynamicUpstreamL4};
 
 /// Build an HttpPeer with configurable timeouts and optional TLS settings.
 ///
@@ -77,18 +78,26 @@ async fn make_peer(
                 peer.options.alternative_cn = Some(alt.as_ref().to_string());
             }
         }
-        if let Some(cert_key) = client_cert {
-            peer.client_cert_key = Some(cert_key);
+        if let Some(ref cert_key) = client_cert {
+            peer.client_cert_key = Some(cert_key.clone());
         }
     }
 
-    match protocol {
-        BackendProtocol::H2c => peer.options.alpn = ALPN::H2,
-        BackendProtocol::WebSocket | BackendProtocol::WebSocketSecure => {
-            peer.options.alpn = ALPN::H1;
-        }
-        _ => {}
+    if let Some(alpn) = alpn_for_protocol(protocol) {
+        peer.options.alpn = alpn;
     }
+
+    // BackendTLSPolicy supplies a per-backend CA bundle. Pingora's default
+    // rustls connector only loads trust roots once at startup, so we perform
+    // the upstream TLS handshake ourselves via a custom L4 connector.
+    if is_tls && tls.and_then(|t| t.ca_bundle_pem.as_ref()).is_some() {
+        let tls_cfg = tls.unwrap();
+        let connector = DynamicUpstreamL4::new(tls_cfg, client_cert.clone(), Some(peer.options.alpn.clone()));
+        peer.group_key = connector.trust_hash();
+        peer.options.custom_l4 = Some(Arc::new(connector));
+        peer.scheme = Scheme::HTTP;
+    }
+
     Some(Box::new(peer))
 }
 

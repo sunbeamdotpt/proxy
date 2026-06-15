@@ -38,7 +38,7 @@ use crate::gateway::reconcile::listenerset::run_listenerset_controller;
 use crate::gateway::reconcile::reconcile_tick_with_leader;
 use crate::gateway::translate::translate_view_to_ir;
 use crate::ir;
-use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry, UpstreamCaBundle};
+use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry};
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -61,7 +61,6 @@ pub async fn run_reconcile_loop(
     tls_registry: Arc<TlsRegistry>,
     gateway_cert_source: Arc<GatewayCertSource>,
     disk_cert_source: Arc<DiskCertSource>,
-    upstream_ca_bundle: Arc<UpstreamCaBundle>,
 ) {
     let is_leader = Arc::new(AtomicBool::new(election.state() == LeaderState::Leader));
 
@@ -206,15 +205,16 @@ pub async fn run_reconcile_loop(
             publish_digest(&digest_publisher, &view).await;
 
             // Emit resource notifications for anything that changed.
+            // Only refresh certificates when the reconciled view changed. This
+            // avoids repeatedly fetching Secrets and ConfigMaps from the API
+            // server on every 500ms tick.
+            let view_changed = prev_view.as_ref() != Some(&view);
+
             for notify in diff_view(&prev_view, &view) {
                 handle_notify(&resource_notifier, notify).await;
             }
             prev_view = Some(view.clone());
 
-            // Only refresh certificates and the upstream CA bundle when the
-            // reconciled view changed. This avoids repeatedly fetching Secrets
-            // and ConfigMaps from the API server on every 500ms tick.
-            let view_changed = prev_view.as_ref() != Some(&view);
             if view_changed {
                 gateway_cert_source.refresh(&client, &view).await;
                 disk_cert_source.refresh();
@@ -226,14 +226,6 @@ pub async fn run_reconcile_loop(
                     merge_cert_store(&mut store, &gw);
                 }
                 tls_registry.apply(store);
-
-                // Update the process-wide upstream CA bundle from BackendTLSPolicy
-                // and frontend validation configuration. Pingora's rustls connector
-                // reads SSL_CERT_FILE once at startup; the file is written before
-                // bootstrap so the initial upstream trust store includes these roots.
-                if let Err(e) = upstream_ca_bundle.write_from_view(&view) {
-                    tracing::warn!(error = %e, "failed to write upstream CA bundle");
-                }
             }
 
             // Gateway status (including Programmed=True) is written by the
