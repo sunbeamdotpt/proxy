@@ -163,6 +163,7 @@ mod tests {
             });
         view.gateways.push(GatewayState {
             listeners: vec![ListenerState {
+                programmed: true,
                 protocol: Arc::from("HTTPS"),
                 tls_mode: Some(TlsMode::Terminate),
                 frontend_validation: Some(FrontendValidation {
@@ -237,6 +238,7 @@ mod tests {
                 port: None,
             },
             listeners: vec![ListenerState {
+                programmed: true,
                 protocol: Arc::from("HTTPS"),
                 tls_mode: Some(TlsMode::Terminate),
                 frontend_validation: Some(FrontendValidation {
