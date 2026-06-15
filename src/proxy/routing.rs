@@ -90,7 +90,14 @@ impl SunbeamProxy {
                 .or(plan.client_cert_id.as_ref());
             let client_cert =
                 client_cert_id.and_then(|id| self.tls_registry.as_ref()?.client_cert(id.as_ref()));
-            tracing::debug!(backend = %backend, ?upstream.timeout, ?protocol, "upstream_peer: route plan");
+            tracing::debug!(
+                backend = %backend,
+                ?upstream.timeout,
+                ?protocol,
+                ?client_cert_id,
+                client_cert_present = client_cert.is_some(),
+                "upstream_peer: route plan"
+            );
             if !backend.is_empty() {
                 if let Some(peer) =
                     make_peer(&backend, upstream.timeout, protocol, tls, client_cert).await

@@ -88,11 +88,13 @@ impl L4Router for Router {
         let config = self.config();
         let routes = routes_for_protocol(&config, ctx.protocol);
 
-        // For TLS protocols, peek the ClientHello to extract SNI unless it was
-        // already provided (e.g. by a terminating listener).
+        // For TLS-terminated HTTPS and raw TLS listeners, peek the ClientHello
+        // to extract SNI unless it was already provided (e.g. by a terminating
+        // listener). HTTPS listeners use the SNI hostname to choose the correct
+        // terminating route before the TLS handshake is completed.
         let sni: Option<Arc<str>> = if let Some(sni) = ctx.sni.clone() {
             Some(sni)
-        } else if ctx.protocol == Protocol::Tls {
+        } else if matches!(ctx.protocol, Protocol::Tls | Protocol::Https) {
             let mut buf = [0u8; PEEK_BUF_SIZE];
             match stream.peek(&mut buf).await {
                 Ok(n) => crate::sni::parse_client_hello_sni(&buf[..n]).map(Arc::from),
@@ -146,6 +148,7 @@ impl L4Router for Router {
                     target,
                     &self.registry,
                     &self.sni_context,
+                    &self.http_context,
                     &config,
                 )
                 .await
@@ -320,6 +323,7 @@ async fn http_relay(
                 crate::l4::context::HttpRelayContext {
                     listener_id: Arc::clone(&ctx.listener_id),
                     listener_port: ctx.local_addr.port(),
+                    secure: false,
                 },
             );
     }
@@ -411,6 +415,7 @@ async fn terminate_and_http(
     target: &Arc<str>,
     registry: &Arc<TlsRegistry>,
     sni_context: &Arc<std::sync::Mutex<HashMap<SocketAddr, Arc<str>>>>,
+    http_context: &Arc<std::sync::Mutex<HashMap<SocketAddr, crate::l4::context::HttpRelayContext>>>,
     l4_config: &CompiledL4Config,
 ) -> io::Result<()> {
     if registry.is_empty() {
@@ -444,11 +449,24 @@ async fn terminate_and_http(
 
     let addr = resolve_backend_addr(target.as_ref())?;
     let mut upstream = TcpStream::connect(addr).await?;
-    if let (Some(sni), Ok(local_addr)) = (sni, upstream.local_addr()) {
-        sni_context
+    if let Ok(local_addr) = upstream.local_addr() {
+        if let Some(sni) = sni.clone() {
+            sni_context
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(local_addr, sni);
+        }
+        http_context
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(local_addr, sni);
+            .insert(
+                local_addr,
+                crate::l4::context::HttpRelayContext {
+                    listener_id: Arc::clone(&ctx.listener_id),
+                    listener_port: ctx.local_addr.port(),
+                    secure: true,
+                },
+            );
     }
 
     match copy_bidirectional(&mut tls_stream, &mut upstream).await {
@@ -458,6 +476,17 @@ async fn terminate_and_http(
         Err(e) => {
             tracing::debug!(error = %e, %addr, "l4 router: https termination relay error");
         }
+    }
+
+    if let Ok(local_addr) = upstream.local_addr() {
+        sni_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&local_addr);
+        http_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&local_addr);
     }
     Ok(())
 }
@@ -655,6 +684,209 @@ mod tests {
             resolve_backend_addr("127.0.0.1:8080").unwrap(),
             SocketAddr::from(([127, 0, 0, 1], 8080))
         );
+    }
+
+    #[test]
+    fn resolve_backend_addr_returns_error_for_invalid_input() {
+        assert!(resolve_backend_addr("not a valid address").is_err());
+    }
+
+    #[test]
+    fn pick_backend_with_zero_total_weight_falls_back_to_first() {
+        let b = vec![
+            WeightedBackend {
+                backend: "first".into(),
+                weight: 0,
+                request_filters: Vec::new(),
+                protocol: crate::ir::BackendProtocol::Http,
+                tls: None,
+            },
+            WeightedBackend {
+                backend: "second".into(),
+                weight: 0,
+                request_filters: Vec::new(),
+                protocol: crate::ir::BackendProtocol::Http,
+                tls: None,
+            },
+        ];
+        assert_eq!(pick_backend(&b).unwrap().backend.as_ref(), "first");
+    }
+
+    #[test]
+    fn find_listener_selects_by_id() {
+        let config = CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(find_listener(&config, "l1").is_some());
+        assert!(find_listener(&config, "l2").is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_tcp_logs_when_no_route_matches() {
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
+            tcp_routes: vec![CompiledL4Route {
+                listener_id: "other".into(),
+                listener_hostname: HostnameMatch::Any,
+                match_: L4Match::Any,
+                action: L4Action::TcpRelay(vec![]),
+                priority: 0,
+            }],
+            ..Default::default()
+        }));
+        let (mut client, inbound) = connected_pair().await;
+        let router = Router::new(config, registry(), sni_context());
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Tcp,
+        );
+        let task = tokio::spawn(async move {
+            router.handle_tcp(ctx, inbound).await;
+        });
+        // Writing should not panic; the connection is closed without a backend.
+        let _ = client.write_all(b"hello").await;
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_udp_logs_when_no_route_matches() {
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config::default()));
+        let router = Router::new(config, registry(), sni_context());
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Udp,
+        );
+        let socket = Arc::new(
+            crate::l4::udp::DualStackUdpSocket::bind("127.0.0.1:0")
+                .await
+                .unwrap(),
+        );
+        router
+            .handle_udp(
+                ctx,
+                bytes::Bytes::from_static(b"ping"),
+                SocketAddr::from(([127, 0, 0, 1], 12345)),
+                socket,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn handle_udp_logs_non_udp_action() {
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
+            udp_routes: vec![CompiledL4Route {
+                listener_id: "l1".into(),
+                listener_hostname: HostnameMatch::Any,
+                match_: L4Match::Any,
+                action: L4Action::TcpRelay(vec![]),
+                priority: 0,
+            }],
+            ..Default::default()
+        }));
+        let router = Router::new(config, registry(), sni_context());
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Udp,
+        );
+        let socket = Arc::new(
+            crate::l4::udp::DualStackUdpSocket::bind("127.0.0.1:0")
+                .await
+                .unwrap(),
+        );
+        router
+            .handle_udp(
+                ctx,
+                bytes::Bytes::from_static(b"ping"),
+                SocketAddr::from(([127, 0, 0, 1], 12345)),
+                socket,
+            )
+            .await;
+    }
+
+    #[test]
+    fn router_new_with_http_context() {
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config::default()));
+        let registry = registry();
+        let sni = sni_context();
+        let http: Arc<std::sync::Mutex<HashMap<SocketAddr, crate::l4::context::HttpRelayContext>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let router = Router::new_with_http_context(config, registry, sni, Arc::clone(&http));
+        let _ = router.http_context.lock().unwrap().len();
+    }
+
+    #[test]
+    fn pick_backend_weighted_distribution() {
+        let b = vec![
+            backend("a"),
+            WeightedBackend {
+                backend: "b".into(),
+                weight: 1,
+                request_filters: Vec::new(),
+                protocol: crate::ir::BackendProtocol::Http,
+                tls: None,
+            },
+        ];
+        let mut seen_a = false;
+        let mut seen_b = false;
+        for _ in 0..50 {
+            let picked = pick_backend(&b).unwrap().backend.as_ref();
+            if picked == "a" {
+                seen_a = true;
+            } else if picked == "b" {
+                seen_b = true;
+            }
+        }
+        assert!(seen_a);
+        assert!(seen_b);
+    }
+
+    #[tokio::test]
+    async fn handle_tcp_terminate_and_http_empty_registry() {
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                ..Default::default()
+            }],
+            https_routes: vec![CompiledL4Route {
+                listener_id: "l1".into(),
+                listener_hostname: HostnameMatch::Any,
+                match_: L4Match::Any,
+                action: L4Action::TerminateAndHttp("127.0.0.1:8080".into()),
+                priority: 0,
+            }],
+            ..Default::default()
+        }));
+        let (mut client, inbound) = connected_pair().await;
+        let router = Router::new(config, registry(), sni_context());
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 443)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Https,
+        );
+        let task = tokio::spawn(async move {
+            router.handle_tcp(ctx, inbound).await;
+        });
+        let _ = client.write_all(b"not tls").await;
+        let _ = client.shutdown().await;
+        let _ = task.await;
     }
 
     #[tokio::test]
@@ -912,6 +1144,7 @@ mod tests {
             &Arc::from("127.0.0.1:1"),
             &registry,
             &sni_ctx,
+            &Arc::new(std::sync::Mutex::new(HashMap::new())),
             &l4_config,
         )
         .await;
@@ -1005,6 +1238,136 @@ XgdEFjRXMOS5FmfbOMU3zxVS0l6xeA6kvA9tWDbvAoGADGdEQYBm1xaoQlb2F6TY
             registry,
             sni_context(),
         );
+
+        let relay = tokio::spawn(async move {
+            router.handle_tcp(ctx, inbound).await;
+        });
+
+        let mut root_store = rustls::RootCertStore::empty();
+        let certs: Vec<_> =
+            rustls_pemfile::certs(&mut std::io::BufReader::new(TEST_CERT_PEM.as_bytes()))
+                .collect::<Result<_, _>>()
+                .unwrap();
+        for cert in certs {
+            root_store.add(cert).unwrap();
+        }
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .unwrap()
+            .to_owned();
+        let mut tls_client = connector.connect(server_name, client).await.unwrap();
+        tls_client.write_all(b"hello").await.unwrap();
+        let mut buf = vec![0u8; 64];
+        let n = tls_client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello");
+
+        drop(tls_client);
+        let _ = tokio::join!(backend_task, relay);
+    }
+
+    #[tokio::test]
+    async fn terminate_and_http_matches_listener_hostname_by_sni() {
+        const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIDPTCCAiWgAwIBAgIUXdh+Kh3k6v8yH9DP4xrSLFpEdVIwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYxMzEyNTQxOVoXDTI3MDYx
+MzEyNTQxOVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAxiakZm33D6e5fJhSrGl5nrB+Q5v4aoWaYO31l6Wys2Hh
+H2y2MAffWAcYn6PteE9gb6UUhxxHbtXu9jIb1I7WrO+qFXyalSNl6yYYYIYo7+2L
+bKap6LkbaIz8Jsegrjtmb6RW2TyXqX5DtwWMpU6ePnCSm6cHj3Pqs/VesCtpuh1c
+D/MoeWRGYuB+nfKkZ6/dmFs46jlRsjnSrNFslTgIkt6Fbed7Xn5E4wAz6gILxHB6
+pktWIC+86uR9kEJ5G63/QPjymg1PSVaezn6LSkgeKg9SLPGurWTbrsqkwEwa8t0K
+QQAiaHli0//Go+cIDJCvKogTxFYmD1e3+3q9x/SvCwIDAQABo4GGMIGDMB0GA1Ud
+DgQWBBQYwTWRTd7tJXu6Je3yXF1LEpXRSTAfBgNVHSMEGDAWgBQYwTWRTd7tJXu6
+Je3yXF1LEpXRSTAJBgNVHRMEAjAAMAsGA1UdDwQEAwIFoDATBgNVHSUEDDAKBggr
+BgEFBQcDATAUBgNVHREEDTALgglsb2NhbGhvc3QwDQYJKoZIhvcNAQELBQADggEB
+ADnLr9hpXoWU5WeDqZgMxBCwv9eXZFCeDI9WEY8NP9bihyYNTFeg2smmwmUisVfM
+TngOwXc0lkdnw0yjEY9BkreiW7SXYw4LRXKSLTzvYOElvR0eEh2fuFLJ01Coul/d
+AIG4IFYUm81n+39M9x58rzuVpHybJhVyQynQG4pvQ/gvoMS1T52r+1XvcjpFopc3
+8siM5UYpfvrmjVa4ehWZJUt0C+Yc0VEh5QrqkawI7mVBu+UDbD/dZpJqnZYxj2dP
+QSMofIl2UfWQZruEXjdykcygVc45VzAd56l9H1H3mOocpgoGZHHflIPzbdyUwDte
+1JLEQApDV4RilthGCExnnxk=
+-----END CERTIFICATE-----
+"#;
+        const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDGJqRmbfcPp7l8
+mFKsaXmesH5Dm/hqhZpg7fWXpbKzYeEfbLYwB99YBxifo+14T2BvpRSHHEdu1e72
+MhvUjtas76oVfJqVI2XrJhhghijv7YtspqnouRtojPwmx6CuO2ZvpFbZPJepfkO3
+BYylTp4+cJKbpwePc+qz9V6wK2m6HVwP8yh5ZEZi4H6d8qRnr92YWzjqOVGyOdKs
+0WyVOAiS3oVt53tefkTjADPqAgvEcHqmS1YgL7zq5H2QQnkbrf9A+PKaDU9JVp7O
+fotKSB4qD1Is8a6tZNuuyqTATBry3QpBACJoeWLT/8aj5wgMkK8qiBPEViYPV7f7
+er3H9K8LAgMBAAECggEAG9kydx2IANtBu7vCDW6FeUK00YEKLhkOKVvy4u1Baunx
+Xx6YPF00NoWeIFGZqQmpiVyvazho5wWKIBp1bto5sZ8SoxJwEfsiR8+C0uNdaDBV
+IrVfC9DNg/7MhrwSXmpawItdlApqsOzd93Wq3qYTTL3lh5q3T/dVSmrMdACl9fy1
+PACZGMIhQpo//cu+4RlUA8OrpWk+hPkNep+JoO7hdTfBxxqzLMAg1xgP6yEpAad4
+8wXq39btwhMf29fxoEQqYOZkEyEvtkXb3EYCnkgVMfEHJ9yEjkgM/o6RbLm9fCeS
+PYH1ZmlMk0RDX9EOEYNrtTLUdIjmmQmEP+2NOlvLAQKBgQD+cpSzXg3MKUrhon1Q
+JAWAA90GYHOfkyluOBiFeZjedo4PnNPWWcVij7P3LJ7sPGTV4JcYvlEHbKcnLR2r
+DEhyfJ7V6piZ4UDKG6OnKXkGsFfazUbMZLhuZNFegjnxpaX6L65U9vp1Z5uzVr1B
+Q6K+BJNSEkJOb3lg/ZJlTo8teQKBgQDHXCHWFpQpKF2oLDKRbKV63On62KUfkUpI
+olAhpa//KDafDrEUbngsPdpY0MafFSafvLF7VRJcc2Tct0WijDJo5t5+synrc+/4
+zvet50sRHocvh5as6n23XtmNhosiBcYnMwALeA3j4jat8bpdBc/tf9OUk3dxSgmz
+FD2ovtDTowKBgQCb2PiFaG1RCFWqIAlbJcUMpNEjD76iFdQBg3BZiKH+WGUo4OjL
+WI7SkKwtD/KDRXaJnZdOe3tL7dvv3e1XEB3rqbLr2VYAonw5jnZNc9SCKU6WYLcl
+h+eDDlNC7Maq4MfplnzT47aCZKR0UwN2TwQGGO1XDoH4YsTYiFe7n0OJGQKBgC3F
+qoMkBfp5KR++nhGjl07hP9t3OFpKGnsYwTsodoMn8XqNffzJ7E+EGAjCTogh7A9K
+3JkLjD6rw+GlNpi+hahuMXF3o01K/jLrGhTUgPi6QKGaCO9Em36piVukI3e5Saig
+XgdEFjRXMOS5FmfbOMU3zxVS0l6xeA6kvA9tWDbvAoGADGdEQYBm1xaoQlb2F6TY
+4u2jkAABAQOebNnVYT9UqOdYpz03rC4xQbJuRqTBH6RtfcVEFUYDqDg86DXhczSP
+823w6ZqslkWPA9UKvtGQL0fCVUNlQbMJNSKGpkJ5T+6Saip6+C9r0RAvNYlACJ54
+7UDrRhNwO+cf9/tDJh2nD8Y=
+-----END PRIVATE KEY-----
+"#;
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend_listener.local_addr().unwrap();
+        let backend_task = tokio::spawn(async move {
+            let (mut socket, _) = backend_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64];
+            let n = socket.read(&mut buf).await.unwrap();
+            socket.write_all(&buf[..n]).await.unwrap();
+            socket.shutdown().await.ok();
+        });
+
+        let cert_key =
+            crate::tls::certified_key_from_pem(TEST_CERT_PEM.as_bytes(), TEST_KEY_PEM.as_bytes())
+                .unwrap();
+        let mut store = crate::tls::CertStore::default();
+        store.default = Some(cert_key);
+        let registry = Arc::new(TlsRegistry::new());
+        registry.apply(store);
+
+        let (client, inbound) = connected_pair().await;
+        let ctx = L4Context::from_udp(
+            "l1".into(),
+            SocketAddr::from(([127, 0, 0, 1], 8443)),
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            Protocol::Https,
+        );
+
+        let hostname = HostnameMatch::Exact(Arc::from("localhost"));
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "l1".into(),
+                bind_addr: "127.0.0.1:8443".into(),
+                protocol: Protocol::Https,
+                ..Default::default()
+            }],
+            https_routes: vec![CompiledL4Route {
+                listener_id: "l1".into(),
+                listener_hostname: hostname.clone(),
+                match_: L4Match::Sni(hostname),
+                action: L4Action::TerminateAndHttp(Arc::from(backend_addr.to_string().as_str())),
+                priority: 0,
+            }],
+            ..Default::default()
+        }));
+
+        let router = Router::new(config, registry, sni_context());
 
         let relay = tokio::spawn(async move {
             router.handle_tcp(ctx, inbound).await;

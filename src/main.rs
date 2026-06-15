@@ -446,6 +446,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
     };
 
     let (route_manager, routes_tx) = sunbeam_proxy::route_manager::RouteManager::spawn(10);
+    sunbeam_proxy::l4::current::set(route_manager.l4_config());
     let mut startup_ir = ir::from_config::from_route_configs(&cfg.routes);
     if !cfg.listen.https.is_empty() {
         let https_listener_id: Arc<str> = Arc::from("https");
@@ -470,12 +471,18 @@ fn run_serve(upgrade: bool) -> Result<()> {
         // Terminate TLS for all traffic on the public HTTPS listener and
         // forward the decrypted plaintext HTTP to Pingora.  Pingora still
         // performs host-level routing.
-        startup_ir.l4_routes.push(ir::L4Route {
-            listener_id: Arc::clone(&https_listener_id),
-            listener_hostname: ir::HostnameMatch::Any,
-            match_: ir::L4Match::Any,
-            action: ir::L4Action::TerminateAndHttp(Arc::from(pingora_http_addr)),
-        });
+        // In Gateway API mode each HTTPS listener supplies its own SNI-specific
+        // L4 route. A global catch-all here would terminate TLS for hostnames
+        // whose Gateway listener is invalid or unprogrammed (e.g. broken frontend
+        // client-certificate config) and make conformance tests expect failure.
+        if !gateway_enabled {
+            startup_ir.l4_routes.push(ir::L4Route {
+                listener_id: Arc::clone(&https_listener_id),
+                listener_hostname: ir::HostnameMatch::Any,
+                match_: ir::L4Match::Any,
+                action: ir::L4Action::TerminateAndHttp(Arc::from(pingora_http_addr)),
+            });
+        }
     }
     if let Err(e) = route_manager.apply("toml", startup_ir) {
         return Err(anyhow::anyhow!("failed to compile startup routes: {e}"));
@@ -586,10 +593,21 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     let l4_manager_for_updates = l4_manager.clone();
     let l4_config_for_updates = route_manager.l4_config();
+    let l4_changed = route_manager.l4_changed();
     std::thread::spawn(move || {
         let mut last = l4_config_for_updates.load_full();
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            {
+                let (lock, cvar) = &*l4_changed;
+                let mut guard = lock.lock().unwrap();
+                if !*guard {
+                    guard = cvar
+                        .wait_timeout(guard, std::time::Duration::from_secs(1))
+                        .unwrap()
+                        .0;
+                }
+                *guard = false;
+            }
             let current = l4_config_for_updates.load_full();
             if !Arc::ptr_eq(&last, &current) {
                 l4_manager_for_updates.apply(current.clone());

@@ -16,9 +16,10 @@ impl SunbeamProxy {
         let l4_config = self.l4_config.load();
         if let Some(local) = downstream_local_addr(session) {
             if let Some(ctx_info) = self.http_relay_context(session) {
-                // Plain HTTP that was relayed through the L4 manager. The public
-                // listener port is recovered from the per-connection context.
-                ctx.downstream_scheme = "http";
+                // HTTP/HTTPS connections relayed through the L4 manager carry the
+                // public listener port and whether TLS was terminated in their
+                // per-connection context.
+                ctx.downstream_scheme = if ctx_info.secure { "https" } else { "http" };
                 ctx.downstream_port = ctx_info.listener_port;
             } else if let Some(listener_port) = https_terminate_port(&l4_config, local) {
                 ctx.downstream_scheme = "https";

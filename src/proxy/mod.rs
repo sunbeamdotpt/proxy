@@ -64,6 +64,9 @@ async fn make_peer(
         protocol,
         BackendProtocol::Https | BackendProtocol::WebSocketSecure
     );
+    if is_tls && tls.is_none() {
+        return None;
+    }
     let sni = tls.map(|t| t.sni.as_ref().to_string()).unwrap_or_default();
     let mut peer = HttpPeer::new(sa, is_tls, sni);
     let t = timeout.unwrap_or(Duration::from_secs(60));
@@ -1911,5 +1914,173 @@ mod tests {
             https_terminate_port(&l4_config, "127.0.0.1:8080".parse().unwrap()),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn make_peer_plain_http() {
+        let peer = make_peer(
+            "http://127.0.0.1:8080",
+            None,
+            BackendProtocol::Http,
+            None,
+            None,
+        )
+        .await;
+        assert!(peer.is_some());
+        let peer = peer.unwrap();
+        assert!(!peer.is_tls());
+    }
+
+    #[tokio::test]
+    async fn make_peer_https_requires_tls_config() {
+        let peer = make_peer(
+            "https://127.0.0.1:8443",
+            None,
+            BackendProtocol::Https,
+            None,
+            None,
+        )
+        .await;
+        assert!(peer.is_none());
+    }
+
+    #[tokio::test]
+    async fn make_peer_https_with_tls_config_sets_options() {
+        let tls = BackendTlsConfig {
+            sni: Arc::from("backend.example.com"),
+            verify_hostname: false,
+            alternative_cn: Some(Arc::from("alt.example.com")),
+            client_cert_id: None,
+            ca_bundle_pem: None,
+            subject_alt_names: vec![],
+        };
+        let peer = make_peer(
+            "https://127.0.0.1:8443",
+            None,
+            BackendProtocol::Https,
+            Some(&tls),
+            None,
+        )
+        .await;
+        assert!(peer.is_some());
+        let peer = peer.unwrap();
+        assert!(peer.is_tls());
+    }
+
+    #[tokio::test]
+    async fn make_peer_https_with_ca_bundle_uses_custom_l4() {
+        let tls = BackendTlsConfig {
+            sni: Arc::from("backend.example.com"),
+            verify_hostname: true,
+            alternative_cn: None,
+            client_cert_id: None,
+            ca_bundle_pem: Some(Arc::from(
+                "-----BEGIN CERTIFICATE-----\nMIIBkTCB+w==\n-----END CERTIFICATE-----\n",
+            )),
+            subject_alt_names: vec![Arc::from("backend.example.com")],
+        };
+        let peer = make_peer(
+            "https://127.0.0.1:8443",
+            None,
+            BackendProtocol::Https,
+            Some(&tls),
+            None,
+        )
+        .await;
+        assert!(peer.is_some());
+        let peer = peer.unwrap();
+        // Custom L4 connector is stored as an Arc<dyn CustomL4>.
+        assert!(peer.options.custom_l4.is_some());
+    }
+
+    #[test]
+    fn compile_rewrites_from_ir_covers_all_host_types() {
+        use crate::ir::compile::{CompiledRouteTable, HostNode};
+        use crate::ir::{HostnameMatch, RewriteRule};
+        use std::collections::HashMap;
+
+        let mut exact = HashMap::new();
+        exact.insert(
+            Arc::from("exact.example.com"),
+            vec![HostNode {
+                hostname: HostnameMatch::Exact(Arc::from("exact.example.com")),
+                listener_ids: vec![],
+                listener_hostname: None,
+                listener_port: None,
+                gateway_api: false,
+                disable_secure_redirection: false,
+                path_trie: crate::ir::compile::PathTrieNode::default(),
+                exact_paths: HashMap::new(),
+                regex_plans: vec![],
+                static_rewrites: vec![RewriteRule {
+                    pattern: Arc::from(r"^/old$"),
+                    target: Arc::from("/new"),
+                }],
+            }],
+        );
+
+        let wildcard = vec![(
+            HostnameMatch::Wildcard(Arc::from("example.com")),
+            HostNode {
+                hostname: HostnameMatch::Wildcard(Arc::from("example.com")),
+                listener_ids: vec![],
+                listener_hostname: None,
+                listener_port: None,
+                gateway_api: false,
+                disable_secure_redirection: false,
+                path_trie: crate::ir::compile::PathTrieNode::default(),
+                exact_paths: HashMap::new(),
+                regex_plans: vec![],
+                static_rewrites: vec![RewriteRule {
+                    pattern: Arc::from(r"^/foo$"),
+                    target: Arc::from("/bar"),
+                }],
+            },
+        )];
+
+        let any = HostNode {
+            hostname: HostnameMatch::Any,
+            listener_ids: vec![],
+            listener_hostname: None,
+            listener_port: None,
+            gateway_api: false,
+            disable_secure_redirection: false,
+            path_trie: crate::ir::compile::PathTrieNode::default(),
+            exact_paths: HashMap::new(),
+            regex_plans: vec![],
+            static_rewrites: vec![RewriteRule {
+                pattern: Arc::from(r"^/any$"),
+                target: Arc::from("/anywhere"),
+            }],
+        };
+
+        let table = CompiledRouteTable {
+            exact_hosts: exact,
+            wildcard_hosts: wildcard,
+            any_host: Some(any),
+            acme_routes: HashMap::new(),
+        };
+
+        let rewrites = SunbeamProxy::compile_rewrites_from_ir(&table);
+        assert!(rewrites.iter().any(|(h, _)| h == "exact.example.com"));
+        assert!(rewrites.iter().any(|(h, _)| h == "*.example.com"));
+        assert!(rewrites.iter().any(|(h, _)| h == "*"));
+    }
+
+    #[test]
+    fn find_rewrites_returns_matching_prefix() {
+        let proxy = SunbeamProxy::default();
+        let rules = vec![(
+            "docs".to_string(),
+            Arc::new(vec![CompiledRewrite {
+                pattern: Regex::new(r"^/old$").unwrap(),
+                target: "/new".into(),
+            }]),
+        )];
+        proxy.compiled_rewrites.store(Arc::new(rules));
+        let found = proxy.find_rewrites("docs");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().len(), 1);
+        assert!(proxy.find_rewrites("missing").is_none());
     }
 }

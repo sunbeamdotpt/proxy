@@ -18,6 +18,7 @@ use std::sync::{mpsc, Arc};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Duration};
 
 /// Handle to an L4 socket manager running on its own thread.
 #[derive(Clone, Debug)]
@@ -70,6 +71,7 @@ pub fn spawn_with_config<R: L4Router>(
 }
 
 struct ListenerHandle {
+    config: CompiledListener,
     shutdown: watch::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -101,34 +103,49 @@ async fn run_manager<R: L4Router>(
             "l4 manager: applied compiled config"
         );
 
-        let desired: HashSet<Arc<str>> = current
+        let desired_map: HashMap<Arc<str>, &CompiledListener> = current
             .listeners
             .iter()
-            .map(|l| Arc::clone(&l.id))
+            .map(|l| (Arc::clone(&l.id), l))
             .collect();
 
-        // Stop listeners that are no longer present.
-        let mut to_remove = Vec::new();
-        for id in active.keys() {
-            if !desired.contains(id) {
-                to_remove.push(Arc::clone(id));
+        // Stop listeners whose id disappeared or whose configuration changed.
+        // Waiting for the task to exit ensures the socket is released before a
+        // replacement binds the same address.
+        let mut removed_tasks = Vec::new();
+        let mut kept_handles = Vec::new();
+        for (id, handle) in active.drain() {
+            let keep = desired_map
+                .get(&id)
+                .map(|l| {
+                    l.bind_addr == handle.config.bind_addr && l.protocol == handle.config.protocol
+                })
+                .unwrap_or(false);
+            if keep {
+                kept_handles.push((id, handle));
+                continue;
             }
+            let _ = handle.shutdown.send(());
+            removed_tasks.push((id, handle.task));
         }
-        for id in to_remove {
-            if let Some(handle) = active.remove(&id) {
-                let _ = handle.shutdown.send(());
-                handle.task.abort();
+        for (id, handle) in kept_handles {
+            active.insert(id, handle);
+        }
+        for (id, task) in removed_tasks {
+            if timeout(Duration::from_secs(5), task).await.is_err() {
+                tracing::warn!(listener_id = %id, "l4 manager: listener task did not stop in time");
             }
         }
 
-        // Start listeners that are not yet active.
+        // Start listeners that are not yet active (or were restarted above).
         for listener in &current.listeners {
             if active.contains_key(&listener.id) {
                 continue;
             }
             let (shutdown_tx, shutdown_rx) = watch::channel(());
+            let config = listener.clone();
             let task = spawn_listener_task(
-                listener.clone(),
+                config.clone(),
                 Arc::clone(&router),
                 Arc::clone(&shared),
                 shutdown_rx,
@@ -136,6 +153,7 @@ async fn run_manager<R: L4Router>(
             active.insert(
                 Arc::clone(&listener.id),
                 ListenerHandle {
+                    config,
                     shutdown: shutdown_tx,
                     task,
                 },
@@ -468,6 +486,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_keeps_listener_when_bind_and_protocol_unchanged() {
+        let tcp_port = reserve_tcp_port();
+
+        let registry = Arc::new(TlsRegistry::new());
+        let router = Arc::new(crate::l4::NoOpRouter);
+        let mgr = spawn(registry, router);
+
+        mgr.apply(Arc::new(CompiledL4Config {
+            listeners: vec![tcp_listener("tcp-l", tcp_port)],
+            ..Default::default()
+        }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .await
+            .is_ok());
+
+        // Apply a new config with the same listener id/bind/protocol but a
+        // different per-listener setting. The existing socket should be kept.
+        mgr.apply(Arc::new(CompiledL4Config {
+            listeners: vec![CompiledListener {
+                id: "tcp-l".into(),
+                bind_addr: format!("127.0.0.1:{}", tcp_port).into(),
+                protocol: Protocol::Tcp,
+                tls: None,
+                redirect_http_to_https: true,
+                frontend_validation: None,
+            }],
+            ..Default::default()
+        }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .await
+            .is_ok());
+
+        // Removing the listener should still release the socket.
+        mgr.apply(Arc::new(CompiledL4Config::default()));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn http_and_https_listeners_are_bound() {
         let http_port = reserve_tcp_port();
         let https_port = reserve_tcp_port();
@@ -535,5 +596,32 @@ mod tests {
 
         // Manager should survive invalid bind addresses.
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn applying_identical_config_is_noop() {
+        let tcp_port = reserve_tcp_port();
+
+        let registry = Arc::new(TlsRegistry::new());
+        let router = Arc::new(crate::l4::NoOpRouter);
+        let mgr = spawn(registry, router);
+
+        let config = Arc::new(CompiledL4Config {
+            listeners: vec![tcp_listener("tcp-l", tcp_port)],
+            ..Default::default()
+        });
+        mgr.apply(Arc::clone(&config));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .await
+            .is_ok());
+
+        // Applying the exact same snapshot should short-circuit and leave the
+        // listener bound.
+        mgr.apply(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .await
+            .is_ok());
     }
 }

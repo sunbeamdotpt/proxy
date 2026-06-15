@@ -30,6 +30,8 @@ pub struct HttpRelayContext {
     pub listener_id: Arc<str>,
     /// Public listener port (e.g. 80 or 8080).
     pub listener_port: u16,
+    /// True when the connection was accepted over TLS (HTTPS termination).
+    pub secure: bool,
 }
 
 impl L4Context {

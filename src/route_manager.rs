@@ -15,7 +15,7 @@ use crate::ir::{ListenerConfig, RouteTable};
 use crate::proxy::{CompiledRewrites, SunbeamProxy};
 use arc_swap::ArcSwap;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -71,6 +71,8 @@ pub struct RouteManager {
     history: Mutex<VecDeque<Version>>,
     /// Maximum number of versions to retain.
     max_history: usize,
+    /// Notifies waiters when the compiled L4 configuration changes.
+    l4_changed: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl RouteManager {
@@ -90,6 +92,7 @@ impl RouteManager {
             priorities: Mutex::new(HashMap::new()),
             history: Mutex::new(VecDeque::with_capacity(max_history.max(1))),
             max_history,
+            l4_changed: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 
@@ -101,6 +104,12 @@ impl RouteManager {
     /// Return a handle to the atomic compiled L4 configuration.
     pub fn l4_config(&self) -> Arc<ArcSwap<CompiledL4Config>> {
         Arc::clone(&self.l4_config)
+    }
+
+    /// Return a condition variable that is signaled whenever the compiled L4
+    /// configuration changes.
+    pub fn l4_changed(&self) -> Arc<(Mutex<bool>, Condvar)> {
+        Arc::clone(&self.l4_changed)
     }
 
     /// Return a handle to the atomic compiled rewrite table.
@@ -148,6 +157,13 @@ impl RouteManager {
         self.current.store(Arc::clone(&compiled_arc));
         self.l4_config.store(Arc::clone(&compiled_l4));
         self.rewrites.store(Arc::clone(&compiled_rewrites));
+
+        {
+            let (lock, cvar) = &*self.l4_changed;
+            let mut changed = lock.lock().unwrap();
+            *changed = true;
+            cvar.notify_all();
+        }
 
         {
             let mut sources = self.sources.lock().unwrap();
