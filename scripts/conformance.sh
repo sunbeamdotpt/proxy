@@ -299,6 +299,9 @@ run_tests() {
         args+=(-run-test "${RUN_TEST}")
     fi
 
+    local output_log="${PROJECT_ROOT}/target/conformance-output.log"
+    local detailed_report="${PROJECT_ROOT}/target/conformance-report-detailed.yaml"
+
     cd "${GATEWAY_API_DIR}/conformance"
     if [[ -n "${CONFORMANCE_BINARY:-}" && -x "${CONFORMANCE_BINARY}" ]]; then
         # shellcheck disable=SC2048
@@ -314,7 +317,7 @@ run_tests() {
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
-            "${args[@]}"
+            "${args[@]}" 2>&1 | tee "${output_log}"
     else
         # shellcheck disable=SC2048
         go test . -v \
@@ -329,8 +332,96 @@ run_tests() {
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
-            "${args[@]}"
+            "${args[@]}" 2>&1 | tee "${output_log}"
     fi
+
+    generate_detailed_report "${output_log}" "${detailed_report}"
+}
+
+generate_detailed_report() {
+    local log_file="$1"
+    local report_file="$2"
+
+    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" "${SUPPORTED_FEATURES}" "${DEFAULT_TARGET_TESTS[*]}" <<'PY'
+import re
+import sys
+from datetime import datetime, timezone
+
+log_file, report_file, gw_version, features, targets_str = sys.argv[1:6]
+target_tests = targets_str.split()
+
+status_re = re.compile(r'^\s*--- (PASS|FAIL|SKIP):\s+(.+?)\s*(?:\(([^)]+)\))?\s*$')
+
+records = []
+with open(log_file) as f:
+    for line in f:
+        line = line.rstrip('\n')
+        m = status_re.match(line)
+        if not m:
+            continue
+        raw_status, name, duration = m.groups()
+        status = {'PASS': 'passed', 'FAIL': 'failed', 'SKIP': 'skipped'}.get(raw_status, raw_status.lower())
+        records.append({
+            'name': name,
+            'status': status,
+            'duration': duration or '',
+        })
+
+summary = {'passed': 0, 'failed': 0, 'skipped': 0}
+for r in records:
+    if r['status'] == 'passed':
+        summary['passed'] += 1
+    elif r['status'] == 'failed':
+        summary['failed'] += 1
+    elif r['status'] == 'skipped':
+        summary['skipped'] += 1
+summary['total'] = len(records)
+
+# Derive target test results from top-level conformance tests.
+target_results = []
+for target in target_tests:
+    prefix = f'TestConformance/{target}'
+    matched = [r for r in records if r['name'] == prefix or r['name'].startswith(prefix + '/')]
+    if not matched:
+        target_results.append({'name': target, 'status': 'not_run'})
+    elif any(r['status'] == 'failed' for r in matched):
+        target_results.append({'name': target, 'status': 'failed'})
+    elif all(r['status'] == 'skipped' for r in matched):
+        target_results.append({'name': target, 'status': 'skipped'})
+    else:
+        target_results.append({'name': target, 'status': 'passed'})
+
+def esc(s):
+    return s.replace('\\', '\\\\').replace('"', '\\"')
+
+with open(report_file, 'w') as out:
+    out.write('apiVersion: gateway.networking.k8s.io/v1\n')
+    out.write(f'kind: DetailedConformanceReport\n')
+    out.write(f'date: "{datetime.now(timezone.utc).isoformat()}"\n')
+    out.write(f'gatewayAPIVersion: {gw_version}\n')
+    out.write('implementation:\n')
+    out.write('  organization: Sunbeam Studios\n')
+    out.write('  project: sunbeam-proxy\n')
+    out.write('  url: https://sunbeam.pt\n')
+    out.write('  version: v0.1.0\n')
+    out.write(f'  contact: "hello@sunbeam.pt"\n')
+    out.write(f'supportedFeatures: "{esc(features)}"\n')
+    out.write('summary:\n')
+    out.write(f'  total: {summary["total"]}\n')
+    out.write(f'  passed: {summary["passed"]}\n')
+    out.write(f'  failed: {summary["failed"]}\n')
+    out.write(f'  skipped: {summary["skipped"]}\n')
+    out.write('targetTests:\n')
+    for t in target_results:
+        out.write(f'  - name: {t["name"]}\n')
+        out.write(f'    status: {t["status"]}\n')
+    out.write('tests:\n')
+    for r in records:
+        out.write(f'  - name: {r["name"]}\n')
+        out.write(f'    status: {r["status"]}\n')
+        if r['duration']:
+            out.write(f'    duration: {r["duration"]}\n')
+PY
 }
 
 run_command() {
