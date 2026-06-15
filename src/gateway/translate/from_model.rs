@@ -102,7 +102,7 @@ impl From<&gw::WeightedBackend> for ir::WeightedBackend {
             tls: value.tls.as_ref().map(|t| ir::BackendTlsConfig {
                 sni: Arc::clone(&t.hostname),
                 verify_hostname: true,
-                alternative_cn: t.subject_alt_names.first().cloned(),
+                alternative_cn: None,
                 client_cert_id: None,
                 ca_bundle_pem: if t.ca_bundle_pem.is_empty() {
                     None
@@ -219,6 +219,196 @@ mod tests {
                 name: "X-Backend".into(),
                 value: "yes".into(),
             }
+        );
+    }
+
+    #[test]
+    fn path_match_regex_from_model() {
+        assert_eq!(
+            ir::PathMatch::from(&gw::PathMatch::Regex("/api/.*".into())),
+            ir::PathMatch::Regex("/api/.*".into())
+        );
+    }
+
+    #[test]
+    fn path_rewrite_from_model() {
+        assert_eq!(
+            ir::PathRewrite::from(&gw::PathRewrite::FullReplace("/new".into())),
+            ir::PathRewrite::FullReplace("/new".into())
+        );
+        assert_eq!(
+            ir::PathRewrite::from(&gw::PathRewrite::PrefixReplace {
+                prefix: "/old".into(),
+                replacement: "/new".into(),
+            }),
+            ir::PathRewrite::PrefixReplace {
+                prefix: "/old".into(),
+                replacement: "/new".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn header_match_value_from_model() {
+        assert_eq!(
+            ir::HeaderMatchValue::from(&gw::HeaderMatchValue::Exact("v".into())),
+            ir::HeaderMatchValue::Exact("v".into())
+        );
+        assert_eq!(
+            ir::HeaderMatchValue::from(&gw::HeaderMatchValue::Regex("v.*".into())),
+            ir::HeaderMatchValue::Regex("v.*".into())
+        );
+        assert_eq!(
+            ir::HeaderMatchValue::from(&gw::HeaderMatchValue::Present),
+            ir::HeaderMatchValue::Present
+        );
+        assert_eq!(
+            ir::HeaderMatchValue::from(&gw::HeaderMatchValue::Absent),
+            ir::HeaderMatchValue::Absent
+        );
+    }
+
+    #[test]
+    fn query_param_match_value_regex_from_model() {
+        assert_eq!(
+            ir::QueryParamMatchValue::from(&gw::QueryParamMatchValue::Regex(".*".into())),
+            ir::QueryParamMatchValue::Regex(".*".into())
+        );
+    }
+
+    #[test]
+    fn route_match_empty_optional_from_model() {
+        let gw_match = gw::RouteMatch {
+            path: None,
+            method: None,
+            headers: vec![],
+            query_params: vec![],
+        };
+        let ir_match = ir::RequestMatch::from(&gw_match);
+        assert!(ir_match.path.is_none());
+        assert!(ir_match.method.is_none());
+        assert!(ir_match.headers.is_empty());
+        assert!(ir_match.query_params.is_empty());
+    }
+
+    #[test]
+    fn weighted_backend_tls_from_model() {
+        let empty_ca = gw::WeightedBackend {
+            backend: "https://svc:8443".into(),
+            weight: 5,
+            protocol: crate::ir::BackendProtocol::Https,
+            filters: vec![],
+            tls: Some(gw::BackendTlsAttachment {
+                hostname: "svc.example.com".into(),
+                ca_bundle_pem: "".into(),
+                subject_alt_names: vec!["svc.example.com".into()],
+            }),
+        };
+        let ir_wb = ir::WeightedBackend::from(&empty_ca);
+        assert_eq!(ir_wb.backend.as_ref(), "https://svc:8443");
+        assert!(ir_wb.tls.is_some());
+        let tls = ir_wb.tls.unwrap();
+        assert_eq!(tls.sni.as_ref(), "svc.example.com");
+        assert!(tls.verify_hostname);
+        assert!(tls.ca_bundle_pem.is_none());
+        assert_eq!(tls.subject_alt_names.len(), 1);
+
+        let with_ca = gw::WeightedBackend {
+            backend: "https://svc:8443".into(),
+            weight: 5,
+            protocol: crate::ir::BackendProtocol::Https,
+            filters: vec![],
+            tls: Some(gw::BackendTlsAttachment {
+                hostname: "svc.example.com".into(),
+                ca_bundle_pem: "PEM".into(),
+                subject_alt_names: vec![],
+            }),
+        };
+        let ir_wb = ir::WeightedBackend::from(&with_ca);
+        assert_eq!(
+            ir_wb.tls.as_ref().unwrap().ca_bundle_pem.as_deref(),
+            Some("PEM")
+        );
+        assert!(ir_wb.tls.as_ref().unwrap().subject_alt_names.is_empty());
+    }
+
+    #[test]
+    fn route_filter_to_request_filters_all_request_arms() {
+        let filters = vec![
+            gw::RouteFilter::RequestHeaderSet {
+                name: "X-Set".into(),
+                value: "a".into(),
+            },
+            gw::RouteFilter::RequestHeaderAdd {
+                name: "X-Add".into(),
+                value: "b".into(),
+            },
+            gw::RouteFilter::RequestHeaderRemove {
+                name: "X-Remove".into(),
+            },
+            gw::RouteFilter::UrlRewrite {
+                hostname: Some("example.com".into()),
+                path: Some(gw::PathRewrite::FullReplace("/path".into())),
+            },
+            gw::RouteFilter::UrlRewrite {
+                hostname: Some("host-only.example.com".into()),
+                path: None,
+            },
+            gw::RouteFilter::UrlRewrite {
+                hostname: None,
+                path: Some(gw::PathRewrite::PrefixReplace {
+                    prefix: "/old".into(),
+                    replacement: "/new".into(),
+                }),
+            },
+            gw::RouteFilter::ResponseHeaderSet {
+                name: "X-Out".into(),
+                value: "c".into(),
+            },
+            gw::RouteFilter::RequestRedirect {
+                scheme: None,
+                hostname: None,
+                path: None,
+                port: None,
+                status_code: 301,
+            },
+            gw::RouteFilter::RequestMirror {
+                backend: "http://mirror".into(),
+                fraction: None,
+            },
+            gw::RouteFilter::Cors {
+                allow_origins: vec![],
+                allow_methods: vec![],
+                allow_headers: vec![],
+                expose_headers: vec![],
+                max_age: None,
+                allow_credentials: false,
+            },
+        ];
+        let ir_filters: Vec<_> = filters
+            .iter()
+            .flat_map(route_filter_to_request_filters)
+            .collect();
+        assert_eq!(
+            ir_filters,
+            vec![
+                ir::RequestFilter::SetHeader {
+                    name: "X-Set".into(),
+                    value: "a".into(),
+                },
+                ir::RequestFilter::AddHeader {
+                    name: "X-Add".into(),
+                    value: "b".into(),
+                },
+                ir::RequestFilter::RemoveHeader("X-Remove".into()),
+                ir::RequestFilter::RewriteHostname("example.com".into()),
+                ir::RequestFilter::RewritePath(ir::PathRewrite::FullReplace("/path".into())),
+                ir::RequestFilter::RewriteHostname("host-only.example.com".into()),
+                ir::RequestFilter::RewritePath(ir::PathRewrite::PrefixReplace {
+                    prefix: "/old".into(),
+                    replacement: "/new".into(),
+                }),
+            ]
         );
     }
 }

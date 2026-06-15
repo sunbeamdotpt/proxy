@@ -17,7 +17,7 @@ use crate::gateway::model::{
     QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch, TlsMode,
 };
 use crate::ir;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -120,6 +120,8 @@ struct EffectiveHostname {
     listener_port: Option<u16>,
     /// Optional Gateway-wide backend client certificate identifier.
     client_cert_id: Option<Arc<str>>,
+    /// Listener identifier when the route resolved to a concrete listener.
+    listener_id: Option<Arc<str>>,
 }
 
 /// Check whether a listener's namespace scope allows routes from `route_ns`.
@@ -207,23 +209,27 @@ fn compute_effective_hostnames<R: RouteHostnames>(
                 client_cert_id = gateway_state.and_then(|g| g.backend_client_cert_id.clone());
                 match gateway_state {
                     Some(gateway) => {
-                        let listeners: Vec<&ListenerState> =
-                            if let Some(section) = parent.section_name.as_deref() {
-                                gateway
-                                    .listeners
-                                    .iter()
-                                    .filter(|l| {
-                                        l.name.as_ref() == section
-                                            && parent.port.map(|p| p == l.port).unwrap_or(true)
-                                    })
-                                    .collect()
-                            } else {
-                                gateway
-                                    .listeners
-                                    .iter()
-                                    .filter(|l| parent.port.map(|p| p == l.port).unwrap_or(true))
-                                    .collect()
-                            };
+                        let listeners: Vec<&ListenerState> = if let Some(section) =
+                            parent.section_name.as_deref()
+                        {
+                            gateway
+                                .listeners
+                                .iter()
+                                .filter(|l| {
+                                    l.programmed
+                                        && l.name.as_ref() == section
+                                        && parent.port.map(|p| p == l.port).unwrap_or(true)
+                                })
+                                .collect()
+                        } else {
+                            gateway
+                                .listeners
+                                .iter()
+                                .filter(|l| {
+                                    l.programmed && parent.port.map(|p| p == l.port).unwrap_or(true)
+                                })
+                                .collect()
+                        };
                         (listeners, true, &view.listener_allowed)
                     }
                     None => (Vec::new(), false, &view.listener_allowed),
@@ -263,6 +269,7 @@ fn compute_effective_hostnames<R: RouteHostnames>(
                     listener_hostname: HostnameMatch::Any,
                     listener_port: None,
                     client_cert_id: None,
+                    listener_id: None,
                 });
                 continue;
             }
@@ -283,6 +290,12 @@ fn compute_effective_hostnames<R: RouteHostnames>(
                     listener_hostname: listener_match,
                     listener_port: Some(listener.port),
                     client_cert_id: client_cert_id.clone(),
+                    listener_id: Some(Arc::from(format!(
+                        "{}/{}/{}",
+                        parent_ns,
+                        parent_name,
+                        listener.name.as_ref()
+                    ))),
                 });
             }
         } else {
@@ -301,6 +314,12 @@ fn compute_effective_hostnames<R: RouteHostnames>(
                             listener_hostname: listener_match.clone(),
                             listener_port: Some(listener.port),
                             client_cert_id: client_cert_id.clone(),
+                            listener_id: Some(Arc::from(format!(
+                                "{}/{}/{}",
+                                parent_ns,
+                                parent_name,
+                                listener.name.as_ref()
+                            ))),
                         });
                     }
                 }
@@ -311,6 +330,7 @@ fn compute_effective_hostnames<R: RouteHostnames>(
                         listener_hostname: HostnameMatch::Any,
                         listener_port: None,
                         client_cert_id: None,
+                        listener_id: None,
                     });
                 }
             }
@@ -865,6 +885,9 @@ fn add_l4_listener(
     gateway: &GatewayState,
     listener: &ListenerState,
 ) {
+    if !listener.programmed {
+        return;
+    }
     let id: Arc<str> = Arc::from(format!(
         "{}/{}/{}",
         gateway.namespace.as_ref(),
@@ -1017,18 +1040,48 @@ fn translate_l4_routes(view: &GatewayView) -> (Vec<ir::ListenerConfig>, Vec<ir::
     // not terminated by this listener.
     const HTTPS_HTTP_TARGET: &str = "127.0.0.1:10443";
     const HTTP_TARGET: &str = "127.0.0.1:10443";
+
+    // Only open HTTPS listeners that have at least one HTTPRoute or GRPCRoute
+    // attached. This prevents unrelated base-resource HTTPS listeners from
+    // terminating TLS for hostnames whose intended listener is invalid or
+    // unprogrammed.
+    let mut https_listener_ids: HashSet<Arc<str>> = HashSet::new();
+    for route in &view.http_routes {
+        if route.parent_refs.is_empty() {
+            continue;
+        }
+        for eff in compute_effective_hostnames(route, view, "HTTPRoute") {
+            if let Some(id) = eff.listener_id {
+                https_listener_ids.insert(id);
+            }
+        }
+    }
+    for route in &view.grpc_routes {
+        if route.parent_refs.is_empty() {
+            continue;
+        }
+        for eff in compute_effective_hostnames(route, view, "GRPCRoute") {
+            if let Some(id) = eff.listener_id {
+                https_listener_ids.insert(id);
+            }
+        }
+    }
+
     for gateway in &view.gateways {
         for listener in &gateway.listeners {
             if listener.protocol.as_ref() != "HTTPS" {
                 continue;
             }
-            add_l4_listener(&mut listeners, gateway, listener);
             let id: Arc<str> = Arc::from(format!(
                 "{}/{}/{}",
                 gateway.namespace.as_ref(),
                 gateway.name.as_ref(),
                 listener.name.as_ref()
             ));
+            if !https_listener_ids.contains(&id) {
+                continue;
+            }
+            add_l4_listener(&mut listeners, gateway, listener);
             let listener_hostname = listener
                 .hostname
                 .as_deref()
@@ -2433,6 +2486,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![crate::gateway::model::ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 hostname: None,
                 port: 80,
@@ -2508,6 +2562,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![crate::gateway::model::ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 hostname: None,
                 port: 80,
@@ -2586,6 +2641,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![crate::gateway::model::ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 hostname: None,
                 port: 80,
@@ -2660,6 +2716,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![crate::gateway::model::ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 hostname: None,
                 port: 80,
@@ -2745,6 +2802,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("empty-hostname"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -2753,6 +2811,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("wildcard-example-com"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -2876,6 +2935,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("empty-hostname"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -2884,6 +2944,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("wildcard-example-com"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3024,6 +3085,7 @@ mod tests {
             name: Arc::from("gw"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("wildcard-example-com"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3107,6 +3169,7 @@ mod tests {
             name: Arc::from("gw"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("wildcard-example-com"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3261,6 +3324,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3327,6 +3391,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3419,6 +3484,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3499,6 +3565,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3572,6 +3639,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3649,6 +3717,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3769,6 +3838,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-1"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3777,6 +3847,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3785,6 +3856,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3793,6 +3865,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-4"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3896,6 +3969,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-1"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3904,6 +3978,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3912,6 +3987,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -3920,6 +3996,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-4"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -4027,6 +4104,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-1"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -4035,6 +4113,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-2"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -4043,6 +4122,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("listener-3"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -4058,6 +4138,7 @@ mod tests {
             name: Arc::from("httproute-hostname-intersection-all"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("listener-1"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -4286,6 +4367,7 @@ mod tests {
             name: Arc::from("same-namespace"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -4365,6 +4447,7 @@ mod tests {
             name: Arc::from("same-namespace"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -4448,6 +4531,7 @@ mod tests {
             generation: 1,
             listeners: vec![
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("tcp"),
                     protocol: Arc::from("TCP"),
                     port: 9001,
@@ -4456,6 +4540,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("udp"),
                     protocol: Arc::from("UDP"),
                     port: 9002,
@@ -4464,6 +4549,7 @@ mod tests {
                     frontend_validation: None,
                 },
                 ListenerState {
+                    programmed: true,
                     name: Arc::from("tls"),
                     protocol: Arc::from("TLS"),
                     port: 9003,
@@ -4574,6 +4660,7 @@ mod tests {
         assert_eq!(listeners.len(), 1);
 
         let unknown = ListenerState {
+            programmed: true,
             name: Arc::from("weird"),
             protocol: Arc::from("SCTP"),
             port: 9004,
@@ -4628,6 +4715,7 @@ mod tests {
             name: Arc::from("gw-http"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 8080,
@@ -4728,6 +4816,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("tcp"),
                 protocol: Arc::from("TCP"),
                 port: 9001,
@@ -4809,6 +4898,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -4879,6 +4969,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -4957,6 +5048,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("http"),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -5034,6 +5126,7 @@ mod tests {
             name: Arc::from("gw"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("https"),
                 protocol: Arc::from("HTTPS"),
                 port: 443,

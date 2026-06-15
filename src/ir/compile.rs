@@ -508,33 +508,31 @@ impl CompiledL4Config {
         let mut listeners = Vec::with_capacity(merged.len());
         let mut listener_id_map: HashMap<Arc<str>, Arc<str>> = HashMap::new();
         for (canonical_key, group) in merged {
-            if group.len() == 1 {
-                let l = group.into_iter().next().unwrap();
-                listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&l.id));
-                listeners.push(l);
+            let bind_addr = Arc::clone(&group[0].bind_addr);
+            let has_tls = group.iter().any(|l| l.protocol == Protocol::Tls);
+            let protocol = if has_tls {
+                Protocol::Tls
             } else {
-                let bind_addr = Arc::clone(&group[0].bind_addr);
-                let has_tls = group.iter().any(|l| l.protocol == Protocol::Tls);
-                let protocol = if has_tls {
-                    Protocol::Tls
-                } else {
-                    group[0].protocol
-                };
-                let tls = group.iter().find_map(|l| l.tls.clone());
-                let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
-                let frontend_validation = group.iter().find_map(|l| l.frontend_validation.clone());
-                for l in &group {
-                    listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_key));
-                }
-                listeners.push(CompiledListener {
-                    id: canonical_key,
-                    bind_addr,
-                    protocol,
-                    tls,
-                    redirect_http_to_https,
-                    frontend_validation,
-                });
+                group[0].protocol
+            };
+            let tls = group.iter().find_map(|l| l.tls.clone());
+            let redirect_http_to_https = group.iter().any(|l| l.redirect_http_to_https);
+            let frontend_validation = group
+                .iter()
+                .filter_map(|l| l.frontend_validation.clone())
+                .find(|v| !v.allow_insecure_fallback)
+                .or_else(|| group.iter().find_map(|l| l.frontend_validation.clone()));
+            for l in &group {
+                listener_id_map.insert(Arc::clone(&l.id), Arc::clone(&canonical_key));
             }
+            listeners.push(CompiledListener {
+                id: canonical_key,
+                bind_addr,
+                protocol,
+                tls,
+                redirect_http_to_https,
+                frontend_validation,
+            });
         }
         listeners.sort_by(|a, b| a.id.cmp(&b.id));
 
