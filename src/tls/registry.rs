@@ -10,9 +10,15 @@
 use arc_swap::ArcSwap;
 use pingora_core::utils::tls::CertKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use rustls::server::{
+    danger::{ClientCertVerified, ClientCertVerifier},
+    ClientHello, ResolvesServerCert, WebPkiClientVerifier,
+};
 use rustls::sign::CertifiedKey;
-use rustls::RootCertStore;
+use rustls::{
+    client::danger::HandshakeSignatureValid, DigitallySignedStruct, DistinguishedName,
+    RootCertStore, SignatureScheme,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -104,6 +110,69 @@ impl Default for TlsRegistry {
     }
 }
 
+/// Client certificate verifier that requests a certificate but accepts any
+/// (or no) certificate without validating it. This implements Gateway API
+/// `AllowInsecureFallback` frontend validation mode.
+#[derive(Debug)]
+struct FallbackClientVerifier {
+    subjects: Vec<DistinguishedName>,
+}
+
+impl FallbackClientVerifier {
+    fn new(roots: &RootCertStore) -> Self {
+        Self {
+            subjects: roots.subjects(),
+        }
+    }
+}
+
+impl ClientCertVerifier for FallbackClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.subjects
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms.supported_schemes())
+            .unwrap_or_default()
+    }
+}
+
 impl TlsRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -172,15 +241,13 @@ impl TlsRegistry {
             } else {
                 let roots = root_store_from_pem(ca_bundle_pem.as_bytes())
                     .map_err(|e| anyhow::anyhow!("invalid client-auth CA bundle: {e}"))?;
-                let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
-                let verifier = if allow_insecure_fallback {
-                    verifier.allow_unauthenticated()
+                let verifier: Arc<dyn ClientCertVerifier> = if allow_insecure_fallback {
+                    Arc::new(FallbackClientVerifier::new(&roots))
                 } else {
-                    verifier
+                    WebPkiClientVerifier::builder(Arc::new(roots))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?
                 };
-                let verifier = verifier
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?;
                 builder
                     .with_client_cert_verifier(verifier)
                     .with_cert_resolver(Arc::new(self.clone()))
@@ -422,6 +489,59 @@ jtV5PwQwHwYDVR0jBBgwFoAUpmCMSWMz9mnBS79SEzE4jtV5PwQwDwYDVR0TAQH/
 BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiB1dsAxvQaz62broeomlS+UCWde6fL3
 nVURdix68mNEZgIgE1aRqiWqS3uFqMmNUAbUYo+5H8twXAUaPr48yKs8t9A=
 -----END CERTIFICATE-----
+"#;
+
+    const EXPIRED_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBgjCCASmgAwIBAgIBZjAKBggqhkjOPQQDAjAgMR4wHAYDVQQDExV0ZXN0LXBh
+c3QuZXhhbXBsZS5jb20wHhcNMjAwMTAxMDAwMDAwWhcNMjAwMTAyMDAwMDAwWjAg
+MR4wHAYDVQQDExV0ZXN0LXBhc3QuZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq
+hkjOPQMBBwNCAAQhXNi5taxgeXUbLmAGDB5JV5R4Jt/RNd0eL2/ZJMO7IbezjQbj
+JLtaut1VhYS9T+wqiqSjkmJlUwAzlNp2LseFo1QwUjAMBgNVHRMBAf8EAjAAMBMG
+A1UdJQQMMAoGCCsGAQUFBwMBMA4GA1UdDwEB/wQEAwIHgDAdBgNVHQ4EFgQUwfT3
+0uPrUfD3ljQTi8YjIwg2n9gwCgYIKoZIzj0EAwIDRwAwRAIgH+O3aXWKNcjJmt57
+LL/TZOHQ2mwGIigN0iUPI11RBIACIDhqrKE2BLJRRcHu05DbkF+BxsNsEELbWp17
+K9BddYUF
+-----END CERTIFICATE-----
+"#;
+
+    const EXPIRED_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg0aa2xlHVeFK4HOF4
+aQzKnv7oOA+RwkI+cQO4y3WkB+6hRANCAAQhXNi5taxgeXUbLmAGDB5JV5R4Jt/R
+Nd0eL2/ZJMO7IbezjQbjJLtaut1VhYS9T+wqiqSjkmJlUwAzlNp2LseF
+-----END PRIVATE KEY-----
+"#;
+
+    const NOT_YET_VALID_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBhjCCAS2gAwIBAgIBZTAKBggqhkjOPQQDAjAiMSAwHgYDVQQDExd0ZXN0LWZ1
+dHVyZS5leGFtcGxlLmNvbTAeFw0yNjA2MTkyMzAwMDBaFw0yNzA2MTkyMzAwMDBa
+MCIxIDAeBgNVBAMTF3Rlc3QtZnV0dXJlLmV4YW1wbGUuY29tMFkwEwYHKoZIzj0C
+AQYIKoZIzj0DAQcDQgAEIVzYubWsYHl1Gy5gBgweSVeUeCbf0TXdHi9v2STDuyG3
+s40G4yS7WrrdVYWEvU/sKoqko5JiZVMAM5Tadi7HhaNUMFIwDAYDVR0TAQH/BAIw
+ADATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0OBBYE
+FMH099Lj61Hw95Y0E4vGIyMINp/YMAoGCCqGSM49BAMCA0cAMEQCIGEMmNvRuPn0
+5/21UUQ+9IFLasI5J4MRREIT9gCmcaIuAiAc1LSyGr8RtPT9o7stLJ5D5mXW2+Iq
+g49PpqbyDpG6kQ==
+-----END CERTIFICATE-----
+"#;
+
+    const NO_SERVER_AUTH_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBrDCCAVKgAwIBAgIUSuMah+1CsnRTmIaz1VENZhyhLHYwCgYIKoZIzj0EAwIw
+ITEfMB0GA1UEAwwWdGVzdC1uby1zYS5leGFtcGxlLmNvbTAeFw0yNjA2MTUxMjQx
+MjVaFw0yNzA2MTUxMjQxMjVaMCExHzAdBgNVBAMMFnRlc3Qtbm8tc2EuZXhhbXBs
+ZS5jb20wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQoSizArljQBDm0OsNMHXSD
+/44aCuRL8mFGPRi4SkqJCvIWRkc4s6Q6rMK5Xo65PPrLeX2nVD/Q2MIoachkLhUQ
+o2gwZjAdBgNVHQ4EFgQUK2t/VctT1UaTrZD57zA3NQrhvXYwHwYDVR0jBBgwFoAU
+K2t/VctT1UaTrZD57zA3NQrhvXYwDwYDVR0TAQH/BAUwAwEB/zATBgNVHSUEDDAK
+BggrBgEFBQcDAzAKBggqhkjOPQQDAgNIADBFAiEAwxhbAC9LPq0LMyvgJOguxoZQ
+/Hylpvb7uW1iXhvH2+kCIHay1G/u82U9/0Qd3B2NdiewhREFiM/3A6zzl6rhsc7S
+-----END CERTIFICATE-----
+"#;
+
+    const NO_SERVER_AUTH_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgGiTv782OMnOXO4Nn
+NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
+8mFGPRi4SkqJCvIWRkc4s6Q6rMK5Xo65PPrLeX2nVD/Q2MIoachkLhUQ
+-----END PRIVATE KEY-----
 "#;
 
     fn test_key() -> Arc<CertifiedKey> {
@@ -668,6 +788,126 @@ nVURdix68mNEZgIgE1aRqiWqS3uFqMmNUAbUYo+5H8twXAUaPr48yKs8t9A=
         assert!(config.is_ok());
     }
 
+    #[test]
+    fn webpki_verifier_default_is_mandatory() {
+        ensure_provider();
+        let roots = root_store_from_pem(CLIENT_AUTH_CA_PEM.as_bytes()).unwrap();
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        assert!(verifier.client_auth_mandatory());
+    }
+
+    #[tokio::test]
+    async fn fallback_client_auth_allows_handshake_without_client_cert() {
+        ensure_provider();
+        use rustls::pki_types::ServerName;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+        use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+        let mut store = CertStore::default();
+        store.default = Some(test_key());
+        let registry = TlsRegistry::new();
+        registry.apply(store);
+
+        let server_config = registry
+            .server_config_with_client_auth(CLIENT_AUTH_CA_PEM, true)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(std::sync::Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(stream).await.unwrap();
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).await.unwrap();
+            tls.write_all(b"hello").await.unwrap();
+        });
+
+        #[derive(Debug)]
+        struct AcceptAnyVerifier;
+        impl rustls::client::danger::ServerCertVerifier for AcceptAnyVerifier {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &rustls::pki_types::CertificateDer<'_>,
+                _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+                _server_name: &rustls::pki_types::ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: rustls::pki_types::UnixTime,
+            ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &rustls::pki_types::CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+            {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &rustls::pki_types::CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+            {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                vec![rustls::SignatureScheme::ECDSA_NISTP256_SHA256]
+            }
+        }
+
+        let client_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyVerifier))
+            .with_no_client_auth();
+        let connector = TlsConnector::from(std::sync::Arc::new(client_config));
+        let server_name = ServerName::try_from("test.example.com").unwrap();
+
+        let client = tokio::spawn(async move {
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut tls = connector.connect(server_name, stream).await.unwrap();
+            tls.write_all(b"world").await.unwrap();
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+        });
+
+        timeout(Duration::from_secs(5), async {
+            server.await.unwrap();
+            client.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn client_cert_lookup() {
+        ensure_provider();
+        let mut store = CertStore::default();
+        let cert_key = crate::tls::registry::cert_key_from_pem(
+            TEST_CERT_PEM.as_bytes(),
+            TEST_KEY_PEM.as_bytes(),
+        )
+        .unwrap();
+        store
+            .client_certs
+            .insert(Arc::from("gateway/default/cert"), Arc::new(cert_key));
+        let registry = TlsRegistry::new();
+        registry.apply(store);
+        assert!(registry.has_client_cert("gateway/default/cert"));
+        assert!(registry.client_cert("gateway/default/cert").is_some());
+        assert!(!registry.has_client_cert("missing"));
+    }
+
     #[tokio::test]
     async fn full_tls_handshake_resolves_correct_certificate() {
         ensure_provider();
@@ -758,5 +998,173 @@ nVURdix68mNEZgIgE1aRqiWqS3uFqMmNUAbUYo+5H8twXAUaPr48yKs8t9A=
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn tls_registry_default_is_empty() {
+        let registry = TlsRegistry::default();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn tls_registry_snapshot_matches_applied_store() {
+        ensure_provider();
+        let registry = TlsRegistry::new();
+        let mut store = CertStore::default();
+        store.default = Some(test_key());
+        registry.apply(store);
+        let snapshot = registry.snapshot();
+        assert!(snapshot.default.is_some());
+        assert!(snapshot.exact.is_empty());
+        assert!(snapshot.wildcard.is_empty());
+    }
+
+    #[test]
+    fn parse_cert_chain_errors_on_invalid_pem() {
+        let result = parse_cert_chain(b"not a pem");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cert_chain_errors_when_no_certs() {
+        let result =
+            parse_cert_chain(b"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_private_key_errors_when_no_key() {
+        let result =
+            parse_private_key(b"-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_parts_errors_with_no_certs() {
+        ensure_provider();
+        let key = parse_private_key(TEST_KEY_PEM.as_bytes()).unwrap();
+        let result = certified_key_from_parts(vec![], key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_parts_errors_with_malformed_cert() {
+        ensure_provider();
+        let key = parse_private_key(TEST_KEY_PEM.as_bytes()).unwrap();
+        let bogus = CertificateDer::from(vec![1u8, 2, 3]);
+        let result = certified_key_from_parts(vec![bogus], key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_pem_rejects_expired_cert() {
+        ensure_provider();
+        let result =
+            certified_key_from_pem(EXPIRED_CERT_PEM.as_bytes(), EXPIRED_KEY_PEM.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_pem_rejects_not_yet_valid_cert() {
+        ensure_provider();
+        let result = certified_key_from_pem(
+            NOT_YET_VALID_CERT_PEM.as_bytes(),
+            EXPIRED_KEY_PEM.as_bytes(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certified_key_from_pem_rejects_missing_server_auth_eku() {
+        ensure_provider();
+        let result = certified_key_from_pem(
+            NO_SERVER_AUTH_CERT_PEM.as_bytes(),
+            NO_SERVER_AUTH_KEY_PEM.as_bytes(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cert_key_from_secret_errors_when_tls_crt_missing() {
+        ensure_provider();
+        use k8s_openapi::api::core::v1::Secret;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use k8s_openapi::ByteString;
+        use std::collections::BTreeMap;
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "tls.key".to_string(),
+            ByteString(TEST_KEY_PEM.as_bytes().to_vec()),
+        );
+        let secret = Secret {
+            metadata: ObjectMeta::default(),
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(cert_key_from_secret(&secret).is_err());
+    }
+
+    #[test]
+    fn cert_key_from_secret_errors_when_tls_key_missing() {
+        ensure_provider();
+        use k8s_openapi::api::core::v1::Secret;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use k8s_openapi::ByteString;
+        use std::collections::BTreeMap;
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "tls.crt".to_string(),
+            ByteString(TEST_CERT_PEM.as_bytes().to_vec()),
+        );
+        let secret = Secret {
+            metadata: ObjectMeta::default(),
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(cert_key_from_secret(&secret).is_err());
+    }
+
+    #[test]
+    fn certified_key_from_secret_errors_when_tls_crt_missing() {
+        ensure_provider();
+        use k8s_openapi::api::core::v1::Secret;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use k8s_openapi::ByteString;
+        use std::collections::BTreeMap;
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "tls.key".to_string(),
+            ByteString(TEST_KEY_PEM.as_bytes().to_vec()),
+        );
+        let secret = Secret {
+            metadata: ObjectMeta::default(),
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(certified_key_from_secret(&secret).is_err());
+    }
+
+    #[test]
+    fn certified_key_from_secret_errors_when_tls_key_missing() {
+        ensure_provider();
+        use k8s_openapi::api::core::v1::Secret;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use k8s_openapi::ByteString;
+        use std::collections::BTreeMap;
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "tls.crt".to_string(),
+            ByteString(TEST_CERT_PEM.as_bytes().to_vec()),
+        );
+        let secret = Secret {
+            metadata: ObjectMeta::default(),
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(certified_key_from_secret(&secret).is_err());
     }
 }

@@ -217,6 +217,7 @@ mod tests {
             name: Arc::from("gw-1"),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from("https"),
                 protocol: Arc::from("HTTPS"),
                 port: 443,
@@ -311,6 +312,7 @@ mod tests {
                 name: Arc::from("gw-1"),
                 generation: 1,
                 listeners: vec![ListenerState {
+                    programmed: true,
                     name: Arc::from("http"),
                     protocol: Arc::from("HTTP"),
                     port: 80,
@@ -358,5 +360,240 @@ mod tests {
             .await
             .unwrap();
         assert!(!changed);
+    }
+
+    #[tokio::test]
+    async fn maybe_write_gateway_certs_skips_invalid_listeners_and_writes_valid_one() {
+        let (_dir, cert_path, key_path) = test_dir();
+        let view = view_with_gateway(gateway_with_https_cert("tls-secret"));
+        let cert_pem = b"VALID_CERT"; // 10 bytes -> exercises base64 padding branch
+        let key_pem = b"VALID_KEY";
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let cert_pem = cert_pem.to_vec();
+                let key_pem = key_pem.to_vec();
+                async move {
+                    let path = req.uri().path().to_string();
+                    let body = if path.contains("/gateways/gw-1") {
+                        serde_json::json!({
+                            "apiVersion": "gateway.networking.k8s.io/v1",
+                            "kind": "Gateway",
+                            "metadata": { "name": "gw-1", "namespace": "default" },
+                            "spec": {
+                                "gatewayClassName": "sunbeam",
+                                "listeners": [
+                                    "not-an-object",
+                                    { "name": "http", "protocol": "HTTP", "port": 80 },
+                                    { "name": "https-no-tls", "protocol": "HTTPS", "port": 443 },
+                                    { "name": "https-tls-string", "protocol": "HTTPS", "port": 443, "tls": "string" },
+                                    { "name": "https-no-refs", "protocol": "HTTPS", "port": 443, "tls": {} },
+                                    { "name": "https-refs-not-array", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": {} } },
+                                    { "name": "https-ref-not-object", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": ["string"] } },
+                                    { "name": "https-ref-kind", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": [{ "kind": "ConfigMap", "name": "cm" }] } },
+                                    { "name": "https-ref-group", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": [{ "kind": "Secret", "group": "foo", "name": "sec" }] } },
+                                    { "name": "https-ref-no-name", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": [{ "kind": "Secret" }] } },
+                                    { "name": "https", "protocol": "HTTPS", "port": 443, "tls": { "certificateRefs": [{ "kind": "Secret", "name": "tls-secret" }] } }
+                                ]
+                            }
+                        })
+                    } else if path.contains("/secrets/tls-secret") {
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Secret",
+                            "metadata": { "name": "tls-secret", "namespace": "default" },
+                            "data": {
+                                "tls.crt": b64(&cert_pem),
+                                "tls.key": b64(&key_pem)
+                            }
+                        })
+                    } else {
+                        serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let changed = maybe_write_gateway_certs(&client, &view, &cert_path, &key_path)
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(std::fs::read(&cert_path).unwrap(), cert_pem);
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_pem);
+    }
+
+    #[tokio::test]
+    async fn maybe_write_gateway_certs_denies_cross_namespace_without_grant() {
+        let (_dir, cert_path, key_path) = test_dir();
+        let view = view_with_gateway(gateway_with_https_cert("tls-secret"));
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+                let path = req.uri().path().to_string();
+                let body = if path.contains("/gateways/gw-1") {
+                    serde_json::json!({
+                        "apiVersion": "gateway.networking.k8s.io/v1",
+                        "kind": "Gateway",
+                        "metadata": { "name": "gw-1", "namespace": "default" },
+                        "spec": {
+                            "gatewayClassName": "sunbeam",
+                            "listeners": [{
+                                "name": "https",
+                                "protocol": "HTTPS",
+                                "port": 443,
+                                "tls": {
+                                    "certificateRefs": [{
+                                        "kind": "Secret",
+                                        "name": "tls-secret",
+                                        "namespace": "other"
+                                    }]
+                                }
+                            }]
+                        }
+                    })
+                } else {
+                    serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+
+        let changed = maybe_write_gateway_certs(&client, &view, &cert_path, &key_path)
+            .await
+            .unwrap();
+        assert!(!changed);
+    }
+
+    #[tokio::test]
+    async fn maybe_write_gateway_certs_skips_when_secret_fetch_fails() {
+        let (_dir, cert_path, key_path) = test_dir();
+        let view = view_with_gateway(gateway_with_https_cert("tls-secret"));
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+                let path = req.uri().path().to_string();
+                let (status, body) = if path.contains("/gateways/gw-1") {
+                    let gw = serde_json::to_value(gateway_with_https_cert("tls-secret")).unwrap();
+                    (200, gw.to_string().into_bytes())
+                } else if path.contains("/secrets/tls-secret") {
+                    (404, b"not found".to_vec())
+                } else {
+                    (
+                        200,
+                        serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                            .to_string()
+                            .into_bytes(),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body))
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+
+        let changed = maybe_write_gateway_certs(&client, &view, &cert_path, &key_path)
+            .await
+            .unwrap();
+        assert!(!changed);
+    }
+
+    #[tokio::test]
+    async fn maybe_write_gateway_certs_errors_when_secret_has_no_data() {
+        let (_dir, cert_path, key_path) = test_dir();
+        let view = view_with_gateway(gateway_with_https_cert("tls-secret"));
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+                let path = req.uri().path().to_string();
+                let body = if path.contains("/gateways/gw-1") {
+                    serde_json::to_value(gateway_with_https_cert("tls-secret")).unwrap()
+                } else if path.contains("/secrets/tls-secret") {
+                    serde_json::json!({
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": { "name": "tls-secret", "namespace": "default" }
+                    })
+                } else {
+                    serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+
+        let err = maybe_write_gateway_certs(&client, &view, &cert_path, &key_path)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no data"));
+    }
+
+    #[tokio::test]
+    async fn maybe_write_gateway_certs_errors_when_write_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // cert_path itself is a directory, so writing the cert bytes fails.
+        let cert_path = dir.path().to_string_lossy().to_string();
+        let key_path = dir.path().join("tls.key").to_string_lossy().to_string();
+        let view = view_with_gateway(gateway_with_https_cert("tls-secret"));
+        let cert_pem = b"CERT";
+        let key_pem = b"KEY";
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let cert_pem = cert_pem.to_vec();
+                let key_pem = key_pem.to_vec();
+                async move {
+                    let path = req.uri().path().to_string();
+                    let body = if path.contains("/gateways/gw-1") {
+                        serde_json::to_value(gateway_with_https_cert("tls-secret")).unwrap()
+                    } else if path.contains("/secrets/tls-secret") {
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Secret",
+                            "metadata": { "name": "tls-secret", "namespace": "default" },
+                            "data": {
+                                "tls.crt": b64(&cert_pem),
+                                "tls.key": b64(&key_pem)
+                            }
+                        })
+                    } else {
+                        serde_json::json!({"apiVersion": "v1", "kind": "List", "items": []})
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let err = maybe_write_gateway_certs(&client, &view, &cert_path, &key_path)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("writing") || err.to_string().contains("Is a directory"));
     }
 }

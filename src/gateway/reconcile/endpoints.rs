@@ -41,7 +41,12 @@ struct ServiceInfo {
 }
 
 fn service_port_protocol(port: &ServicePort) -> crate::ir::BackendProtocol {
-    match port.app_protocol.as_deref() {
+    match port
+        .app_protocol
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("kubernetes.io/h2c") => crate::ir::BackendProtocol::H2c,
         Some("kubernetes.io/ws") => crate::ir::BackendProtocol::WebSocket,
         Some("kubernetes.io/wss") | Some("https") | Some("kubernetes.io/https") => {
@@ -238,20 +243,23 @@ fn expand_rule_backends<R: RuleWithBackends>(
             .iter()
             .find(|p| p.port == target.port)
             .and_then(|p| p.name.as_deref());
-        let tls_attachment = tls_policy_map
-            .get(&(
-                Arc::clone(&target.namespace),
-                Arc::clone(&target.name),
-                None,
-            ))
+        // Prefer a section-name-specific BackendTLSPolicy over a Service-wide
+        // policy when both target the same backend port.
+        let tls_attachment = port_name
+            .and_then(|name| {
+                tls_policy_map.get(&(
+                    Arc::clone(&target.namespace),
+                    Arc::clone(&target.name),
+                    Some(Arc::from(name)),
+                ))
+            })
             .cloned()
             .or_else(|| {
-                let name = Arc::from(port_name.unwrap_or(""));
                 tls_policy_map
                     .get(&(
                         Arc::clone(&target.namespace),
                         Arc::clone(&target.name),
-                        Some(name),
+                        None,
                     ))
                     .cloned()
             });
@@ -745,6 +753,91 @@ mod tests {
             "regular.ns.svc.cluster.local.:8080"
         );
         assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::Https);
+    }
+
+    #[test]
+    fn section_name_backend_tls_policy_preferred_over_service_wide() {
+        let mut svc = svc_clusterip();
+        svc.metadata.name = Some("regular".to_string());
+        svc.spec.as_mut().unwrap().ports = Some(vec![
+            ServicePort {
+                name: Some("http".to_string()),
+                port: 8080,
+                target_port: Some(IntOrString::Int(3000)),
+                ..Default::default()
+            },
+            ServicePort {
+                name: Some("https".to_string()),
+                port: 8443,
+                target_port: Some(IntOrString::Int(8443)),
+                ..Default::default()
+            },
+        ]);
+
+        let section_tls = BackendTlsAttachment {
+            hostname: Arc::from("section.example.com"),
+            ca_bundle_pem: Arc::from("section-ca"),
+            subject_alt_names: vec![],
+        };
+        let global_tls = BackendTlsAttachment {
+            hostname: Arc::from("global.example.com"),
+            ca_bundle_pem: Arc::from("global-ca"),
+            subject_alt_names: vec![],
+        };
+
+        let mut tls_map: HashMap<TlsPolicyKey, BackendTlsAttachment> = HashMap::new();
+        tls_map.insert((Arc::from("ns"), Arc::from("regular"), None), global_tls);
+        tls_map.insert(
+            (
+                Arc::from("ns"),
+                Arc::from("regular"),
+                Some(Arc::from("https")),
+            ),
+            section_tls,
+        );
+
+        let mut rule = make_rule("regular.ns.svc.cluster.local.:8443");
+        let services = build_service_map(vec![svc]);
+        let endpoints = build_endpoint_map(vec![]);
+
+        expand_rule_backends(&mut rule, &services, &endpoints, &tls_map);
+
+        assert_eq!(rule.backends.len(), 1);
+        assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::Https);
+        let tls = rule.backends[0].tls.as_ref().unwrap();
+        assert_eq!(tls.hostname.as_ref(), "section.example.com");
+    }
+
+    #[test]
+    fn service_wide_backend_tls_policy_used_when_no_section_match() {
+        let mut svc = svc_clusterip();
+        svc.metadata.name = Some("regular".to_string());
+        svc.spec.as_mut().unwrap().ports = Some(vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 8080,
+            target_port: Some(IntOrString::Int(3000)),
+            ..Default::default()
+        }]);
+
+        let global_tls = BackendTlsAttachment {
+            hostname: Arc::from("global.example.com"),
+            ca_bundle_pem: Arc::from("global-ca"),
+            subject_alt_names: vec![],
+        };
+
+        let mut tls_map: HashMap<TlsPolicyKey, BackendTlsAttachment> = HashMap::new();
+        tls_map.insert((Arc::from("ns"), Arc::from("regular"), None), global_tls);
+
+        let mut rule = make_rule("regular.ns.svc.cluster.local.:8080");
+        let services = build_service_map(vec![svc]);
+        let endpoints = build_endpoint_map(vec![]);
+
+        expand_rule_backends(&mut rule, &services, &endpoints, &tls_map);
+
+        assert_eq!(rule.backends.len(), 1);
+        assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::Https);
+        let tls = rule.backends[0].tls.as_ref().unwrap();
+        assert_eq!(tls.hostname.as_ref(), "global.example.com");
     }
 
     impl From<&Service> for ServiceInfo {

@@ -164,6 +164,13 @@ pub fn merge_cert_store(lower: &mut CertStore, higher: &CertStore) {
         lower.wildcard.push((pattern.clone(), Arc::clone(cert)));
     }
 
+    // Merge upstream client certificates so that Gateway-wide backend client
+    // certificates loaded by the Gateway cert source are available through the
+    // shared TLS registry.
+    for (id, cert) in &higher.client_certs {
+        lower.client_certs.insert(Arc::clone(id), Arc::clone(cert));
+    }
+
     // Trust roots are intentionally not merged here: the project does not
     // currently expose upstream or client-auth roots through certificate
     // sources, and RootCertStore only accepts the original certificate DER.
@@ -174,6 +181,834 @@ impl std::fmt::Debug for CompositeCertSource {
         f.debug_struct("CompositeCertSource")
             .field("sources", &self.sources.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::model::{GatewayState, GatewayView};
+    use kube::Client;
+
+    const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBijCCATGgAwIBAgIUae+5bMkQvXZI8kjz4yoGasBrilYwCgYIKoZIzj0EAwIw
+GzEZMBcGA1UEAwwQdGVzdC5leGFtcGxlLmNvbTAeFw0yNjA2MTMxMDExMTJaFw0y
+NzA2MTMxMDExMTJaMBsxGTAXBgNVBAMMEHRlc3QuZXhhbXBsZS5jb20wWTATBgcq
+hkjOPQIBBggqhkjOPQMBBwNCAASnTjZLqwGQj3b8xkyDFQe38SBzfsyxNUEy5fzO
+54cks0X7K9JIWJLigltzP4Jh5OwYUSD0UrKXSukj/LRKkL5Eo1MwUTAdBgNVHQ4E
+FgQUyoVck0knQWBZB4na42ZOz3Ke/ykwHwYDVR0jBBgwFoAUyoVck0knQWBZB4na
+42ZOz3Ke/ykwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiAFHJQe
+Ltr83KS7tC2NbWRybv6NdUG5fuzrS61t06Yi6wIgOkoD6+KlR4UOP4dFIojV5uz4
+huKv4WWxIg9T0tCH/yU=
+-----END CERTIFICATE-----
+"#;
+
+    const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg9/Ohvka44WjayWDp
+xz3bupzJa5joZlr/O55quA28UJWhRANCAASnTjZLqwGQj3b8xkyDFQe38SBzfsyx
+NUEy5fzO54cks0X7K9JIWJLigltzP4Jh5OwYUSD0UrKXSukj/LRKkL5E
+-----END PRIVATE KEY-----
+"#;
+
+    fn test_cert_key() -> Arc<pingora_core::utils::tls::CertKey> {
+        Arc::new(
+            crate::tls::registry::cert_key_from_pem(
+                TEST_CERT_PEM.as_bytes(),
+                TEST_KEY_PEM.as_bytes(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn test_certified_key() -> Arc<rustls::sign::CertifiedKey> {
+        crate::tls::registry::certified_key_from_pem(
+            TEST_CERT_PEM.as_bytes(),
+            TEST_KEY_PEM.as_bytes(),
+        )
+        .unwrap()
+    }
+
+    const CERT_B64: &str = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJpakNDQVRHZ0F3SUJBZ0lVYWUrNWJNa1F2WFpJOGtqejR5b0dhc0JyaWxZd0NnWUlLb1pJemowRUF3SXcKR3pFWk1CY0dBMVVFQXd3UWRHVnpkQzVsZUdGdGNHeGxMbU52YlRBZUZ3MHlOakEyTVRNeE1ERXhNVEphRncweQpOekEyTVRNeE1ERXhNVEphTUJzeEdUQVhCZ05WQkFNTUVIUmxjM1F1WlhoaGJYQnNaUzVqYjIwd1dUQVRCZ2NxCmhrak9QUUlCQmdncWhrak9QUU1CQndOQ0FBU25UalpMcXdHUWozYjh4a3lERlFlMzhTQnpmc3l4TlVFeTVmek8KNTRja3MwWDdLOUpJV0pMaWdsdHpQNEpoNU93WVVTRDBVcktYU3Vrai9MUktrTDVFbzFNd1VUQWRCZ05WSFE0RQpGZ1FVeW9WY2swa25RV0JaQjRuYTQyWk96M0tlL3lrd0h3WURWUjBqQkJnd0ZvQVV5b1ZjazBrblFXQlpCNG5hCjQyWk96M0tlL3lrd0R3WURWUjBUQVFIL0JBVXdBd0VCL3pBS0JnZ3Foa2pPUFFRREFnTkhBREJFQWlBRkhKUWUKTHRyODNLUzd0QzJOYldSeWJ2Nk5kVUc1ZnV6clM2MXQwNllpNndJZ09rb0Q2K0tsUjRVT1A0ZEZJb2pWNXV6NApodUt2NFdXeElnOVQwdENIL3lVPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==";
+    const KEY_B64: &str = "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZzkvT2h2a2E0NFdqYXlXRHAKeHozYnVwekphNWpvWmxyL081NXF1QTI4VUpXaFJBTkNBQVNuVGpaTHF3R1FqM2I4eGt5REZRZTM4U0J6ZnN5eApOVUV5NWZ6TzU0Y2tzMFg3SzlKSVdKTGlnbHR6UDRKaDVPd1lVU0QwVXJLWFN1a2ovTFJLa0w1RQotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==";
+
+    #[test]
+    fn merge_cert_store_overrides_default_and_merges_client_certs() {
+        let mut lower = CertStore::default();
+        let higher = CertStore {
+            default: Some(test_certified_key()),
+            exact: [(Arc::from("test.example.com"), test_certified_key())]
+                .into_iter()
+                .collect(),
+            client_certs: [(Arc::from("gateway/default/cert"), test_cert_key())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+
+        merge_cert_store(&mut lower, &higher);
+
+        assert!(lower.default.is_some());
+        assert!(lower.exact.contains_key("test.example.com"));
+        assert!(lower.client_certs.contains_key("gateway/default/cert"));
+    }
+
+    #[test]
+    fn merge_cert_store_overrides_wildcard_certs() {
+        let mut lower = CertStore::default();
+        let first = test_certified_key();
+        let second = test_certified_key();
+        lower.wildcard.push((
+            crate::tls::registry::WildcardPattern::new("*.example.com").unwrap(),
+            first,
+        ));
+
+        let higher = CertStore {
+            wildcard: vec![(
+                crate::tls::registry::WildcardPattern::new("*.example.com").unwrap(),
+                second,
+            )],
+            ..Default::default()
+        };
+
+        merge_cert_store(&mut lower, &higher);
+        assert_eq!(lower.wildcard.len(), 1);
+    }
+
+    #[test]
+    fn disk_source_loads_existing_files() {
+        let dir = std::env::temp_dir().join(format!("sunbeam-disk-cert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_path, TEST_KEY_PEM).unwrap();
+
+        let source = DiskCertSource::new(
+            Arc::from(cert_path.to_string_lossy().as_ref()),
+            Arc::from(key_path.to_string_lossy().as_ref()),
+        );
+        let snapshot = source.snapshot().unwrap();
+        assert!(snapshot.default.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disk_source_refreshes_changed_files() {
+        let dir = std::env::temp_dir().join(format!("sunbeam-disk-refresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_path, TEST_KEY_PEM).unwrap();
+
+        let source = DiskCertSource::new(
+            Arc::from(cert_path.to_string_lossy().as_ref()),
+            Arc::from(key_path.to_string_lossy().as_ref()),
+        );
+        source.refresh();
+        let snapshot = source.snapshot().unwrap();
+        assert!(snapshot.default.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disk_source_defaults_when_files_missing() {
+        let source = DiskCertSource::new(
+            Arc::from("/tmp/sunbeam-does-not-exist-cert.pem"),
+            Arc::from("/tmp/sunbeam-does-not-exist-key.pem"),
+        );
+        let snapshot = source.snapshot().unwrap();
+        assert!(snapshot.default.is_none());
+    }
+
+    #[test]
+    fn composite_source_merges_sources_by_priority() {
+        let mut composite = CompositeCertSource::new();
+        let disk = Arc::new(DiskCertSource::new(
+            Arc::from("/tmp/sunbeam-does-not-exist-cert.pem"),
+            Arc::from("/tmp/sunbeam-does-not-exist-key.pem"),
+        ));
+        let gateway = Arc::new(GatewayCertSource::new());
+        composite.add(10, gateway);
+        composite.add(5, disk);
+        let merged = composite.merge();
+        assert!(merged.default.is_none());
+        assert!(merged.client_certs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gateway_cert_source_loads_listener_and_backend_certs() {
+        use crate::gateway::model::{GatewayState, GatewayView};
+
+        fn secret_json(name: &str, cert_b64: &str, key_b64: &str) -> serde_json::Value {
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name, "namespace": "default"},
+                "data": {
+                    "tls.crt": cert_b64,
+                    "tls.key": key_b64
+                }
+            })
+        }
+
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [
+                    {
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "HTTPS",
+                        "hostname": "example.com",
+                        "tls": {
+                            "certificateRefs": [{"kind": "Secret", "name": "listener-cert"}]
+                        }
+                    }
+                ],
+                "tls": {
+                    "backend": {
+                        "clientCertificateRef": {"kind": "Secret", "name": "backend-cert"}
+                    }
+                }
+            }
+        });
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let body = if path
+                    == "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw"
+                {
+                    serde_json::to_string(&gateway_json).unwrap()
+                } else if path == "/api/v1/namespaces/default/secrets/listener-cert"
+                    || path == "/api/v1/namespaces/default/secrets/backend-cert"
+                {
+                    serde_json::to_string(&secret_json(
+                        path.rsplit('/').next().unwrap(),
+                        CERT_B64,
+                        KEY_B64,
+                    ))
+                    .unwrap()
+                } else {
+                    String::new()
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .body(kube::client::Body::from(bytes::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let view = GatewayView {
+            gateways: vec![GatewayState {
+                namespace: Arc::from("default"),
+                name: Arc::from("gw"),
+                generation: 1,
+                listeners: vec![],
+                backend_client_cert_id: Some(Arc::from("gateway/default/backend-cert")),
+            }],
+            ..Default::default()
+        };
+
+        let store = build_gateway_cert_store(&client, &view).await.unwrap();
+        assert!(store.exact.contains_key("example.com"));
+        assert!(store
+            .client_certs
+            .contains_key("gateway/default/backend-cert"));
+    }
+
+    fn fake_client_with_responses(responses: std::collections::HashMap<String, String>) -> Client {
+        let responses = std::sync::Arc::new(responses);
+        Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let responses = Arc::clone(&responses);
+                async move {
+                    let body = responses.get(&path).cloned().unwrap_or_default();
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .body(kube::client::Body::from(bytes::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        )
+    }
+
+    #[tokio::test]
+    async fn gateway_cert_source_refresh_populates_store() {
+        use crate::gateway::model::{GatewayState, GatewayView};
+
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [
+                    {
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "HTTPS",
+                        "hostname": "example.com",
+                        "tls": {
+                            "certificateRefs": [{"kind": "Secret", "name": "listener-cert"}]
+                        }
+                    }
+                ]
+            }
+        });
+        let secret_json = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "listener-cert", "namespace": "default"},
+            "data": {"tls.crt": CERT_B64, "tls.key": KEY_B64}
+        });
+
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/default/secrets/listener-cert".to_string(),
+            serde_json::to_string(&secret_json).unwrap(),
+        );
+
+        let client = fake_client_with_responses(responses);
+        let view = GatewayView {
+            gateways: vec![GatewayState {
+                namespace: Arc::from("default"),
+                name: Arc::from("gw"),
+                generation: 1,
+                listeners: vec![],
+                backend_client_cert_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let source = GatewayCertSource::new();
+        source.refresh(&client, &view).await;
+        let snapshot = source.snapshot().unwrap();
+        assert!(snapshot.exact.contains_key("example.com"));
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_loads_wildcard_listener_cert() {
+        use crate::gateway::model::{GatewayState, GatewayView};
+
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [
+                    {
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "HTTPS",
+                        "hostname": "*.example.com",
+                        "tls": {
+                            "certificateRefs": [{"kind": "Secret", "name": "listener-cert"}]
+                        }
+                    }
+                ]
+            }
+        });
+        let secret_json = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "listener-cert", "namespace": "default"},
+            "data": {"tls.crt": CERT_B64, "tls.key": KEY_B64}
+        });
+
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/default/secrets/listener-cert".to_string(),
+            serde_json::to_string(&secret_json).unwrap(),
+        );
+
+        let client = fake_client_with_responses(responses);
+        let view = GatewayView {
+            gateways: vec![GatewayState {
+                namespace: Arc::from("default"),
+                name: Arc::from("gw"),
+                generation: 1,
+                listeners: vec![],
+                backend_client_cert_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let store = build_gateway_cert_store(&client, &view).await.unwrap();
+        assert!(!store.wildcard.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_http_listener() {
+        use crate::gateway::model::{GatewayState, GatewayView};
+
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [
+                    {
+                        "name": "http",
+                        "port": 80,
+                        "protocol": "HTTP"
+                    }
+                ]
+            }
+        });
+
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+
+        let client = fake_client_with_responses(responses);
+        let view = GatewayView {
+            gateways: vec![GatewayState {
+                namespace: Arc::from("default"),
+                name: Arc::from("gw"),
+                generation: 1,
+                listeners: vec![],
+                backend_client_cert_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let store = build_gateway_cert_store(&client, &view).await.unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    fn gw_view(backend_id: Option<&str>) -> GatewayView {
+        GatewayView {
+            gateways: vec![GatewayState {
+                namespace: Arc::from("default"),
+                name: Arc::from("gw"),
+                generation: 1,
+                listeners: vec![],
+                backend_client_cert_id: backend_id.map(|s| Arc::from(s)),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn secret_json(name: &str, cert_b64: &str, key_b64: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": "default"},
+            "data": {"tls.crt": cert_b64, "tls.key": key_b64}
+        })
+    }
+
+    fn invalid_secret_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": "default"},
+            "data": {"tls.key": "aW52YWxpZA=="}
+        })
+    }
+
+    #[test]
+    fn disk_source_defaults_on_invalid_pem() {
+        let dir = std::env::temp_dir().join(format!("sunbeam-disk-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_path, "not a valid key").unwrap();
+        let source = DiskCertSource::new(
+            Arc::from(cert_path.to_string_lossy().as_ref()),
+            Arc::from(key_path.to_string_lossy().as_ref()),
+        );
+        assert!(source.snapshot().unwrap().default.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gateway_cert_source_default_is_usable() {
+        let source = GatewayCertSource::default();
+        assert!(source.snapshot().unwrap().default.is_none());
+    }
+
+    #[test]
+    fn composite_cert_source_snapshot_and_debug() {
+        let mut composite = CompositeCertSource::new();
+        let disk = Arc::new(DiskCertSource::new(
+            Arc::from("/tmp/sunbeam-does-not-exist-cert.pem"),
+            Arc::from("/tmp/sunbeam-does-not-exist-key.pem"),
+        ));
+        composite.add(1, disk);
+        assert!(composite.snapshot().unwrap().default.is_none());
+        let _ = format!("{:?}", composite);
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_continues_when_gateway_fetch_fails() {
+        let client = fake_client_with_responses(std::collections::HashMap::new());
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_non_object_listener() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": ["not-an-object"]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_listener_without_tls() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS"}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_listener_without_certificate_refs() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "tls": {}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_non_object_certificate_ref() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "tls": {"certificateRefs": ["not-an-object"]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_non_secret_certificate_ref() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "tls": {"certificateRefs": [{"kind": "ConfigMap", "name": "cm"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_certificate_ref_without_name() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "tls": {"certificateRefs": [{"kind": "Secret"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_none() && store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_denies_cross_namespace_certificate_ref() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "hostname": "example.com", "tls": {"certificateRefs": [{"kind": "Secret", "name": "listener-cert", "namespace": "other"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/other/secrets/listener-cert".to_string(),
+            serde_json::to_string(&secret_json("listener-cert", CERT_B64, KEY_B64)).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_continues_when_secret_fetch_fails() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "hostname": "example.com", "tls": {"certificateRefs": [{"kind": "Secret", "name": "missing-cert"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_continues_on_invalid_secret() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "hostname": "example.com", "tls": {"certificateRefs": [{"kind": "Secret", "name": "listener-cert"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/default/secrets/listener-cert".to_string(),
+            serde_json::to_string(&invalid_secret_json("listener-cert")).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_uses_default_when_hostname_empty() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {
+                "gatewayClassName": "sunbeam",
+                "listeners": [{"name": "https", "port": 443, "protocol": "HTTPS", "tls": {"certificateRefs": [{"kind": "Secret", "name": "listener-cert"}]}}]
+            }
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/default/secrets/listener-cert".to_string(),
+            serde_json::to_string(&secret_json("listener-cert", CERT_B64, KEY_B64)).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(None))
+            .await
+            .unwrap();
+        assert!(store.default.is_some());
+        assert!(store.exact.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_skips_malformed_backend_client_cert_id() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {"gatewayClassName": "sunbeam"}
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(Some("malformed")))
+            .await
+            .unwrap();
+        assert!(store.client_certs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_denies_cross_namespace_backend_client_cert() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {"gatewayClassName": "sunbeam"}
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/other/secrets/backend-cert".to_string(),
+            serde_json::to_string(&secret_json("backend-cert", CERT_B64, KEY_B64)).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store = build_gateway_cert_store(&client, &gw_view(Some("gateway/other/backend-cert")))
+            .await
+            .unwrap();
+        assert!(store.client_certs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_continues_when_backend_secret_missing() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {"gatewayClassName": "sunbeam"}
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store =
+            build_gateway_cert_store(&client, &gw_view(Some("gateway/default/backend-cert")))
+                .await
+                .unwrap();
+        assert!(store.client_certs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_gateway_cert_store_continues_on_invalid_backend_secret() {
+        let gateway_json = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "gw", "namespace": "default"},
+            "spec": {"gatewayClassName": "sunbeam"}
+        });
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/gw".to_string(),
+            serde_json::to_string(&gateway_json).unwrap(),
+        );
+        responses.insert(
+            "/api/v1/namespaces/default/secrets/backend-cert".to_string(),
+            serde_json::to_string(&invalid_secret_json("backend-cert")).unwrap(),
+        );
+        let client = fake_client_with_responses(responses);
+        let store =
+            build_gateway_cert_store(&client, &gw_view(Some("gateway/default/backend-cert")))
+                .await
+                .unwrap();
+        assert!(store.client_certs.is_empty());
     }
 }
 

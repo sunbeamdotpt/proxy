@@ -182,7 +182,7 @@ fn parse_backend_service(backend: &str) -> Option<(&str, &str)> {
     if svc != "svc" || cluster != "cluster" {
         return None;
     }
-    Some((name, ns))
+    Some((ns, name))
 }
 
 /// Abstraction over HTTP and gRPC route rules so they can share the gateway
@@ -584,7 +584,11 @@ async fn patch_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::model::{
+        GRPCRouteRule, GRPCRouteState, HTTPRouteRule, HTTPRouteState, ParentRef,
+    };
     use crate::gateway::reconcile::refgrant::GrantIndex;
+    use crate::ir::BackendProtocol;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -964,5 +968,432 @@ mod tests {
 
         reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         assert!(capture.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_crd_returns_empty() {
+        let client = mock_client_list_404();
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        assert!(states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_to_gateways_collects_http_and_grpc_parents() {
+        let gw = parent_ref_gateway("gw-ns", "gw", Some("https"), Some(443));
+        let not_gw = ParentRef {
+            group: Arc::from(""),
+            kind: Arc::from("Service"),
+            namespace: Some(Arc::from("other")),
+            name: Arc::from("ignored"),
+            section_name: None,
+            port: None,
+        };
+        let http_route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("http"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                matches: vec![],
+                backends: vec![weighted_backend("svc.default.svc.cluster.local.:80")],
+                filters: vec![],
+                timeout_ms: None,
+                request_timeout_ms: None,
+                programmed: true,
+            }],
+            parent_refs: vec![gw.clone(), not_gw],
+            programmed: true,
+        };
+        let grpc_route = GRPCRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("grpc"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![GRPCRouteRule {
+                name: None,
+                matches: vec![],
+                backends: vec![
+                    weighted_backend("svc.default.svc.cluster.local.:80"),
+                    weighted_backend("svc.default.svc.cluster.local.:80"),
+                ],
+                filters: vec![],
+                programmed: true,
+            }],
+            parent_refs: vec![gw.clone()],
+            programmed: true,
+        };
+
+        let map = build_service_to_gateways(&[http_route], &[grpc_route]);
+        let key = (Arc::from("default"), Arc::from("svc"));
+        let parents = map.get(&key).expect("service mapped");
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].name.as_ref(), "gw");
+        assert_eq!(parents[0].namespace.as_deref().unwrap(), "gw-ns");
+        assert_eq!(parents[0].section_name.as_deref().unwrap(), "https");
+        assert_eq!(parents[0].port.unwrap(), 443);
+    }
+
+    #[tokio::test]
+    async fn non_service_backends_are_ignored_by_service_to_gateways() {
+        let gw = parent_ref_gateway("gw-ns", "gw", None, None);
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("http"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                matches: vec![],
+                backends: vec![weighted_backend("not-a-service")],
+                filters: vec![],
+                timeout_ms: None,
+                request_timeout_ms: None,
+                programmed: true,
+            }],
+            parent_refs: vec![gw],
+            programmed: true,
+        };
+
+        let map = build_service_to_gateways(&[route], &[]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_backend_service_cases() {
+        assert_eq!(
+            parse_backend_service("svc.default.svc.cluster.local.:8080"),
+            Some(("default", "svc"))
+        );
+        assert_eq!(
+            parse_backend_service("svc.default.svc.cluster.local:8080"),
+            Some(("default", "svc"))
+        );
+        assert_eq!(parse_backend_service("too-short:80"), None);
+        assert_eq!(parse_backend_service("foo.bar.svc.other.local:80"), None);
+        assert_eq!(parse_backend_service("no-port-here"), None);
+    }
+
+    #[tokio::test]
+    async fn invalid_ca_kind_rejected() {
+        let policy = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "BackendTLSPolicy",
+            "metadata": { "name": "tls-policy", "namespace": "default", "generation": 1 },
+            "spec": {
+                "targetRefs": [{ "group": "", "kind": "Service", "name": "svc" }],
+                "validation": {
+                    "hostname": "svc.example.com",
+                    "caCertificateRefs": [{ "group": "", "kind": "Secret", "name": "ca" }]
+                }
+            }
+        });
+        let client = mock_client(vec![policy], HashMap::new(), None);
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        let s = &states[0];
+        assert!(!s.accepted);
+        assert_eq!(s.accepted_reason.as_ref(), "NoValidCACertificate");
+        assert!(!s.resolved_refs);
+        assert_eq!(s.resolved_refs_reason.as_ref(), "InvalidKind");
+        assert!(!s.programmed);
+    }
+
+    #[tokio::test]
+    async fn missing_configmap_rejected() {
+        let policy = backend_tls_policy(
+            "tls-policy",
+            "default",
+            1,
+            "2026-01-01T00:00:00Z",
+            "svc",
+            "Service",
+            &["missing"],
+        );
+        let client = mock_client(vec![policy], HashMap::new(), None);
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        let s = &states[0];
+        assert!(!s.accepted);
+        assert_eq!(s.accepted_reason.as_ref(), "NoValidCACertificate");
+        assert!(!s.resolved_refs);
+        assert_eq!(s.resolved_refs_reason.as_ref(), "InvalidCACertificateRef");
+        assert!(!s.programmed);
+    }
+
+    #[tokio::test]
+    async fn uri_subject_alt_name_is_parsed() {
+        let policy = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "BackendTLSPolicy",
+            "metadata": { "name": "tls-policy", "namespace": "default", "generation": 1 },
+            "spec": {
+                "targetRefs": [{ "group": "", "kind": "Service", "name": "svc" }],
+                "validation": {
+                    "hostname": "svc.example.com",
+                    "subjectAltNames": [{ "type": "URI", "uri": "spiffe://svc.example.com" }]
+                }
+            }
+        });
+        let client = mock_client(vec![policy], HashMap::new(), None);
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        let s = &states[0];
+        assert_eq!(s.subject_alt_names.len(), 1);
+        assert_eq!(s.subject_alt_names[0].r#type.as_ref(), "URI");
+        assert_eq!(
+            s.subject_alt_names[0].value.as_ref(),
+            "spiffe://svc.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_target_refs_rejected() {
+        let policy = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "BackendTLSPolicy",
+            "metadata": { "name": "tls-policy", "namespace": "default", "generation": 1 },
+            "spec": {
+                "targetRefs": [],
+                "validation": { "hostname": "svc.example.com" }
+            }
+        });
+        let client = mock_client(vec![policy], HashMap::new(), None);
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        let s = &states[0];
+        assert!(!s.accepted);
+        assert_eq!(s.accepted_reason.as_ref(), "InvalidKind");
+        assert!(!s.programmed);
+    }
+
+    #[tokio::test]
+    async fn ca_bundle_appends_newline() {
+        let policy = backend_tls_policy(
+            "tls-policy",
+            "default",
+            1,
+            "2026-01-01T00:00:00Z",
+            "svc",
+            "Service",
+            &["ca-map"],
+        );
+        let mut cms = HashMap::new();
+        cms.insert(
+            ("default".into(), "ca-map".into()),
+            configmap("ca-map", "default", true),
+        );
+        let client = mock_client(vec![policy], cms, None);
+        let grant_index = GrantIndex::default();
+
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
+        assert!(states[0].ca_bundle_pem.as_ref().ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn leader_patches_gateway_ancestor_with_optional_fields() {
+        let policy = backend_tls_policy(
+            "tls-policy",
+            "default",
+            3,
+            "2026-01-01T00:00:00Z",
+            "svc",
+            "Service",
+            &["ca-map"],
+        );
+        let mut cms = HashMap::new();
+        cms.insert(
+            ("default".into(), "ca-map".into()),
+            configmap("ca-map", "default", true),
+        );
+
+        let gw = parent_ref_gateway("gw-ns", "gw", Some("https"), Some(443));
+        let route = HTTPRouteState {
+            namespace: Arc::from("default"),
+            name: Arc::from("http"),
+            generation: 1,
+            hostnames: vec![],
+            rules: vec![HTTPRouteRule {
+                matches: vec![],
+                backends: vec![weighted_backend("svc.default.svc.cluster.local.:80")],
+                filters: vec![],
+                timeout_ms: None,
+                request_timeout_ms: None,
+                programmed: true,
+            }],
+            parent_refs: vec![gw],
+            programmed: true,
+        };
+
+        let capture = Arc::new(Mutex::new(Vec::new()));
+        let client = mock_client(vec![policy], cms, Some(capture.clone()));
+        let grant_index = GrantIndex::default();
+
+        let states =
+            reconcile_backend_tls_policies(&client, &[route], &[], &grant_index, true).await;
+        assert!(states[0].programmed);
+
+        let captured = capture.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let status = captured[0].1.get("status").unwrap();
+        let ancestor = status.get("ancestors").unwrap().as_array().unwrap()[0].clone();
+        let ancestor_ref = ancestor.get("ancestorRef").unwrap();
+        assert_eq!(
+            ancestor_ref.get("group").unwrap().as_str().unwrap(),
+            "gateway.networking.k8s.io"
+        );
+        assert_eq!(
+            ancestor_ref.get("kind").unwrap().as_str().unwrap(),
+            "Gateway"
+        );
+        assert_eq!(ancestor_ref.get("name").unwrap().as_str().unwrap(), "gw");
+        assert_eq!(
+            ancestor_ref.get("namespace").unwrap().as_str().unwrap(),
+            "gw-ns"
+        );
+        assert_eq!(
+            ancestor_ref.get("sectionName").unwrap().as_str().unwrap(),
+            "https"
+        );
+        assert_eq!(ancestor_ref.get("port").unwrap().as_u64().unwrap(), 443);
+
+        let conditions = ancestor.get("conditions").unwrap().as_array().unwrap();
+        for c in conditions {
+            assert_eq!(c.get("observedGeneration").unwrap().as_i64().unwrap(), 3);
+            assert_eq!(c.get("status").unwrap().as_str().unwrap(), "True");
+        }
+    }
+
+    #[tokio::test]
+    async fn leader_patches_not_programmed_when_ca_invalid() {
+        let policy = backend_tls_policy(
+            "tls-policy",
+            "default",
+            2,
+            "2026-01-01T00:00:00Z",
+            "svc",
+            "Service",
+            &["ca-map"],
+        );
+        let mut cms = HashMap::new();
+        cms.insert(
+            ("default".into(), "ca-map".into()),
+            configmap("ca-map", "default", false),
+        );
+        let capture = Arc::new(Mutex::new(Vec::new()));
+        let client = mock_client(vec![policy], cms, Some(capture.clone()));
+        let grant_index = GrantIndex::default();
+
+        reconcile_backend_tls_policies(&client, &[], &[], &grant_index, true).await;
+        let captured = capture.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let conditions = captured[0].1["status"]["ancestors"][0]["conditions"]
+            .as_array()
+            .unwrap();
+        for c in conditions {
+            assert_eq!(c.get("observedGeneration").unwrap().as_i64().unwrap(), 2);
+        }
+        let programmed = conditions
+            .iter()
+            .find(|c| c["type"].as_str().unwrap() == "Programmed")
+            .unwrap();
+        assert_eq!(programmed.get("status").unwrap().as_str().unwrap(), "False");
+        assert_eq!(
+            programmed.get("reason").unwrap().as_str().unwrap(),
+            "NotProgrammed"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_status_skips_patch() {
+        let policy = backend_tls_policy(
+            "tls-policy",
+            "default",
+            5,
+            "2026-01-01T00:00:00Z",
+            "svc",
+            "Service",
+            &["ca-map"],
+        );
+        let mut cms = HashMap::new();
+        cms.insert(
+            ("default".into(), "ca-map".into()),
+            configmap("ca-map", "default", true),
+        );
+        let capture1 = Arc::new(Mutex::new(Vec::new()));
+        let client1 = mock_client(vec![policy.clone()], cms.clone(), Some(capture1.clone()));
+        let grant_index = GrantIndex::default();
+
+        reconcile_backend_tls_policies(&client1, &[], &[], &grant_index, true).await;
+        let first_status = capture1.lock().unwrap()[0].1.get("status").unwrap().clone();
+
+        let mut policy_with_status = policy.clone();
+        policy_with_status
+            .as_object_mut()
+            .unwrap()
+            .insert("status".to_string(), first_status);
+        let capture2 = Arc::new(Mutex::new(Vec::new()));
+        let client2 = mock_client(vec![policy_with_status], cms, Some(capture2.clone()));
+
+        reconcile_backend_tls_policies(&client2, &[], &[], &grant_index, true).await;
+        assert!(capture2.lock().unwrap().is_empty());
+    }
+
+    fn parent_ref_gateway(
+        namespace: &str,
+        name: &str,
+        section_name: Option<&str>,
+        port: Option<u16>,
+    ) -> ParentRef {
+        ParentRef {
+            group: Arc::from("gateway.networking.k8s.io"),
+            kind: Arc::from("Gateway"),
+            namespace: Some(Arc::from(namespace)),
+            name: Arc::from(name),
+            section_name: section_name.map(Arc::from),
+            port,
+        }
+    }
+
+    fn weighted_backend(backend: &str) -> crate::gateway::model::WeightedBackend {
+        crate::gateway::model::WeightedBackend {
+            backend: Arc::from(backend),
+            weight: 1,
+            filters: vec![],
+            protocol: BackendProtocol::Http,
+            tls: None,
+        }
+    }
+
+    fn mock_client_list_404() -> kube::Client {
+        use std::convert::Infallible;
+        kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+                let path = req.uri().path();
+                if path == "/apis/gateway.networking.k8s.io/v1/backendtlspolicies" {
+                    let body = serde_json::json!({
+                        "kind": "Status",
+                        "apiVersion": "v1",
+                        "status": "Failure",
+                        "message": "not found",
+                        "reason": "NotFound",
+                        "code": 404
+                    });
+                    return Ok::<_, Infallible>(
+                        http::Response::builder()
+                            .status(404)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    );
+                }
+                Ok::<_, Infallible>(ok_response(serde_json::json!({"items": []})))
+            }),
+            "default",
+        )
     }
 }
