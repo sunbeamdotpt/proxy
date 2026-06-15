@@ -694,7 +694,7 @@ fn resolve_listener_parent(
     let matching_listeners: Vec<&ListenerState> = listeners
         .iter()
         .filter(|l| {
-            if conflicts.contains_key(l.name.as_ref()) {
+            if !l.programmed || conflicts.contains_key(l.name.as_ref()) {
                 return false;
             }
             let section_matches = parsed
@@ -1474,6 +1474,9 @@ pub async fn reconcile_httproute(
                                 ConditionType::NoMatchingParent => "NoMatchingParent",
                                 ConditionType::RefNotPermitted => "RefNotPermitted",
                                 ConditionType::UnsupportedFeature => "UnsupportedFeature",
+                                ConditionType::InsecureFrontendValidationMode => {
+                                    "InsecureFrontendValidationMode"
+                                }
                             },
                             "status": match c.status {
                                 ConditionStatus::True => "True",
@@ -1544,6 +1547,7 @@ pub async fn reconcile_httproute(
         }
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1581,7 +1585,9 @@ pub fn run_httproute_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::model::{GrantSubject, ListenerState, ReferenceGrantState};
+    use crate::gateway::model::{
+        GrantSubject, ListenerSetState, ListenerState, ReferenceGrantState,
+    };
 
     fn gw_with_listener(ns: &str, name: &str, listener: &str) -> GatewayState {
         GatewayState {
@@ -1589,6 +1595,7 @@ mod tests {
             name: Arc::from(name),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from(listener),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -2737,6 +2744,7 @@ mod tests {
             name: Arc::from(name),
             generation: 1,
             listeners: vec![ListenerState {
+                programmed: true,
                 name: Arc::from(listener),
                 protocol: Arc::from("HTTP"),
                 port: 80,
@@ -3110,5 +3118,722 @@ mod tests {
         };
         let cloned = ctx.clone();
         assert!(!cloned.is_leader.load(Ordering::Relaxed));
+    }
+
+    fn ls_with_listener(ns: &str, name: &str, listener: &str) -> ListenerSetState {
+        ListenerSetState {
+            namespace: Arc::from(ns),
+            name: Arc::from(name),
+            generation: 1,
+            created_at: 0,
+            parent_ref: ParentRef {
+                group: Arc::from("gateway.networking.k8s.io"),
+                kind: Arc::from("Gateway"),
+                namespace: Some(Arc::from(ns)),
+                name: Arc::from("gw-1"),
+                section_name: None,
+                port: None,
+            },
+            listeners: vec![ListenerState {
+                programmed: true,
+                name: Arc::from(listener),
+                protocol: Arc::from("HTTP"),
+                port: 80,
+                hostname: None,
+                tls_mode: None,
+                frontend_validation: None,
+            }],
+            conflicts: std::collections::BTreeMap::new(),
+            accepted: true,
+            programmed: true,
+            reason: Arc::from(""),
+            listener_cert_errors: vec![None],
+            listener_kind_errors: vec![None],
+        }
+    }
+
+    #[test]
+    fn listenerset_parent_accepted() {
+        let route = sample_route(vec![serde_json::json!({
+            "group": "gateway.networking.k8s.io",
+            "kind": "ListenerSet",
+            "name": "ls-1",
+            "sectionName": "http"
+        })]);
+        let listener_sets = vec![ls_with_listener("default", "ls-1", "http")];
+        let mut listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_set_allowed.insert(
+            (
+                "default".to_string(),
+                "ls-1".to_string(),
+                "http".to_string(),
+            ),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::All,
+                    selector: None,
+                },
+            },
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &[],
+            &listener_sets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &listener_set_allowed,
+            &grant_index,
+        );
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::True);
+        assert_eq!(results[0].route_state.parent_refs.len(), 1);
+    }
+
+    #[test]
+    fn listenerset_parent_not_found() {
+        let route = sample_route(vec![serde_json::json!({
+            "group": "gateway.networking.k8s.io",
+            "kind": "ListenerSet",
+            "name": "missing-ls"
+        })]);
+        let grant_index = GrantIndex::new(vec![]);
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &grant_index,
+        );
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NoMatchingParent");
+    }
+
+    #[test]
+    fn listenerset_conflict_listener_skipped() {
+        let route = sample_route(vec![serde_json::json!({
+            "group": "gateway.networking.k8s.io",
+            "kind": "ListenerSet",
+            "name": "ls-1",
+            "sectionName": "conflict"
+        })]);
+        let mut ls = ls_with_listener("default", "ls-1", "conflict");
+        ls.conflicts
+            .insert(Arc::from("conflict"), Arc::from("HostnameConflict"));
+        let listener_sets = vec![ls];
+        let mut listener_set_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_set_allowed.insert(
+            (
+                "default".to_string(),
+                "ls-1".to_string(),
+                "conflict".to_string(),
+            ),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::All,
+                    selector: None,
+                },
+            },
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &[],
+            &listener_sets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &listener_set_allowed,
+            &grant_index,
+        );
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NotAllowedByListeners");
+    }
+
+    #[test]
+    fn namespace_from_none_rejects_route() {
+        let route = sample_route(vec![
+            serde_json::json!({"name": "gw-1", "sectionName": "http"}),
+        ]);
+        let gateways = vec![gw_with_listener("default", "gw-1", "http")];
+        let mut listener_allowed = HashMap::<(String, String, String), AllowedRoutes>::new();
+        listener_allowed.insert(
+            (
+                "default".to_string(),
+                "gw-1".to_string(),
+                "http".to_string(),
+            ),
+            AllowedRoutes {
+                kinds: vec![],
+                namespaces: RouteNamespaces {
+                    from: NamespaceFrom::None,
+                    selector: None,
+                },
+            },
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let results = reconcile_httproutes_with_context(
+            &[route],
+            &gateways,
+            &[],
+            &HashMap::new(),
+            &listener_allowed,
+            &HashMap::new(),
+            &grant_index,
+        );
+        let accepted = results[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .find(|c| matches!(c.condition_type, ConditionType::Accepted))
+            .unwrap();
+        assert_eq!(accepted.status, ConditionStatus::False);
+        assert_eq!(accepted.reason, "NotAllowedByListeners");
+    }
+
+    #[test]
+    fn parse_url_rewrite_hostname_only() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "URLRewrite",
+                        "urlRewrite": { "hostname": "new.example.com" }
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert_eq!(
+            *filter,
+            RouteFilter::UrlRewrite {
+                hostname: Some(Arc::from("new.example.com")),
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_url_rewrite_empty_returns_none() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "URLRewrite",
+                        "urlRewrite": {}
+                    }]
+                }]
+            }
+        }));
+        assert!(parse_httproute_state(&route).rules[0].filters.is_empty());
+    }
+
+    #[test]
+    fn parse_request_header_modifier_add_remove() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "RequestHeaderModifier",
+                        "requestHeaderModifier": {
+                            "set": [{"name": "X-Set", "value": "set"}],
+                            "add": [{"name": "X-Add", "value": "add"}],
+                            "remove": ["X-Remove"]
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filters = &parse_httproute_state(&route).rules[0].filters;
+        assert_eq!(filters.len(), 3);
+        assert_eq!(
+            filters[0],
+            RouteFilter::RequestHeaderSet {
+                name: Arc::from("X-Set"),
+                value: Arc::from("set"),
+            }
+        );
+        assert_eq!(
+            filters[1],
+            RouteFilter::RequestHeaderAdd {
+                name: Arc::from("X-Add"),
+                value: Arc::from("add"),
+            }
+        );
+        assert_eq!(
+            filters[2],
+            RouteFilter::RequestHeaderRemove {
+                name: Arc::from("X-Remove"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_response_header_modifier_add_remove() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "ResponseHeaderModifier",
+                        "responseHeaderModifier": {
+                            "set": [{"name": "X-Set", "value": "set"}],
+                            "add": [{"name": "X-Add", "value": "add"}],
+                            "remove": ["X-Remove"]
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filters = &parse_httproute_state(&route).rules[0].filters;
+        assert_eq!(filters.len(), 3);
+        assert_eq!(
+            filters[1],
+            RouteFilter::ResponseHeaderAdd {
+                name: Arc::from("X-Add"),
+                value: Arc::from("add"),
+            }
+        );
+        assert_eq!(
+            filters[2],
+            RouteFilter::ResponseHeaderRemove {
+                name: Arc::from("X-Remove"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_request_mirror_with_fraction() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "RequestMirror",
+                        "requestMirror": {
+                            "backendRef": { "namespace": "mirror", "name": "svc", "port": 8080 },
+                            "fraction": { "numerator": 1, "denominator": 10 }
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert_eq!(
+            *filter,
+            RouteFilter::RequestMirror {
+                backend: Arc::from("svc.mirror.svc.cluster.local.:8080"),
+                fraction: Some(Fraction {
+                    numerator: 1,
+                    denominator: 10
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_request_mirror_with_percent() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{
+                    "filters": [{
+                        "type": "RequestMirror",
+                        "requestMirror": {
+                            "backendRef": { "name": "svc" },
+                            "percent": 50
+                        }
+                    }]
+                }]
+            }
+        }));
+        let filter = &parse_httproute_state(&route).rules[0].filters[0];
+        assert_eq!(
+            *filter,
+            RouteFilter::RequestMirror {
+                backend: Arc::from("svc.default.svc.cluster.local.:80"),
+                fraction: Some(Fraction {
+                    numerator: 50,
+                    denominator: 100
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_request_timeout() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "timeouts": { "request": "5s" },
+                    "backendRefs": [{"name": "svc"}]
+                }]
+            }
+        }));
+        let rule = &parse_httproute_state(&route).rules[0];
+        assert_eq!(rule.request_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn parse_invalid_request_timeout_is_ignored() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r" },
+            "spec": {
+                "rules": [{
+                    "timeouts": { "request": "bad" },
+                    "backendRefs": [{"name": "svc"}]
+                }]
+            }
+        }));
+        let rule = &parse_httproute_state(&route).rules[0];
+        assert_eq!(rule.request_timeout_ms, None);
+    }
+
+    #[test]
+    fn resolve_backend_refs_rule_without_backends_ok() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{ "matches": [{"path": {"type": "PathPrefix", "value": "/"}}] }]
+            }
+        }));
+        let grant_index = GrantIndex::new(vec![]);
+        let result = resolve_backend_refs(&route, "default", &grant_index);
+        assert!(matches!(result.overall, BackendResolutionStatus::Ok));
+        assert_eq!(result.rules.len(), 1);
+        assert!(result.rules[0].ok);
+    }
+
+    #[test]
+    fn resolve_backend_refs_multiple_backends_first_error_wins() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{
+                    "backendRefs": [
+                        { "namespace": "prod", "name": "svc-1", "port": 80 },
+                        { "group": "example.com", "kind": "Foo", "name": "foo-1" }
+                    ]
+                }]
+            }
+        }));
+        let grant_index = GrantIndex::new(vec![]);
+        let result = resolve_backend_refs(&route, "default", &grant_index);
+        assert!(
+            matches!(result.overall, BackendResolutionStatus::RefNotPermitted(_)),
+            "unexpected result: {result:?}"
+        );
+        assert!(!result.rules[0].ok);
+        assert!(result.rules[0].message.contains("svc-1"));
+    }
+
+    #[tokio::test]
+    async fn resolve_backend_refs_async_rule_without_backends() {
+        let route = route_from_json(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "r", "namespace": "default" },
+            "spec": {
+                "rules": [{"matches": [{"path": {"type": "PathPrefix", "value": "/"}}]}]
+            }
+        }));
+        let client = kube::Client::new(
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(kube::client::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+        let grant_index = GrantIndex::new(vec![]);
+        let result = resolve_backend_refs_async(&client, &route, "default", &grant_index).await;
+        assert!(matches!(result.overall, BackendResolutionStatus::Ok));
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_leader_patches_changed_status() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": { "parentRefs": [] },
+            "status": { "parents": [] }
+        }))
+        .expect("valid HTTPRoute");
+
+        let gateway_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "GatewayList",
+            "items": []
+        });
+        let grant_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ReferenceGrantList",
+            "items": []
+        });
+        let namespace_list = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "NamespaceList",
+            "items": []
+        });
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let body = if path.contains("/namespaces") {
+                    namespace_list.clone()
+                } else if path.contains("/referencegrants") {
+                    grant_list.clone()
+                } else if path.contains("/status") {
+                    serde_json::json!({ "status": { "parents": [] } })
+                } else {
+                    gateway_list.clone()
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(true)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_leader_skips_unchanged_status() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": { "parentRefs": [] },
+            "status": { "parents": [] }
+        }))
+        .expect("valid HTTPRoute");
+
+        let client = kube::Client::new(
+            tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(
+                            serde_json::json!({ "items": [] }).to_string().into_bytes(),
+                        ))
+                        .unwrap(),
+                )
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(true)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_list_gateways_error_requeues() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": { "parentRefs": [] }
+        }))
+        .expect("valid HTTPRoute");
+
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| {
+                let status = if req.uri().path().contains("/gateways") {
+                    500
+                } else {
+                    200
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(status)
+                            .body(kube::client::Body::empty())
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(false)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_listenerset_parent_fetches_listener_sets() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "ListenerSet",
+                    "name": "ls-1"
+                }]
+            }
+        }))
+        .expect("valid HTTPRoute");
+
+        let gateway_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "GatewayList",
+            "items": []
+        });
+        let grant_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ReferenceGrantList",
+            "items": []
+        });
+        let namespace_list = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "NamespaceList",
+            "items": []
+        });
+        let listenerset_list = serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "ListenerSetList",
+            "items": []
+        });
+
+        let client = kube::Client::new(
+            tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                let path = req.uri().path().to_string();
+                let body = if path.contains("/namespaces") {
+                    namespace_list.clone()
+                } else if path.contains("/referencegrants") {
+                    grant_list.clone()
+                } else if path.contains("/listenersets") {
+                    listenerset_list.clone()
+                } else {
+                    gateway_list.clone()
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(kube::client::Body::from(body.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(false)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_httproute_listenerset_list_error_requeues() {
+        let route: HTTPRoute = serde_json::from_value(serde_json::json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": { "name": "route-1", "namespace": "default", "generation": 1 },
+            "spec": {
+                "parentRefs": [{
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "ListenerSet",
+                    "name": "ls-1"
+                }]
+            }
+        }))
+        .expect("valid HTTPRoute");
+
+        let client = kube::Client::new(
+            tower::service_fn(|req: http::Request<kube::client::Body>| {
+                let status = if req.uri().path().contains("/listenersets") {
+                    500
+                } else {
+                    200
+                };
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(status)
+                            .body(kube::client::Body::empty())
+                            .unwrap(),
+                    )
+                }
+            }),
+            "default",
+        );
+
+        let ctx = Arc::new(HTTPRouteContext {
+            client,
+            is_leader: Arc::new(AtomicBool::new(false)),
+        });
+        let action = reconcile_httproute(Arc::new(route), ctx).await.unwrap();
+        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
     }
 }

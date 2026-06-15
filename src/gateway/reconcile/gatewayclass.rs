@@ -76,6 +76,7 @@ pub fn supported_features() -> Vec<String> {
         "BackendTLSPolicy".to_string(),
         "BackendTLSPolicyConflictResolution".to_string(),
         "BackendTLSPolicyObservedGenerationBump".to_string(),
+        "BackendTLSPolicySANValidation".to_string(),
         "GRPCExactMethodMatching".to_string(),
         "GRPCRouteHeaderMatching".to_string(),
         "GRPCRouteListenerHostnameMatching".to_string(),
@@ -138,6 +139,9 @@ pub fn to_k8s_condition(sc: &StatusCondition) -> Condition {
             ConditionType::NoMatchingParent => "NoMatchingParent".to_string(),
             ConditionType::RefNotPermitted => "RefNotPermitted".to_string(),
             ConditionType::UnsupportedFeature => "UnsupportedFeature".to_string(),
+            ConditionType::InsecureFrontendValidationMode => {
+                "InsecureFrontendValidationMode".to_string()
+            }
         },
     }
 }
@@ -192,6 +196,7 @@ pub async fn reconcile_gatewayclass(
         }
     }
 
+    crate::gateway::reconcile::trigger::trigger();
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -274,6 +279,7 @@ mod tests {
         assert!(features.contains(&"TLSRoute".to_string()));
         assert!(features.contains(&"TLSRouteModeTerminate".to_string()));
         assert!(features.contains(&"TLSRouteModeMixed".to_string()));
+        assert!(features.contains(&"BackendTLSPolicySANValidation".to_string()));
         assert!(!features.is_empty());
     }
 
