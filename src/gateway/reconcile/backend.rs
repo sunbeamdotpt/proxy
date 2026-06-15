@@ -44,6 +44,12 @@ pub trait BackendRefLike {
     fn kind(&self) -> Option<&str>;
     fn namespace(&self) -> Option<&str>;
     fn name(&self) -> &str;
+    fn port(&self) -> Option<i32> {
+        None
+    }
+    fn weight(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Implement [`BackendRefLike`] for a generated backend-ref type.
@@ -62,6 +68,28 @@ macro_rules! impl_backend_ref_like {
             }
             fn name(&self) -> &str {
                 &self.name
+            }
+        }
+    };
+    ($t:ty, $port:ident, $weight:ident) => {
+        impl $crate::gateway::reconcile::backend::BackendRefLike for $t {
+            fn group(&self) -> Option<&str> {
+                self.group.as_deref()
+            }
+            fn kind(&self) -> Option<&str> {
+                self.kind.as_deref()
+            }
+            fn namespace(&self) -> Option<&str> {
+                self.namespace.as_deref()
+            }
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn port(&self) -> Option<i32> {
+                self.$port
+            }
+            fn weight(&self) -> Option<i32> {
+                self.$weight
             }
         }
     };

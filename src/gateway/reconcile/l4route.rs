@@ -12,12 +12,14 @@ use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerState, ParentRef, RouteState,
     TCPRouteState, TLSRouteState, UDPRouteState, WeightedBackend,
 };
+use crate::gateway::reconcile::backend::{BackendRefLike, BackendResolutionStatus};
 use crate::gateway::reconcile::httproute::{
     listener_allows_kind, listener_hostname_intersects, namespace_allowed,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
 use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::impl_backend_ref_like;
 use futures::StreamExt;
 use gateway_api::experimental::tcproutes::{
     TcpRouteParentRefs, TcpRouteRules, TcpRouteRulesBackendRefs,
@@ -253,78 +255,31 @@ fn flatten_tls_backends(rules: &[TlsRouteRules]) -> Vec<ParsedBackendRef> {
 
 fn into_parsed_backend<T: BackendRefLike>(value: &T) -> ParsedBackendRef {
     ParsedBackendRef {
-        group: value.group(),
-        kind: value.kind(),
-        namespace: value.namespace(),
-        name: value.name(),
+        group: value.group().map(|s| s.to_string()),
+        kind: value.kind().map(|s| s.to_string()),
+        namespace: value.namespace().map(|s| s.to_string()),
+        name: value.name().to_string(),
         port: value.port(),
         weight: value.weight(),
     }
 }
 
-trait BackendRefLike {
-    fn group(&self) -> Option<String>;
-    fn kind(&self) -> Option<String>;
-    fn namespace(&self) -> Option<String>;
-    fn name(&self) -> String;
-    fn port(&self) -> Option<i32>;
-    fn weight(&self) -> Option<i32>;
-}
+impl_backend_ref_like!(TcpRouteRulesBackendRefs, port, weight);
+impl_backend_ref_like!(UdpRouteRulesBackendRefs, port, weight);
+impl_backend_ref_like!(TlsRouteRulesBackendRefs, port, weight);
 
-impl BackendRefLike for TcpRouteRulesBackendRefs {
-    fn group(&self) -> Option<String> {
-        self.group.clone()
+impl BackendRefLike for ParsedBackendRef {
+    fn group(&self) -> Option<&str> {
+        self.group.as_deref()
     }
-    fn kind(&self) -> Option<String> {
-        self.kind.clone()
+    fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
     }
-    fn namespace(&self) -> Option<String> {
-        self.namespace.clone()
+    fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
-    fn name(&self) -> String {
-        self.name.clone()
-    }
-    fn port(&self) -> Option<i32> {
-        self.port
-    }
-    fn weight(&self) -> Option<i32> {
-        self.weight
-    }
-}
-
-impl BackendRefLike for UdpRouteRulesBackendRefs {
-    fn group(&self) -> Option<String> {
-        self.group.clone()
-    }
-    fn kind(&self) -> Option<String> {
-        self.kind.clone()
-    }
-    fn namespace(&self) -> Option<String> {
-        self.namespace.clone()
-    }
-    fn name(&self) -> String {
-        self.name.clone()
-    }
-    fn port(&self) -> Option<i32> {
-        self.port
-    }
-    fn weight(&self) -> Option<i32> {
-        self.weight
-    }
-}
-
-impl BackendRefLike for TlsRouteRulesBackendRefs {
-    fn group(&self) -> Option<String> {
-        self.group.clone()
-    }
-    fn kind(&self) -> Option<String> {
-        self.kind.clone()
-    }
-    fn namespace(&self) -> Option<String> {
-        self.namespace.clone()
-    }
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
     fn port(&self) -> Option<i32> {
         self.port
@@ -337,53 +292,6 @@ impl BackendRefLike for TlsRouteRulesBackendRefs {
 // ---------------------------------------------------------------------------
 // Backend resolution
 // ---------------------------------------------------------------------------
-
-/// Error returned when checking an L4 backendRef.
-#[derive(Clone, Debug)]
-enum L4BackendCheckError {
-    /// The backendRef points to an unsupported group/kind.
-    InvalidKind(String),
-    /// The backendRef is not permitted by a ReferenceGrant.
-    RefNotPermitted(String),
-}
-
-/// Check a single L4 backendRef for permission and supported kind.
-fn check_l4_backend_permitted(
-    backend: &ParsedBackendRef,
-    route_ns: &str,
-    route_kind: &str,
-    grant_index: &GrantIndex,
-) -> Result<(), L4BackendCheckError> {
-    let group = backend.group.as_deref().unwrap_or("");
-    let kind = backend.kind.as_deref().unwrap_or("Service");
-    let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-
-    if !group.is_empty() || kind != "Service" {
-        return Err(L4BackendCheckError::InvalidKind(format!(
-            "backendRef group {} kind {} is not supported",
-            group, kind
-        )));
-    }
-
-    let permitted = grant_index.is_permitted(
-        route_ns,
-        "gateway.networking.k8s.io",
-        route_kind,
-        target_ns,
-        group,
-        kind,
-        &backend.name,
-    );
-
-    if !permitted {
-        return Err(L4BackendCheckError::RefNotPermitted(format!(
-            "cross-namespace backend reference from {} to {}/{} is not permitted",
-            route_ns, target_ns, backend.name
-        )));
-    }
-
-    Ok(())
-}
 
 /// Resolve backend references and verify that each referenced Service exists.
 ///
@@ -402,10 +310,16 @@ pub(crate) async fn resolve_l4_backends_async(
     let mut resolved_refs_condition: Option<StatusCondition> = None;
 
     for backend in backends {
-        if let Err(err) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
-            let (reason, message) = match err {
-                L4BackendCheckError::InvalidKind(msg) => ("InvalidKind", msg),
-                L4BackendCheckError::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+        if let Err(status) = crate::gateway::reconcile::backend::check_backend_permitted(
+            backend,
+            route_ns,
+            route_kind,
+            grant_index,
+        ) {
+            let (reason, message) = match status {
+                BackendResolutionStatus::Unsupported(msg) => ("InvalidKind", msg),
+                BackendResolutionStatus::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+                _ => continue,
             };
             tracing::debug!(%message, reason, "L4 backendRef check failed");
             resolved_refs_condition.get_or_insert(StatusCondition {
@@ -467,10 +381,16 @@ pub(crate) fn resolve_l4_backends(
     let mut resolved_refs_condition: Option<StatusCondition> = None;
 
     for backend in backends {
-        if let Err(err) = check_l4_backend_permitted(backend, route_ns, route_kind, grant_index) {
-            let (reason, message) = match err {
-                L4BackendCheckError::InvalidKind(msg) => ("InvalidKind", msg),
-                L4BackendCheckError::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+        if let Err(status) = crate::gateway::reconcile::backend::check_backend_permitted(
+            backend,
+            route_ns,
+            route_kind,
+            grant_index,
+        ) {
+            let (reason, message) = match status {
+                BackendResolutionStatus::Unsupported(msg) => ("InvalidKind", msg),
+                BackendResolutionStatus::RefNotPermitted(msg) => ("RefNotPermitted", msg),
+                _ => continue,
             };
             tracing::debug!(%message, reason, "L4 backendRef check failed");
             resolved_refs_condition.get_or_insert(StatusCondition {
