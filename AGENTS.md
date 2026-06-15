@@ -117,6 +117,15 @@ cargo clippy -- -D warnings
 
 # Format check
 cargo fmt -- --check
+
+# Run Gateway API conformance tests for the current feature set
+./scripts/conformance.sh run --target-set
+
+# Run the full Gateway API conformance suite
+KUBECONFIG=/tmp/k3s.yaml ./scripts/conformance.sh run
+
+# Show unit-test line coverage for changed Rust files
+./scripts/conformance.sh coverage-diff
 ```
 
 ## Container Runtime
@@ -125,7 +134,8 @@ Image builds use the native macOS `container` CLI on Darwin and fall back to Doc
 
 - `scripts/container-runtime.sh` selects the runtime (`container` on macOS, `docker` elsewhere; override with `CONTAINER_RUNTIME=...`).
 - `scripts/container-package.sh` replaces `docker buildx build --push` for the `package` target.
-- `scripts/conformance-run.sh` uses the selected runtime to build and save the conformance image.
+- `scripts/conformance.sh` builds and saves the conformance image, runs the suite,
+  and prints coverage diffs for changed files.
 
 **Always run `cargo check` after making changes.** If it doesn't compile, fix it before proceeding. Do not submit code that doesn't compile.
 
