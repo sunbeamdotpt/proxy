@@ -7,6 +7,7 @@
 //! cross-references (RefGrant, parentRefs, backendRefs), and produces
 //! a `GatewayView` that is handed off to `translate`.
 
+pub mod backend;
 pub mod backendtlspolicy;
 pub mod endpoints;
 pub mod gateway;
@@ -26,13 +27,16 @@ use crate::gateway::api::{
     TLSRoute, UDPRoute,
 };
 use crate::gateway::model::{GatewayView, ListenerSetState, RouteState};
+use crate::gateway::reconcile::backend::{
+    resolve_backend_refs_async, resolve_backend_refs_async as resolve_grpc_backend_refs_async,
+    BackendResolutionStatus,
+};
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::grpcroute::{
     parse_grpcroute_state, reconcile_grpcroutes_with_context,
-    resolve_backend_refs_async as resolve_grpc_backend_refs_async,
 };
 use crate::gateway::reconcile::httproute::{
-    parse_httproute_state, reconcile_httproutes_with_context, resolve_backend_refs_async,
+    parse_httproute_state, reconcile_httproutes_with_context,
 };
 use crate::gateway::reconcile::l4route::{
     parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
@@ -240,10 +244,7 @@ pub async fn reconcile_tick_with_leader(
         let backend_resolution =
             resolve_backend_refs_async(client, raw, route_ns, &grant_index).await;
         state.programmed = !state.parent_refs.is_empty()
-            && matches!(
-                backend_resolution.overall,
-                httproute::BackendResolutionStatus::Ok
-            );
+            && matches!(backend_resolution.overall, BackendResolutionStatus::Ok);
         for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
             rule.programmed = rule.programmed && res.ok;
         }
@@ -274,7 +275,7 @@ pub async fn reconcile_tick_with_leader(
         state.programmed = !state.parent_refs.is_empty()
             && matches!(
                 backend_resolution.overall,
-                crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok
+                crate::gateway::reconcile::BackendResolutionStatus::Ok
             );
         for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
             rule.programmed = rule.programmed && res.ok;

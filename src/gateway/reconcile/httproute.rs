@@ -14,8 +14,13 @@ use crate::gateway::model::{
     PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter, RouteMatch,
     RouteNamespaces, RouteState, WeightedBackend,
 };
+use crate::gateway::reconcile::backend::{
+    resolve_backend_refs, resolve_backend_refs_async, BackendResolution, BackendResolutionStatus,
+    RouteLike,
+};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::impl_backend_ref_like;
 use gateway_api::httproutes::{
     HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs,
     HttpRouteRulesBackendRefsFilters, HttpRouteRulesBackendRefsFiltersType, HttpRouteRulesFilters,
@@ -27,6 +32,25 @@ use gateway_api::httproutes::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+impl_backend_ref_like!(HttpRouteRulesBackendRefs);
+
+impl crate::gateway::reconcile::backend::RuleLike for HttpRouteRules {
+    type BackendRef = HttpRouteRulesBackendRefs;
+    fn backend_refs(&self) -> Option<&[Self::BackendRef]> {
+        self.backend_refs.as_deref()
+    }
+}
+
+impl RouteLike for HTTPRoute {
+    type Rule = HttpRouteRules;
+    fn rules(&self) -> Option<&[Self::Rule]> {
+        self.spec.rules.as_deref()
+    }
+    fn kind() -> &'static str {
+        "HTTPRoute"
+    }
+}
 
 /// Result of reconciling a single HTTPRoute.
 #[derive(Clone, Debug)]
@@ -212,206 +236,6 @@ pub fn reconcile_single(
         route_state,
         parent_statuses,
         programmed,
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum BackendResolutionStatus {
-    Ok,
-    RefNotPermitted(String),
-    Unsupported(String),
-    BackendNotFound(String),
-}
-
-/// Per-rule backend resolution result.
-#[derive(Clone, Debug)]
-pub struct RuleBackendResolution {
-    pub ok: bool,
-    pub message: String,
-}
-
-/// Backend-ref resolution for an HTTPRoute. `overall` drives status conditions;
-/// `rules` is parallel to `route.spec.rules` and drives per-rule programming.
-#[derive(Clone, Debug)]
-pub struct BackendResolution {
-    pub overall: BackendResolutionStatus,
-    pub rules: Vec<RuleBackendResolution>,
-}
-
-impl BackendResolution {
-    pub fn ok() -> Self {
-        Self {
-            overall: BackendResolutionStatus::Ok,
-            rules: Vec::new(),
-        }
-    }
-}
-
-fn check_backend_permitted(
-    backend: &HttpRouteRulesBackendRefs,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> Result<(), BackendResolutionStatus> {
-    let group = backend.group.as_deref().unwrap_or("");
-    let kind = backend.kind.as_deref().unwrap_or("Service");
-    let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-
-    if !group.is_empty() || kind != "Service" {
-        return Err(BackendResolutionStatus::Unsupported(format!(
-            "backendRef group {} kind {} is not supported",
-            group, kind
-        )));
-    }
-
-    let permitted = grant_index.is_permitted(
-        route_ns,
-        "gateway.networking.k8s.io",
-        "HTTPRoute",
-        target_ns,
-        group,
-        kind,
-        &backend.name,
-    );
-
-    if !permitted {
-        return Err(BackendResolutionStatus::RefNotPermitted(format!(
-            "cross-namespace backend reference from {} to {}/{} is not permitted",
-            route_ns, target_ns, backend.name
-        )));
-    }
-
-    Ok(())
-}
-
-fn resolve_backend_refs(
-    route: &HTTPRoute,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> BackendResolution {
-    let rules = match route.spec.rules.as_ref() {
-        Some(r) => r,
-        None => return BackendResolution::ok(),
-    };
-
-    let mut overall = BackendResolutionStatus::Ok;
-    let mut rule_results = Vec::with_capacity(rules.len());
-
-    for rule in rules {
-        let backends = match rule.backend_refs.as_ref() {
-            Some(b) => b,
-            None => {
-                rule_results.push(RuleBackendResolution {
-                    ok: true,
-                    message: String::new(),
-                });
-                continue;
-            }
-        };
-
-        let mut rule_ok = true;
-        let mut rule_message = String::new();
-        for backend in backends {
-            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::Unsupported(msg)
-                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-            }
-        }
-        rule_results.push(RuleBackendResolution {
-            ok: rule_ok,
-            message: rule_message,
-        });
-    }
-
-    BackendResolution {
-        overall,
-        rules: rule_results,
-    }
-}
-
-/// Async variant of [`resolve_backend_refs`] that also validates that
-/// referenced backend Services exist in the cluster.
-pub async fn resolve_backend_refs_async(
-    client: &kube::Client,
-    route: &HTTPRoute,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> BackendResolution {
-    let rules = match route.spec.rules.as_ref() {
-        Some(r) => r,
-        None => return BackendResolution::ok(),
-    };
-
-    let mut overall = BackendResolutionStatus::Ok;
-    let mut rule_results = Vec::with_capacity(rules.len());
-
-    for rule in rules {
-        let backends = match rule.backend_refs.as_ref() {
-            Some(b) => b,
-            None => {
-                rule_results.push(RuleBackendResolution {
-                    ok: true,
-                    message: String::new(),
-                });
-                continue;
-            }
-        };
-
-        let mut rule_ok = true;
-        let mut rule_message = String::new();
-        for backend in backends {
-            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::Unsupported(msg)
-                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-                continue;
-            }
-
-            let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-            let services: kube::Api<k8s_openapi::api::core::v1::Service> =
-                kube::Api::namespaced(client.clone(), target_ns);
-            if services.get(&backend.name).await.is_err() {
-                let status = BackendResolutionStatus::BackendNotFound(format!(
-                    "backend Service {}/{} not found",
-                    target_ns, backend.name
-                ));
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::BackendNotFound(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-            }
-        }
-        rule_results.push(RuleBackendResolution {
-            ok: rule_ok,
-            message: rule_message,
-        });
-    }
-
-    BackendResolution {
-        overall,
-        rules: rule_results,
     }
 }
 
@@ -1444,9 +1268,9 @@ pub async fn reconcile_httproute(
 
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
     let backend_resolution =
-        resolve_backend_refs_async(&ctx.client, &route, route_ns, &grant_index).await;
+        resolve_backend_refs_async(&ctx.client, route.as_ref(), route_ns, &grant_index).await;
     let reconciled = reconcile_single(
-        &route,
+        route.as_ref(),
         &gateway_states,
         &listener_set_states,
         &namespace_labels,

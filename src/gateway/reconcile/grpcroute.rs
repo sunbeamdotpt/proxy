@@ -13,12 +13,14 @@ use crate::gateway::model::{
     HostnameMatch, ListenerSetState, MethodMatch, MethodMatchType, ParentRef, RouteFilter,
     RouteState, WeightedBackend,
 };
-use crate::gateway::reconcile::httproute::{resolve_parent_ref, ParsedParentRef};
-use crate::gateway::reconcile::httproute::{
-    BackendResolution, BackendResolutionStatus, RuleBackendResolution,
+use crate::gateway::reconcile::backend::{
+    resolve_backend_refs, resolve_backend_refs_async, BackendResolution, BackendResolutionStatus,
+    RouteLike,
 };
+use crate::gateway::reconcile::httproute::{resolve_parent_ref, ParsedParentRef};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::impl_backend_ref_like;
 use gateway_api::grpcroutes::{
     GrpcRouteRules, GrpcRouteRulesBackendRefs, GrpcRouteRulesFilters,
     GrpcRouteRulesFiltersRequestHeaderModifier, GrpcRouteRulesFiltersResponseHeaderModifier,
@@ -28,6 +30,25 @@ use gateway_api::grpcroutes::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+impl_backend_ref_like!(GrpcRouteRulesBackendRefs);
+
+impl crate::gateway::reconcile::backend::RuleLike for GrpcRouteRules {
+    type BackendRef = GrpcRouteRulesBackendRefs;
+    fn backend_refs(&self) -> Option<&[Self::BackendRef]> {
+        self.backend_refs.as_deref()
+    }
+}
+
+impl RouteLike for GRPCRoute {
+    type Rule = GrpcRouteRules;
+    fn rules(&self) -> Option<&[Self::Rule]> {
+        self.spec.rules.as_deref()
+    }
+    fn kind() -> &'static str {
+        "GRPCRoute"
+    }
+}
 
 /// Result of reconciling a single GRPCRoute.
 #[derive(Clone, Debug)]
@@ -100,173 +121,6 @@ pub fn reconcile_grpcroutes_with_context(
         .collect()
 }
 
-fn check_backend_permitted(
-    backend: &GrpcRouteRulesBackendRefs,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> Result<(), BackendResolutionStatus> {
-    let group = backend.group.as_deref().unwrap_or("");
-    let kind = backend.kind.as_deref().unwrap_or("Service");
-    let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-
-    if !group.is_empty() || kind != "Service" {
-        return Err(BackendResolutionStatus::Unsupported(format!(
-            "backendRef group {} kind {} is not supported",
-            group, kind
-        )));
-    }
-
-    let permitted = grant_index.is_permitted(
-        route_ns,
-        "gateway.networking.k8s.io",
-        "GRPCRoute",
-        target_ns,
-        group,
-        kind,
-        &backend.name,
-    );
-
-    if !permitted {
-        return Err(BackendResolutionStatus::RefNotPermitted(format!(
-            "cross-namespace backend reference from {} to {}/{} is not permitted",
-            route_ns, target_ns, backend.name
-        )));
-    }
-
-    Ok(())
-}
-
-fn resolve_backend_refs(
-    route: &GRPCRoute,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> BackendResolution {
-    let rules = match route.spec.rules.as_ref() {
-        Some(r) => r,
-        None => return BackendResolution::ok(),
-    };
-
-    let mut overall = BackendResolutionStatus::Ok;
-    let mut rule_results = Vec::with_capacity(rules.len());
-
-    for rule in rules {
-        let backends = match rule.backend_refs.as_ref() {
-            Some(b) => b,
-            None => {
-                rule_results.push(RuleBackendResolution {
-                    ok: true,
-                    message: String::new(),
-                });
-                continue;
-            }
-        };
-
-        let mut rule_ok = true;
-        let mut rule_message = String::new();
-        for backend in backends {
-            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::Unsupported(msg)
-                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-            }
-        }
-        rule_results.push(RuleBackendResolution {
-            ok: rule_ok,
-            message: rule_message,
-        });
-    }
-
-    BackendResolution {
-        overall,
-        rules: rule_results,
-    }
-}
-
-/// Async variant that also validates that referenced backend Services exist.
-pub async fn resolve_backend_refs_async(
-    client: &kube::Client,
-    route: &GRPCRoute,
-    route_ns: &str,
-    grant_index: &GrantIndex,
-) -> BackendResolution {
-    let rules = match route.spec.rules.as_ref() {
-        Some(r) => r,
-        None => return BackendResolution::ok(),
-    };
-
-    let mut overall = BackendResolutionStatus::Ok;
-    let mut rule_results = Vec::with_capacity(rules.len());
-
-    for rule in rules {
-        let backends = match rule.backend_refs.as_ref() {
-            Some(b) => b,
-            None => {
-                rule_results.push(RuleBackendResolution {
-                    ok: true,
-                    message: String::new(),
-                });
-                continue;
-            }
-        };
-
-        let mut rule_ok = true;
-        let mut rule_message = String::new();
-        for backend in backends {
-            if let Err(status) = check_backend_permitted(backend, route_ns, grant_index) {
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::Unsupported(msg)
-                        | BackendResolutionStatus::RefNotPermitted(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-                continue;
-            }
-
-            let target_ns = backend.namespace.as_deref().unwrap_or(route_ns);
-            let services: kube::Api<k8s_openapi::api::core::v1::Service> =
-                kube::Api::namespaced(client.clone(), target_ns);
-            if services.get(&backend.name).await.is_err() {
-                let status = BackendResolutionStatus::BackendNotFound(format!(
-                    "backend Service {}/{} not found",
-                    target_ns, backend.name
-                ));
-                if matches!(overall, BackendResolutionStatus::Ok) {
-                    overall = status.clone();
-                }
-                rule_ok = false;
-                if rule_message.is_empty() {
-                    rule_message = match &status {
-                        BackendResolutionStatus::BackendNotFound(msg) => msg.clone(),
-                        _ => String::new(),
-                    };
-                }
-            }
-        }
-        rule_results.push(RuleBackendResolution {
-            ok: rule_ok,
-            message: rule_message,
-        });
-    }
-
-    BackendResolution {
-        overall,
-        rules: rule_results,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn reconcile_single(
     route: &GRPCRoute,
@@ -315,60 +169,49 @@ pub fn reconcile_single(
 
         // Merge backend ref resolution into the parent status.
         let resolved_refs = match &backend_resolution.overall {
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok => {
-                resolved_refs_true(generation)
-            }
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::RefNotPermitted(msg) => {
-                StatusCondition {
-                    condition_type: ConditionType::ResolvedRefs,
-                    status: ConditionStatus::False,
-                    reason: "RefNotPermitted".to_string(),
-                    message: msg.clone(),
-                    observed_generation: generation,
-                }
-            }
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Unsupported(msg) => {
-                StatusCondition {
-                    condition_type: ConditionType::ResolvedRefs,
-                    status: ConditionStatus::False,
-                    reason: "InvalidKind".to_string(),
-                    message: msg.clone(),
-                    observed_generation: generation,
-                }
-            }
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::BackendNotFound(msg) => {
-                StatusCondition {
-                    condition_type: ConditionType::ResolvedRefs,
-                    status: ConditionStatus::False,
-                    reason: "BackendNotFound".to_string(),
-                    message: msg.clone(),
-                    observed_generation: generation,
-                }
-            }
+            BackendResolutionStatus::Ok => resolved_refs_true(generation),
+            BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
+                condition_type: ConditionType::ResolvedRefs,
+                status: ConditionStatus::False,
+                reason: "RefNotPermitted".to_string(),
+                message: msg.clone(),
+                observed_generation: generation,
+            },
+            BackendResolutionStatus::Unsupported(msg) => StatusCondition {
+                condition_type: ConditionType::ResolvedRefs,
+                status: ConditionStatus::False,
+                reason: "InvalidKind".to_string(),
+                message: msg.clone(),
+                observed_generation: generation,
+            },
+            BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
+                condition_type: ConditionType::ResolvedRefs,
+                status: ConditionStatus::False,
+                reason: "BackendNotFound".to_string(),
+                message: msg.clone(),
+                observed_generation: generation,
+            },
         };
         conditions.push(resolved_refs);
 
-        let programmed = if matches!(
-            &backend_resolution.overall,
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok
-        ) && accepted
-        {
-            StatusCondition {
-                condition_type: ConditionType::Programmed,
-                status: ConditionStatus::True,
-                reason: "Programmed".to_string(),
-                message: "Route programmed into proxy".to_string(),
-                observed_generation: generation,
-            }
-        } else {
-            StatusCondition {
-                condition_type: ConditionType::Programmed,
-                status: ConditionStatus::False,
-                reason: "NotProgrammed".to_string(),
-                message: "Route not programmed into proxy".to_string(),
-                observed_generation: generation,
-            }
-        };
+        let programmed =
+            if matches!(&backend_resolution.overall, BackendResolutionStatus::Ok) && accepted {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::True,
+                    reason: "Programmed".to_string(),
+                    message: "Route programmed into proxy".to_string(),
+                    observed_generation: generation,
+                }
+            } else {
+                StatusCondition {
+                    condition_type: ConditionType::Programmed,
+                    status: ConditionStatus::False,
+                    reason: "NotProgrammed".to_string(),
+                    message: "Route not programmed into proxy".to_string(),
+                    observed_generation: generation,
+                }
+            };
         conditions.push(programmed);
 
         parent_statuses.push(GRPCRouteParentStatus {
@@ -385,10 +228,7 @@ pub fn reconcile_single(
         parent_refs,
     };
     let programmed = !route_state.parent_refs.is_empty()
-        && matches!(
-            backend_resolution.overall,
-            crate::gateway::reconcile::httproute::BackendResolutionStatus::Ok
-        );
+        && matches!(backend_resolution.overall, BackendResolutionStatus::Ok);
 
     ReconciledGRPCRoute {
         route_state,
@@ -890,9 +730,9 @@ pub async fn reconcile_grpcroute(
 
     let route_ns = route.metadata.namespace.as_deref().unwrap_or("default");
     let backend_resolution =
-        resolve_backend_refs_async(&ctx.client, &route, route_ns, &grant_index).await;
+        resolve_backend_refs_async(&ctx.client, route.as_ref(), route_ns, &grant_index).await;
     let reconciled = reconcile_single(
-        &route,
+        route.as_ref(),
         &gateway_states,
         &listener_set_states,
         &namespace_labels,
@@ -1191,8 +1031,13 @@ mod tests {
             weight: None,
             filters: None,
         };
-        let err =
-            check_backend_permitted(&backend, "default", &GrantIndex::new(vec![])).unwrap_err();
+        let err = crate::gateway::reconcile::backend::check_backend_permitted(
+            &backend,
+            "default",
+            "GRPCRoute",
+            &GrantIndex::new(vec![]),
+        )
+        .unwrap_err();
         assert!(matches!(err, BackendResolutionStatus::Unsupported(_)));
     }
 
