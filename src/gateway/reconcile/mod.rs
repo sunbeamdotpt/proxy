@@ -201,15 +201,6 @@ pub async fn reconcile_tick_with_leader(
     let grant_states = reconcile_reference_grants(&grant_list.items);
     let grant_index = GrantIndex::new(grant_states.clone());
 
-    let backend_tls_policies =
-        crate::gateway::reconcile::backendtlspolicy::reconcile_backend_tls_policies(
-            client,
-            &crate::gateway::model::ReconciledView::default(),
-            &grant_index,
-            is_leader,
-        )
-        .await;
-
     let namespace_labels: HashMap<String, HashMap<String, String>> = namespace_list
         .iter()
         .map(|ns| {
@@ -309,6 +300,16 @@ pub async fn reconcile_tick_with_leader(
         }
         grpc_routes.push(state);
     }
+
+    let backend_tls_policies =
+        crate::gateway::reconcile::backendtlspolicy::reconcile_backend_tls_policies(
+            client,
+            &http_routes,
+            &grpc_routes,
+            &grant_index,
+            is_leader,
+        )
+        .await;
 
     crate::gateway::reconcile::endpoints::resolve_service_endpoints(
         client,

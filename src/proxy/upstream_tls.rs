@@ -105,11 +105,16 @@ impl Connect for DynamicUpstreamL4 {
 
         let config = build_client_config(self)?;
         let connector = TlsConnector::from(Arc::new(config));
-        let domain = self.verify_domain().unwrap_or_else(|| "localhost".to_string());
+        let domain = self
+            .verify_domain()
+            .unwrap_or_else(|| "localhost".to_string());
         let stream = L4Stream::from(tcp);
-        let tls_stream = TlsStream::from_connector(&connector, &domain, stream)
-            .await
-            .explain_err(ErrorType::TLSHandshakeFailure, |e| format!("upstream tls: {e}"))?;
+        let tls_stream =
+            pingora_core::protocols::tls::client::handshake(&connector, &domain, stream)
+                .await
+                .explain_err(ErrorType::TLSHandshakeFailure, |e| {
+                    format!("upstream tls: {e}")
+                })?;
 
         Ok(L4Stream::from(VirtualSocketStream::new(Box::new(
             TlsVirtualSocket(tls_stream),
@@ -168,9 +173,12 @@ impl tokio::io::AsyncWrite for TlsVirtualSocket {
 fn build_client_config(cfg: &DynamicUpstreamL4) -> Result<rustls::ClientConfig> {
     let mut roots = RootCertStore::empty();
     if let Some(pem) = &cfg.ca_bundle_pem {
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .explain_err(ErrorType::InvalidCert, |e| format!("failed to parse CA bundle: {e}"))?;
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .explain_err(ErrorType::InvalidCert, |e| {
+                    format!("failed to parse CA bundle: {e}")
+                })?;
         roots.add_parsable_certificates(certs);
     }
 
@@ -186,10 +194,14 @@ fn build_client_config(cfg: &DynamicUpstreamL4) -> Result<rustls::ClientConfig> 
             .map(|c| c.into())
             .collect();
         let key = PrivateKeyDer::try_from(ck.key().as_slice().to_vec())
-            .explain_err(ErrorType::InvalidCert, |e| format!("invalid client key: {e}"))?;
+            .explain_err(ErrorType::InvalidCert, |e| {
+                format!("invalid client key: {e}")
+            })?;
         builder
             .with_client_auth_cert(certs, key)
-            .explain_err(ErrorType::InvalidCert, |e| format!("client auth config: {e}"))?
+            .explain_err(ErrorType::InvalidCert, |e| {
+                format!("client auth config: {e}")
+            })?
     } else {
         builder.with_no_client_auth()
     };
@@ -201,13 +213,17 @@ fn build_client_config(cfg: &DynamicUpstreamL4) -> Result<rustls::ClientConfig> 
     } else {
         let delegate = WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
-            .explain_err(ErrorType::InvalidCert, |e| format!("failed to build verifier: {e}"))?;
-        client_config.dangerous().set_certificate_verifier(Arc::new(DynamicVerifier {
-            delegate,
-            domain: cfg.verify_domain(),
-            verify_hostname: cfg.verify_hostname,
-            subject_alt_names: cfg.subject_alt_names.clone(),
-        }));
+            .explain_err(ErrorType::InvalidCert, |e| {
+                format!("failed to build verifier: {e}")
+            })?;
+        client_config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(DynamicVerifier {
+                delegate,
+                domain: cfg.verify_domain(),
+                verify_hostname: cfg.verify_hostname,
+                subject_alt_names: cfg.subject_alt_names.clone(),
+            }));
     }
 
     if let Some(alpn) = &cfg.alpn {
@@ -246,19 +262,24 @@ impl ServerCertVerifier for DynamicVerifier {
                 ServerName::try_from(domain.as_str())
                     .map_err(|e| RustlsError::General(format!("invalid server name: {e}")))?
             } else {
-                first_dns_name(end_entity)?
+                first_server_name(end_entity)?
             }
         } else {
-            first_dns_name(end_entity)?
+            first_server_name(end_entity)?
         };
 
-        let verified = self
-            .delegate
-            .verify_server_cert(end_entity, intermediates, &name, ocsp_response, now)?;
+        let verified = self.delegate.verify_server_cert(
+            end_entity,
+            intermediates,
+            &name,
+            ocsp_response,
+            now,
+        )?;
 
         if !self.subject_alt_names.is_empty() {
-            let allowed: HashSet<&str> = self.subject_alt_names.iter().map(|s| s.as_ref()).collect();
-            let names = dns_names(end_entity);
+            let allowed: HashSet<&str> =
+                self.subject_alt_names.iter().map(|s| s.as_ref()).collect();
+            let names = san_values(end_entity);
             if !names.iter().any(|n| allowed.contains(n.as_str())) {
                 return Err(RustlsError::InvalidCertificate(
                     CertificateError::NotValidForName,
@@ -330,8 +351,10 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
-fn first_dns_name(cert: &CertificateDer<'_>) -> std::result::Result<ServerName<'static>, RustlsError> {
-    dns_names(cert)
+fn first_server_name(
+    cert: &CertificateDer<'_>,
+) -> std::result::Result<ServerName<'static>, RustlsError> {
+    san_values(cert)
         .into_iter()
         .next()
         .ok_or_else(|| RustlsError::InvalidCertificate(CertificateError::NotValidForName))
@@ -341,18 +364,41 @@ fn first_dns_name(cert: &CertificateDer<'_>) -> std::result::Result<ServerName<'
         })
 }
 
-fn dns_names(cert: &CertificateDer<'_>) -> Vec<String> {
+fn san_values(cert: &CertificateDer<'_>) -> Vec<String> {
     let mut names = Vec::new();
     if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref()) {
         if let Ok(Some(san)) = parsed.subject_alternative_name() {
             for name in &san.value.general_names {
-                if let x509_parser::extensions::GeneralName::DNSName(d) = name {
-                    names.push(d.to_string());
+                match name {
+                    x509_parser::extensions::GeneralName::DNSName(d) => {
+                        names.push(d.to_string());
+                    }
+                    x509_parser::extensions::GeneralName::IPAddress(octets) => {
+                        if let Some(ip) = ip_addr_from_octets(octets) {
+                            names.push(ip.to_string());
+                        }
+                    }
+                    x509_parser::extensions::GeneralName::URI(uri) => {
+                        names.push(uri.to_string());
+                    }
+                    _ => {}
                 }
             }
         }
     }
     names
+}
+
+fn ip_addr_from_octets(octets: &[u8]) -> Option<std::net::IpAddr> {
+    match octets.len() {
+        4 => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            octets[0], octets[1], octets[2], octets[3],
+        ))),
+        16 => Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(octets).ok()?,
+        ))),
+        _ => None,
+    }
 }
 
 /// Convert an [`ALPN`] selection to the wire format expected by rustls.
@@ -369,9 +415,104 @@ fn alpn_wire(alpn: &ALPN) -> Vec<Vec<u8>> {
 pub fn alpn_for_protocol(protocol: crate::ir::BackendProtocol) -> Option<ALPN> {
     match protocol {
         crate::ir::BackendProtocol::H2c => Some(ALPN::H2),
-        crate::ir::BackendProtocol::Https => Some(ALPN::H2H1),
+        crate::ir::BackendProtocol::Https => Some(ALPN::H1),
         crate::ir::BackendProtocol::Http
         | crate::ir::BackendProtocol::WebSocket
         | crate::ir::BackendProtocol::WebSocketSecure => Some(ALPN::H1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alpn_for_protocol_maps_expected_values() {
+        assert_eq!(
+            alpn_for_protocol(crate::ir::BackendProtocol::H2c),
+            Some(ALPN::H2)
+        );
+        assert_eq!(
+            alpn_for_protocol(crate::ir::BackendProtocol::Https),
+            Some(ALPN::H1)
+        );
+        assert_eq!(
+            alpn_for_protocol(crate::ir::BackendProtocol::Http),
+            Some(ALPN::H1)
+        );
+        assert_eq!(
+            alpn_for_protocol(crate::ir::BackendProtocol::WebSocket),
+            Some(ALPN::H1)
+        );
+        assert_eq!(
+            alpn_for_protocol(crate::ir::BackendProtocol::WebSocketSecure),
+            Some(ALPN::H1)
+        );
+    }
+
+    #[test]
+    fn alpn_wire_encodes_protocols() {
+        assert_eq!(alpn_wire(&ALPN::H1), vec![b"http/1.1".to_vec()]);
+        assert_eq!(alpn_wire(&ALPN::H2), vec![b"h2".to_vec()]);
+        assert_eq!(
+            alpn_wire(&ALPN::H2H1),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn ip_addr_from_octets_parses_v4_and_v6() {
+        assert_eq!(
+            ip_addr_from_octets(&[192, 0, 2, 1]),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)))
+        );
+        let v6 = [0u8; 16];
+        assert_eq!(
+            ip_addr_from_octets(&v6),
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+        );
+        assert_eq!(ip_addr_from_octets(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn san_values_returns_empty_for_invalid_cert() {
+        let cert = CertificateDer::from(vec![1, 2, 3]);
+        assert!(san_values(&cert).is_empty());
+    }
+
+    #[test]
+    fn dynamic_upstream_l4_trust_hash_uses_ca_and_sans() {
+        let cfg = crate::ir::BackendTlsConfig {
+            sni: Arc::from("svc.example.com"),
+            verify_hostname: true,
+            alternative_cn: None,
+            client_cert_id: None,
+            ca_bundle_pem: Some(Arc::from("pem1")),
+            subject_alt_names: vec![Arc::from("a.example.com")],
+        };
+        let a = DynamicUpstreamL4::new(&cfg, None, Some(ALPN::H2H1));
+        let b = DynamicUpstreamL4::new(&cfg, None, Some(ALPN::H2H1));
+        assert_eq!(a.trust_hash(), b.trust_hash());
+
+        let cfg2 = crate::ir::BackendTlsConfig {
+            ca_bundle_pem: Some(Arc::from("pem2")),
+            ..cfg
+        };
+        let c = DynamicUpstreamL4::new(&cfg2, None, Some(ALPN::H2H1));
+        assert_ne!(a.trust_hash(), c.trust_hash());
+    }
+
+    #[test]
+    fn dynamic_upstream_l4_verify_domain_prefers_alternative_cn() {
+        let cfg = crate::ir::BackendTlsConfig {
+            sni: Arc::from("sni.example.com"),
+            verify_hostname: true,
+            alternative_cn: Some(Arc::from("alt.example.com")),
+            client_cert_id: None,
+            ca_bundle_pem: None,
+            subject_alt_names: vec![],
+        };
+        let l4 = DynamicUpstreamL4::new(&cfg, None, None);
+        assert_eq!(l4.verify_domain(), Some("alt.example.com".to_string()));
     }
 }

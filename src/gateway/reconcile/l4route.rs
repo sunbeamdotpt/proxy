@@ -1652,10 +1652,10 @@ mod tests {
                 port: 80,
                 hostname: None,
                 tls_mode: None,
-        frontend_validation: None,
-    }],
-        backend_client_cert_id: None,
-    }];
+                frontend_validation: None,
+            }],
+            backend_client_cert_id: None,
+        }];
 
         let reconciled = reconcile_tcproutes(
             &[route],

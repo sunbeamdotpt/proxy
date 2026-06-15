@@ -44,7 +44,9 @@ fn service_port_protocol(port: &ServicePort) -> crate::ir::BackendProtocol {
     match port.app_protocol.as_deref() {
         Some("kubernetes.io/h2c") => crate::ir::BackendProtocol::H2c,
         Some("kubernetes.io/ws") => crate::ir::BackendProtocol::WebSocket,
-        Some("kubernetes.io/wss") => crate::ir::BackendProtocol::WebSocketSecure,
+        Some("kubernetes.io/wss") | Some("https") | Some("kubernetes.io/https") => {
+            crate::ir::BackendProtocol::Https
+        }
         _ => crate::ir::BackendProtocol::Http,
     }
 }
@@ -246,7 +248,11 @@ fn expand_rule_backends<R: RuleWithBackends>(
             .or_else(|| {
                 let name = Arc::from(port_name.unwrap_or(""));
                 tls_policy_map
-                    .get(&(Arc::clone(&target.namespace), Arc::clone(&target.name), Some(name)))
+                    .get(&(
+                        Arc::clone(&target.namespace),
+                        Arc::clone(&target.name),
+                        Some(name),
+                    ))
                     .cloned()
             });
 
@@ -720,6 +726,25 @@ mod tests {
         assert_eq!(rule.backends.len(), 1);
         assert_eq!(rule.backends[0].backend.as_ref(), "10.42.0.10:3000");
         assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::H2c);
+    }
+
+    #[test]
+    fn clusterip_backend_inherits_https_app_protocol() {
+        let mut svc = svc_clusterip();
+        svc.spec.as_mut().unwrap().ports.as_mut().unwrap()[0].app_protocol =
+            Some("https".to_string());
+        let mut rule = make_rule("regular.ns.svc.cluster.local.:8080");
+        let services = build_service_map(vec![svc]);
+        let endpoints = build_endpoint_map(vec![]);
+
+        expand_rule_backends(&mut rule, &services, &endpoints, &HashMap::new());
+
+        assert_eq!(rule.backends.len(), 1);
+        assert_eq!(
+            rule.backends[0].backend.as_ref(),
+            "regular.ns.svc.cluster.local.:8080"
+        );
+        assert_eq!(rule.backends[0].protocol, crate::ir::BackendProtocol::Https);
     }
 
     impl From<&Service> for ServiceInfo {

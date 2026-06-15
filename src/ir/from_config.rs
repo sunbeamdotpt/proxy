@@ -294,7 +294,6 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     websocket: route.websocket,
                     disable_https_redirect: route.disable_secure_redirection,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             });

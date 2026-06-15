@@ -92,7 +92,11 @@ async fn make_peer(
     // the upstream TLS handshake ourselves via a custom L4 connector.
     if is_tls && tls.and_then(|t| t.ca_bundle_pem.as_ref()).is_some() {
         let tls_cfg = tls.unwrap();
-        let connector = DynamicUpstreamL4::new(tls_cfg, client_cert.clone(), Some(peer.options.alpn.clone()));
+        let connector = DynamicUpstreamL4::new(
+            tls_cfg,
+            client_cert.clone(),
+            Some(peer.options.alpn.clone()),
+        );
         peer.group_key = connector.trust_hash();
         peer.options.custom_l4 = Some(Arc::new(connector));
         peer.scheme = Scheme::HTTP;
@@ -1214,7 +1218,6 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
-
         }
     }
 
@@ -1369,7 +1372,6 @@ mod tests {
                     disable_https_redirect: true,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -1434,7 +1436,6 @@ mod tests {
                     disable_https_redirect: true,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -1499,7 +1500,6 @@ mod tests {
                             disable_https_redirect: true,
                             websocket: false,
                             client_cert_id: None,
-
                         }),
                         rule_order: 0,
                     }],
@@ -1539,7 +1539,6 @@ mod tests {
                             disable_https_redirect: true,
                             websocket: false,
                             client_cert_id: None,
-
                         }),
                         rule_order: 0,
                     }],
@@ -1865,7 +1864,6 @@ mod tests {
             }),
             redirect_http_to_https: false,
             frontend_validation: None,
-
         };
         let l4_config = crate::ir::compile::CompiledL4Config {
             listeners: vec![listener],
@@ -1897,7 +1895,6 @@ mod tests {
             tls: None,
             redirect_http_to_https: false,
             frontend_validation: None,
-
         };
         let l4_config = crate::ir::compile::CompiledL4Config {
             listeners: vec![listener],

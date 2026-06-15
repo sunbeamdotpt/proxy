@@ -10,14 +10,15 @@
 
 use crate::gateway::api::BackendTLSPolicy;
 use crate::gateway::model::{
-    BackendTLSPolicyState, CaCertificateRef, ServiceTargetRef, SubjectAltName,
+    BackendTLSPolicyState, CaCertificateRef, GRPCRouteState, HTTPRouteState, ParentRef,
+    ServiceTargetRef, SubjectAltName,
 };
 use crate::gateway::reconcile::gatewayclass::{to_k8s_condition, CONTROLLER_NAME};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, Patch, PatchParams};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Target service key used for conflict grouping.
@@ -31,7 +32,8 @@ type ServiceTargetKey = (Arc<str>, Arc<str>, Option<Arc<str>>);
 /// * Patches status when `is_leader` is `true`.
 pub async fn reconcile_backend_tls_policies(
     client: &kube::Client,
-    _view: &crate::gateway::model::ReconciledView,
+    http_routes: &[HTTPRouteState],
+    grpc_routes: &[GRPCRouteState],
     _grant_index: &GrantIndex,
     is_leader: bool,
 ) -> Vec<BackendTLSPolicyState> {
@@ -76,6 +78,8 @@ pub async fn reconcile_backend_tls_policies(
         winners.insert(key.clone(), winner.name.clone());
     }
 
+    let service_to_gateways = build_service_to_gateways(http_routes, grpc_routes);
+
     let mut states = Vec::with_capacity(pre.len());
     for p in &pre {
         let key = (
@@ -90,12 +94,113 @@ pub async fn reconcile_backend_tls_policies(
 
         let state = build_state(p, is_winner);
         if is_leader {
-            patch_status(client, p.raw, &state).await;
+            let ancestors = service_to_gateways
+                .get(&(p.target.namespace.clone(), p.target.name.clone()))
+                .cloned()
+                .unwrap_or_default();
+            patch_status(client, p.raw, &state, &ancestors).await;
         }
         states.push(state);
     }
 
     states
+}
+
+/// Build a map from Service (namespace/name) to the Gateway parent refs that
+/// route to it through HTTPRoutes or GRPCRoutes.
+///
+/// BackendTLSPolicy status ancestors must reference the Gateway(s) that apply
+/// the policy, not the Service target itself.
+fn build_service_to_gateways(
+    http_routes: &[HTTPRouteState],
+    grpc_routes: &[GRPCRouteState],
+) -> HashMap<(Arc<str>, Arc<str>), Vec<ParentRef>> {
+    let mut map: HashMap<(Arc<str>, Arc<str>), Vec<ParentRef>> = HashMap::new();
+
+    for route in http_routes {
+        collect_gateways_for_route(route.parent_refs.clone(), &route.rules, &mut map);
+    }
+    for route in grpc_routes {
+        collect_gateways_for_route(route.parent_refs.clone(), &route.rules, &mut map);
+    }
+
+    map
+}
+
+fn collect_gateways_for_route<R>(
+    parents: Vec<ParentRef>,
+    rules: &[R],
+    map: &mut HashMap<(Arc<str>, Arc<str>), Vec<ParentRef>>,
+) where
+    R: RouteRuleLike,
+{
+    let gateway_parents: Vec<ParentRef> = parents
+        .into_iter()
+        .filter(|p| p.kind.as_ref() == "Gateway" && p.group.as_ref() == "gateway.networking.k8s.io")
+        .collect();
+    if gateway_parents.is_empty() {
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    for rule in rules {
+        for backend in rule.backends() {
+            if let Some((ns, name)) = parse_backend_service(backend.backend.as_ref()) {
+                let key = (Arc::from(ns), Arc::from(name));
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                let entry = map.entry(key).or_default();
+                for parent in &gateway_parents {
+                    if !entry.iter().any(|p| same_parent(p, parent)) {
+                        entry.push(parent.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn same_parent(a: &ParentRef, b: &ParentRef) -> bool {
+    a.group == b.group
+        && a.kind == b.kind
+        && a.namespace == b.namespace
+        && a.name == b.name
+        && a.section_name == b.section_name
+        && a.port == b.port
+}
+
+/// Parse the Service namespace/name from an internal backend address of the
+/// form `name.namespace.svc.cluster.local.:port`.
+fn parse_backend_service(backend: &str) -> Option<(&str, &str)> {
+    let host = backend.split(':').next()?;
+    let mut parts = host.split('.');
+    let name = parts.next()?;
+    let ns = parts.next()?;
+    let svc = parts.next()?;
+    let cluster = parts.next()?;
+    if svc != "svc" || cluster != "cluster" {
+        return None;
+    }
+    Some((name, ns))
+}
+
+/// Abstraction over HTTP and gRPC route rules so they can share the gateway
+/// collection logic.
+trait RouteRuleLike {
+    fn backends(&self) -> &[crate::gateway::model::WeightedBackend];
+}
+
+impl RouteRuleLike for crate::gateway::model::HTTPRouteRule {
+    fn backends(&self) -> &[crate::gateway::model::WeightedBackend] {
+        &self.backends
+    }
+}
+
+impl RouteRuleLike for crate::gateway::model::GRPCRouteRule {
+    fn backends(&self) -> &[crate::gateway::model::WeightedBackend] {
+        &self.backends
+    }
 }
 
 /// Intermediate validation result for a single `BackendTLSPolicy`.
@@ -112,6 +217,8 @@ struct PrePolicy<'a> {
     subject_alt_names: Vec<SubjectAltName>,
     target_invalid: bool,
     ca_invalid_count: usize,
+    ca_invalid_kind_count: usize,
+    ca_invalid_ref_count: usize,
     ca_total_count: usize,
 }
 
@@ -163,6 +270,8 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
     let mut ca_certificate_refs = Vec::with_capacity(ca_refs_raw.len());
     let mut ca_bundle = String::new();
     let mut ca_invalid_count = 0usize;
+    let mut ca_invalid_kind_count = 0usize;
+    let mut ca_invalid_ref_count = 0usize;
     for r in ca_refs_raw {
         ca_certificate_refs.push(CaCertificateRef {
             group: Arc::from(r.group.as_str()),
@@ -171,21 +280,23 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
         });
         if r.kind != "ConfigMap" || !r.group.is_empty() {
             ca_invalid_count += 1;
+            ca_invalid_kind_count += 1;
             continue;
         }
         let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace.as_ref());
         match cm_api.get(&r.name).await {
-            Ok(cm) => {
-                match cm.data.as_ref().and_then(|d| d.get("ca.crt")) {
-                    Some(ca) if !ca.is_empty() => {
-                        ca_bundle.push_str(ca);
-                        if !ca_bundle.ends_with('\n') {
-                            ca_bundle.push('\n');
-                        }
+            Ok(cm) => match cm.data.as_ref().and_then(|d| d.get("ca.crt")) {
+                Some(ca) if !ca.is_empty() => {
+                    ca_bundle.push_str(ca);
+                    if !ca_bundle.ends_with('\n') {
+                        ca_bundle.push('\n');
                     }
-                    _ => ca_invalid_count += 1,
                 }
-            }
+                _ => {
+                    ca_invalid_count += 1;
+                    ca_invalid_ref_count += 1;
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -194,6 +305,7 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
                     "failed to resolve BackendTLSPolicy CA certificate ConfigMap"
                 );
                 ca_invalid_count += 1;
+                ca_invalid_ref_count += 1;
             }
         }
     }
@@ -237,13 +349,14 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
         subject_alt_names,
         target_invalid,
         ca_invalid_count,
+        ca_invalid_kind_count,
+        ca_invalid_ref_count,
         ca_total_count: ca_refs_raw.len(),
     }
 }
 
 /// Build the reconciled state from a pre-validated policy.
 fn build_state(p: &PrePolicy<'_>, is_winner: bool) -> BackendTLSPolicyState {
-    let any_ca_invalid = p.ca_invalid_count > 0;
     let all_ca_invalid = p.ca_total_count > 0 && p.ca_invalid_count == p.ca_total_count;
 
     let (accepted, accepted_reason, accepted_message) = if !is_winner {
@@ -274,22 +387,32 @@ fn build_state(p: &PrePolicy<'_>, is_winner: bool) -> BackendTLSPolicyState {
         )
     };
 
-    let (resolved_refs, resolved_refs_reason, resolved_refs_message) = if any_ca_invalid {
-        (
-            false,
-            Arc::from("InvalidCACertificateRef"),
-            Arc::from(format!(
-                "{} CA certificate reference(s) are invalid",
-                p.ca_invalid_count
-            )),
-        )
-    } else {
-        (
-            true,
-            Arc::from("ResolvedRefs"),
-            Arc::from("all references resolved"),
-        )
-    };
+    let (resolved_refs, resolved_refs_reason, resolved_refs_message) =
+        if p.ca_invalid_kind_count > 0 {
+            (
+                false,
+                Arc::from("InvalidKind"),
+                Arc::from(format!(
+                    "{} CA certificate reference(s) have an unsupported kind",
+                    p.ca_invalid_kind_count
+                )),
+            )
+        } else if p.ca_invalid_ref_count > 0 {
+            (
+                false,
+                Arc::from("InvalidCACertificateRef"),
+                Arc::from(format!(
+                    "{} CA certificate reference(s) are invalid",
+                    p.ca_invalid_ref_count
+                )),
+            )
+        } else {
+            (
+                true,
+                Arc::from("ResolvedRefs"),
+                Arc::from("all references resolved"),
+            )
+        };
 
     let programmed = accepted && resolved_refs;
 
@@ -318,6 +441,7 @@ async fn patch_status(
     client: &kube::Client,
     raw: &BackendTLSPolicy,
     state: &BackendTLSPolicyState,
+    ancestors: &[ParentRef],
 ) {
     let ns = state.namespace.to_string();
     let name = state.name.to_string();
@@ -365,36 +489,56 @@ async fn patch_status(
         observed_generation,
     };
 
-    let mut ancestor_ref = serde_json::Map::new();
-    ancestor_ref.insert("group".to_string(), serde_json::json!(""));
-    ancestor_ref.insert("kind".to_string(), serde_json::json!("Service"));
-    ancestor_ref.insert(
-        "name".to_string(),
-        serde_json::json!(state.target.name.to_string()),
-    );
-    ancestor_ref.insert(
-        "namespace".to_string(),
-        serde_json::json!(state.target.namespace.to_string()),
-    );
-    if let Some(section_name) = &state.target.section_name {
-        ancestor_ref.insert(
-            "sectionName".to_string(),
-            serde_json::json!(section_name.to_string()),
-        );
-    }
+    let ancestor_entries: Vec<serde_json::Value> = if ancestors.is_empty() {
+        vec![serde_json::json!({
+            "ancestorRef": {
+                "group": "",
+                "kind": "Service",
+                "name": state.target.name.to_string(),
+                "namespace": state.target.namespace.to_string(),
+            },
+            "controllerName": CONTROLLER_NAME,
+            "conditions": vec![
+                to_k8s_condition(&accepted),
+                to_k8s_condition(&resolved_refs),
+                to_k8s_condition(&programmed),
+            ],
+        })]
+    } else {
+        ancestors
+            .iter()
+            .map(|p| {
+                let mut ancestor_ref = serde_json::Map::new();
+                ancestor_ref.insert("group".to_string(), serde_json::json!(p.group.as_ref()));
+                ancestor_ref.insert("kind".to_string(), serde_json::json!(p.kind.as_ref()));
+                ancestor_ref.insert("name".to_string(), serde_json::json!(p.name.as_ref()));
+                if let Some(ns) = &p.namespace {
+                    ancestor_ref.insert("namespace".to_string(), serde_json::json!(ns.as_ref()));
+                }
+                if let Some(section) = &p.section_name {
+                    ancestor_ref.insert(
+                        "sectionName".to_string(),
+                        serde_json::json!(section.as_ref()),
+                    );
+                }
+                if let Some(port) = &p.port {
+                    ancestor_ref.insert("port".to_string(), serde_json::json!(port));
+                }
+                serde_json::json!({
+                    "ancestorRef": ancestor_ref,
+                    "controllerName": CONTROLLER_NAME,
+                    "conditions": vec![
+                        to_k8s_condition(&accepted),
+                        to_k8s_condition(&resolved_refs),
+                        to_k8s_condition(&programmed),
+                    ],
+                })
+            })
+            .collect()
+    };
 
     let new_status = serde_json::json!({
-        "ancestors": [
-            {
-                "ancestorRef": ancestor_ref,
-                "controllerName": CONTROLLER_NAME,
-                "conditions": vec![
-                    to_k8s_condition(&accepted),
-                    to_k8s_condition(&resolved_refs),
-                    to_k8s_condition(&programmed),
-                ],
-            }
-        ]
+        "ancestors": ancestor_entries
     });
 
     let old_status_json = raw
@@ -440,7 +584,6 @@ async fn patch_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::model::ReconciledView;
     use crate::gateway::reconcile::refgrant::GrantIndex;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -599,10 +742,9 @@ mod tests {
             configmap("ca-map", "default", true),
         );
         let client = mock_client(vec![policy], cms, None);
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         assert_eq!(states.len(), 1);
         let s = &states[0];
         assert!(s.accepted);
@@ -628,10 +770,9 @@ mod tests {
             &[],
         );
         let client = mock_client(vec![policy], HashMap::new(), None);
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         assert_eq!(states.len(), 1);
         let s = &states[0];
         assert!(!s.accepted);
@@ -657,10 +798,9 @@ mod tests {
             configmap("ca-map", "default", false),
         );
         let client = mock_client(vec![policy], cms, None);
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         assert_eq!(states.len(), 1);
         let s = &states[0];
         assert!(!s.accepted);
@@ -696,10 +836,9 @@ mod tests {
             configmap("ca-map", "default", true),
         );
         let client = mock_client(vec![older, newer], cms, None);
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         let older_state = states.iter().find(|s| s.name.as_ref() == "older").unwrap();
         let newer_state = states.iter().find(|s| s.name.as_ref() == "newer").unwrap();
         assert!(older_state.accepted);
@@ -733,10 +872,9 @@ mod tests {
             configmap("ca-map", "default", true),
         );
         let client = mock_client(vec![p1, p2], cms, None);
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         let winner = states
             .iter()
             .find(|s| s.name.as_ref() == "policy-a")
@@ -768,10 +906,9 @@ mod tests {
         );
         let capture = Arc::new(Mutex::new(Vec::new()));
         let client = mock_client(vec![policy], cms, Some(capture.clone()));
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        let states = reconcile_backend_tls_policies(&client, &view, &grant_index, true).await;
+        let states = reconcile_backend_tls_policies(&client, &[], &[], &grant_index, true).await;
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].generation, 7);
 
@@ -823,10 +960,9 @@ mod tests {
         );
         let capture = Arc::new(Mutex::new(Vec::new()));
         let client = mock_client(vec![policy], cms, Some(capture.clone()));
-        let view = ReconciledView::default();
         let grant_index = GrantIndex::default();
 
-        reconcile_backend_tls_policies(&client, &view, &grant_index, false).await;
+        reconcile_backend_tls_policies(&client, &[], &[], &grant_index, false).await;
         assert!(capture.lock().unwrap().is_empty());
     }
 }

@@ -35,7 +35,10 @@ impl UpstreamCaBundle {
 
     /// Collect CA bundles from the reconciled Gateway view and write them to
     /// disk. Returns `true` when the file content changed.
-    pub fn write_from_view(&self, view: &crate::gateway::model::GatewayView) -> anyhow::Result<bool> {
+    pub fn write_from_view(
+        &self,
+        view: &crate::gateway::model::GatewayView,
+    ) -> anyhow::Result<bool> {
         let mut bundles = Vec::new();
 
         for policy in &view.backend_tls_policies {
@@ -125,10 +128,10 @@ impl UpstreamCaBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::model::view::FrontendValidation;
     use crate::gateway::model::{
         GatewayState, ListenerSetState, ListenerState, ParentRef, ReconciledView, TlsMode,
     };
-    use crate::gateway::model::view::FrontendValidation;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -152,15 +155,16 @@ mod tests {
         let ca2 = "-----BEGIN CERTIFICATE-----\nBB\n-----END CERTIFICATE-----\n";
 
         let mut view = ReconciledView::default();
-        view.backend_tls_policies.push(crate::gateway::model::BackendTLSPolicyState {
-            programmed: true,
-            ca_bundle_pem: Arc::from(ca1),
-            ..Default::default()
-        });
+        view.backend_tls_policies
+            .push(crate::gateway::model::BackendTLSPolicyState {
+                programmed: true,
+                ca_bundle_pem: Arc::from(ca1),
+                ..Default::default()
+            });
         view.gateways.push(GatewayState {
             listeners: vec![ListenerState {
                 protocol: Arc::from("HTTPS"),
-                                tls_mode: Some(TlsMode::Terminate),
+                tls_mode: Some(TlsMode::Terminate),
                 frontend_validation: Some(FrontendValidation {
                     ca_bundle_pem: Arc::from(ca2),
                     allow_insecure_fallback: false,
@@ -185,11 +189,14 @@ mod tests {
         bundle.ensure_exists().unwrap();
 
         let mut view = ReconciledView::default();
-        view.backend_tls_policies.push(crate::gateway::model::BackendTLSPolicyState {
-            programmed: false,
-            ca_bundle_pem: Arc::from("-----BEGIN CERTIFICATE-----\nZZ\n-----END CERTIFICATE-----\n"),
-            ..Default::default()
-        });
+        view.backend_tls_policies
+            .push(crate::gateway::model::BackendTLSPolicyState {
+                programmed: false,
+                ca_bundle_pem: Arc::from(
+                    "-----BEGIN CERTIFICATE-----\nZZ\n-----END CERTIFICATE-----\n",
+                ),
+                ..Default::default()
+            });
 
         assert!(!bundle.write_from_view(&view).unwrap());
         assert!(bundle.is_empty());
@@ -259,7 +266,11 @@ mod tests {
         assert!(bundle.is_empty());
         bundle.ensure_exists().unwrap();
         assert!(bundle.is_empty());
-        bundle.write(&[Arc::from("-----BEGIN CERTIFICATE-----\nEE\n-----END CERTIFICATE-----\n")]).unwrap();
+        bundle
+            .write(&[Arc::from(
+                "-----BEGIN CERTIFICATE-----\nEE\n-----END CERTIFICATE-----\n",
+            )])
+            .unwrap();
         assert!(!bundle.is_empty());
         bundle.write(&[]).unwrap();
         assert!(bundle.is_empty());

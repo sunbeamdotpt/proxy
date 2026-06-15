@@ -219,7 +219,6 @@ mod tests {
             }),
             websocket: false,
             client_cert_id: None,
-
         })
     }
 
@@ -276,7 +275,6 @@ mod tests {
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
-
         }
     }
 

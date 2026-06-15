@@ -358,7 +358,6 @@ mod tests {
             tls: None,
             redirect_http_to_https: false,
             frontend_validation: None,
-
         }
     }
 
@@ -370,7 +369,6 @@ mod tests {
             tls: None,
             redirect_http_to_https: false,
             frontend_validation: None,
-
         }
     }
 
@@ -442,7 +440,6 @@ mod tests {
             tls: None,
             redirect_http_to_https: false,
             frontend_validation: None,
-
         }
     }
 
@@ -489,7 +486,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
             ],
             ..Default::default()
@@ -524,7 +520,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
                 CompiledListener {
                     id: "bad-udp".into(),
@@ -533,7 +528,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
             ],
             ..Default::default()

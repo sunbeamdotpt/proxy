@@ -1484,7 +1484,6 @@ mod tests {
             disable_https_redirect: false,
             websocket: false,
             client_cert_id: None,
-
         }
     }
 
@@ -2350,7 +2349,6 @@ mod tests {
                     disable_https_redirect: false,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -2410,7 +2408,6 @@ mod tests {
                     disable_https_redirect: false,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -2472,7 +2469,6 @@ mod tests {
                     disable_https_redirect: false,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -2544,7 +2540,6 @@ mod tests {
                     disable_https_redirect: false,
                     websocket: false,
                     client_cert_id: None,
-
                 }),
                 rule_order: 0,
             }],
@@ -2594,7 +2589,6 @@ mod tests {
                 tls: None,
                 redirect_http_to_https: false,
                 frontend_validation: None,
-
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2631,7 +2625,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
                 ListenerConfig {
                     id: "tls-l".into(),
@@ -2642,7 +2635,6 @@ mod tests {
                     }),
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
             ],
             hosts: vec![],
@@ -2683,7 +2675,6 @@ mod tests {
                 tls: None,
                 redirect_http_to_https: false,
                 frontend_validation: None,
-
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2707,7 +2698,6 @@ mod tests {
                 }),
                 redirect_http_to_https: true,
                 frontend_validation: None,
-
             }],
             hosts: vec![],
             acme_routes: Default::default(),
@@ -2757,7 +2747,6 @@ mod tests {
                     }),
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
                 ListenerConfig {
                     id: "tls-pass".into(),
@@ -2768,7 +2757,6 @@ mod tests {
                     }),
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
             ],
             hosts: vec![],
@@ -2825,7 +2813,6 @@ mod tests {
                 tls: None,
                 redirect_http_to_https: false,
                 frontend_validation: None,
-
             }],
             l4_routes: vec![L4Route {
                 listener_id: "gw/http".into(),
@@ -2853,7 +2840,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
                 ListenerConfig {
                     id: "gw-b/http".into(),
@@ -2862,7 +2848,6 @@ mod tests {
                     tls: None,
                     redirect_http_to_https: false,
                     frontend_validation: None,
-
                 },
             ],
             l4_routes: vec![

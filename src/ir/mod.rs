@@ -579,7 +579,6 @@ mod tests {
             tls: None,
             redirect_http_to_https: false,
             frontend_validation: None,
-
         });
         rt.acme_routes.insert("/challenge".into(), "backend".into());
         rt.l4_routes.push(L4Route {
@@ -606,7 +605,6 @@ mod tests {
             }),
             redirect_http_to_https: true,
             frontend_validation: None,
-
         };
         let cloned = lc.clone();
         assert_eq!(lc, cloned);
@@ -787,7 +785,6 @@ mod tests {
             disable_https_redirect: false,
             websocket: false,
             client_cert_id: None,
-
         });
         let redirect = Action::Redirect(RedirectAction {
             status_code: 302,
@@ -874,7 +871,6 @@ mod tests {
             websocket: true,
             disable_https_redirect: false,
             client_cert_id: None,
-
         };
         let cloned = ra.clone();
         assert_eq!(ra, cloned);

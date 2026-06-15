@@ -534,7 +534,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 ).await;
             });
         });
-
     }
 
     // Pingora now runs as a plaintext HTTP proxy on a loopback address.

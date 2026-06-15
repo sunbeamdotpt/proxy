@@ -179,7 +179,6 @@ mod tests {
             cache: None,
             websocket: false,
             client_cert_id: None,
-
         })
     }
 
@@ -199,7 +198,6 @@ mod tests {
             cache: None,
             websocket: false,
             client_cert_id: None,
-
         })
     }
 
@@ -219,7 +217,6 @@ mod tests {
             cache: None,
             websocket: false,
             client_cert_id: None,
-
         })
     }
 
@@ -262,7 +259,6 @@ mod tests {
             ddos_observe_only: false,
             scanner_observe_only: false,
             tls_registry: None,
-
         }
     }
 

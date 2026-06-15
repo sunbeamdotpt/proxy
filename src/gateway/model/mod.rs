@@ -13,7 +13,8 @@ pub use routing::{
     BackendTlsAttachment, Fraction, GRPCRouteMatch, GRPCRouteRule, GRPCRouteState, HTTPRouteRule,
     HTTPRouteState, HeaderMatch, HeaderMatchValue, HostRoute, HostnameMatch, MethodMatch,
     MethodMatchType, PathMatch, PathRewrite, QueryParamMatch, QueryParamMatchValue, RouteFilter,
-    RouteMatch, RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState, WeightedBackend,
+    RouteMatch, RouteRule, RouteTable, TCPRouteState, TLSRouteState, UDPRouteState,
+    WeightedBackend,
 };
 pub use types::{
     BackendTarget, ListenerKey, RefResolution, ResolvedRoute, RouteTableDigest, StatusPatch,

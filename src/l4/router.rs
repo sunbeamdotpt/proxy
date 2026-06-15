@@ -1047,7 +1047,6 @@ XgdEFjRXMOS5FmfbOMU3zxVS0l6xeA6kvA9tWDbvAoGADGdEQYBm1xaoQlb2F6TY
             }),
             redirect_http_to_https: false,
             frontend_validation: None,
-
         };
         let _ = listener.clone();
         let tls = CompiledTlsConfig::Files {

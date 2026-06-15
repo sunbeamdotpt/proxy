@@ -11,11 +11,11 @@ use crate::gateway::api::gateway::Gateway;
 use crate::gateway::api::gatewayclass::GatewayClass;
 use crate::gateway::api::httproute::HTTPRoute;
 use crate::gateway::api::{ListenerSet, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute};
+use crate::gateway::model::view::FrontendValidation;
 use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerState, NamespaceFrom, RouteGroupKind,
     RouteNamespaces, TlsMode,
 };
-use crate::gateway::model::view::FrontendValidation;
 use crate::gateway::reconcile::gatewayclass::{
     supported_features, to_k8s_condition, CONTROLLER_NAME,
 };
@@ -813,7 +813,10 @@ pub async fn validate_gateway_backend_tls(
         Some(b) => b,
         None => return None,
     };
-    let cert_ref = match backend.get("clientCertificateRef").and_then(|v| v.as_object()) {
+    let cert_ref = match backend
+        .get("clientCertificateRef")
+        .and_then(|v| v.as_object())
+    {
         Some(r) => r,
         None => return None,
     };
@@ -1377,9 +1380,8 @@ async fn reconcile_infrastructure_serviceaccount(gw: &Gateway, client: &Client) 
 
 /// Build a [`GatewayState`] from a [`Gateway`].
 pub fn build_gateway_state(gw: &Gateway) -> GatewayState {
-    let backend_client_cert_id = gateway_backend_client_cert_ref(gw).map(|(ns, name, _kind)| {
-        Arc::from(format!("gateway/{}/{}", ns, name)) as Arc<str>
-    });
+    let backend_client_cert_id = gateway_backend_client_cert_ref(gw)
+        .map(|(ns, name, _kind)| Arc::from(format!("gateway/{}/{}", ns, name)) as Arc<str>);
     GatewayState {
         namespace: gw.metadata.namespace.clone().unwrap_or_default().into(),
         name: gw.metadata.name.clone().unwrap_or_default().into(),
@@ -2728,9 +2730,8 @@ mod tests {
         "#,
         )
         .unwrap();
-        let features: std::collections::HashSet<String> = supported_features()
-            .into_iter()
-            .collect();
+        let features: std::collections::HashSet<String> =
+            supported_features().into_iter().collect();
         let err = Some(CertValidation {
             reason: "InvalidFrontendClientCertificateValidation",
             message: "Frontend CA certificate ConfigMap not found",
@@ -2762,7 +2763,9 @@ mod tests {
         assert!(is_frontend_ca_error("InvalidCACertificateKind"));
         assert!(is_frontend_ca_error("RefNotPermitted"));
         assert!(!is_frontend_ca_error("InvalidCertificateRef"));
-        assert!(!is_frontend_ca_error("InvalidFrontendClientCertificateValidation"));
+        assert!(!is_frontend_ca_error(
+            "InvalidFrontendClientCertificateValidation"
+        ));
     }
 
     #[test]
@@ -2784,9 +2787,8 @@ mod tests {
         "#,
         )
         .unwrap();
-        let features: std::collections::HashSet<String> = supported_features()
-            .into_iter()
-            .collect();
+        let features: std::collections::HashSet<String> =
+            supported_features().into_iter().collect();
         let err = Some(CertValidation {
             reason: "InvalidCACertificateRef",
             message: "Frontend CA certificate ConfigMap not found",

@@ -8,7 +8,9 @@
 //! more than one certificate.
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
-use crate::tls::registry::{cert_key_from_secret, certified_key_from_pem, CertStore, WildcardPattern};
+use crate::tls::registry::{
+    cert_key_from_secret, certified_key_from_pem, CertStore, WildcardPattern,
+};
 use arc_swap::ArcSwap;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::Api;
@@ -402,9 +404,7 @@ async fn load_gateway_backend_client_cert(
             return;
         }
     };
-    store
-        .client_certs
-        .insert(Arc::from(id), Arc::new(cert_key));
+    store.client_certs.insert(Arc::from(id), Arc::new(cert_key));
     tracing::info!(
         gateway = %gw_name,
         namespace = %gw_ns,

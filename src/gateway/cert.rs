@@ -222,10 +222,10 @@ mod tests {
                 port: 443,
                 hostname: None,
                 tls_mode: None,
-        frontend_validation: None,
-    }],
-        backend_client_cert_id: None,
-    };
+                frontend_validation: None,
+            }],
+            backend_client_cert_id: None,
+        };
         let _ = gw;
         ReconciledView {
             gateways: vec![state],
@@ -316,10 +316,10 @@ mod tests {
                     port: 80,
                     hostname: None,
                     tls_mode: None,
-        frontend_validation: None,
-    }],
-        backend_client_cert_id: None,
-    }],
+                    frontend_validation: None,
+                }],
+                backend_client_cert_id: None,
+            }],
             ..Default::default()
         };
         let client = kube::Client::new(
