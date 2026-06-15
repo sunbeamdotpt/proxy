@@ -38,7 +38,7 @@ use crate::gateway::reconcile::listenerset::run_listenerset_controller;
 use crate::gateway::reconcile::reconcile_tick_with_leader;
 use crate::gateway::translate::translate_view_to_ir;
 use crate::ir;
-use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry};
+use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry, UpstreamCaBundle};
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -52,6 +52,7 @@ use kube::Client;
 /// * Sends translated `RouteConfig`s to the proxy via `routes_tx`.
 /// * When `cluster_handle` is provided, broadcasts gateway digests and
 ///   resource notifications over the cluster gossip topics.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_reconcile_loop(
     election: Election,
     client: Client,
@@ -60,6 +61,7 @@ pub async fn run_reconcile_loop(
     tls_registry: Arc<TlsRegistry>,
     gateway_cert_source: Arc<GatewayCertSource>,
     disk_cert_source: Arc<DiskCertSource>,
+    upstream_ca_bundle: Arc<UpstreamCaBundle>,
 ) {
     let is_leader = Arc::new(AtomicBool::new(election.state() == LeaderState::Leader));
 
@@ -222,6 +224,14 @@ pub async fn run_reconcile_loop(
                 merge_cert_store(&mut store, &gw);
             }
             tls_registry.apply(store);
+
+            // Update the process-wide upstream CA bundle from BackendTLSPolicy
+            // and frontend validation configuration. Pingora's rustls connector
+            // reads SSL_CERT_FILE once at startup; the file is written before
+            // bootstrap so the initial upstream trust store includes these roots.
+            if let Err(e) = upstream_ca_bundle.write_from_view(&view) {
+                tracing::warn!(error = %e, "failed to write upstream CA bundle");
+            }
 
             // Gateway status (including Programmed=True) is written by the
             // dedicated Gateway controller; the main loop only computes the

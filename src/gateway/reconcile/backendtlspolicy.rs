@@ -108,6 +108,7 @@ struct PrePolicy<'a> {
     target: ServiceTargetRef,
     hostname: Arc<str>,
     ca_certificate_refs: Vec<CaCertificateRef>,
+    ca_bundle_pem: Arc<str>,
     subject_alt_names: Vec<SubjectAltName>,
     target_invalid: bool,
     ca_invalid_count: usize,
@@ -160,6 +161,7 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
         .as_deref()
         .unwrap_or(&[]);
     let mut ca_certificate_refs = Vec::with_capacity(ca_refs_raw.len());
+    let mut ca_bundle = String::new();
     let mut ca_invalid_count = 0usize;
     for r in ca_refs_raw {
         ca_certificate_refs.push(CaCertificateRef {
@@ -174,13 +176,14 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
         let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace.as_ref());
         match cm_api.get(&r.name).await {
             Ok(cm) => {
-                if !cm
-                    .data
-                    .as_ref()
-                    .map(|d| d.contains_key("ca.crt"))
-                    .unwrap_or(false)
-                {
-                    ca_invalid_count += 1;
+                match cm.data.as_ref().and_then(|d| d.get("ca.crt")) {
+                    Some(ca) if !ca.is_empty() => {
+                        ca_bundle.push_str(ca);
+                        if !ca_bundle.ends_with('\n') {
+                            ca_bundle.push('\n');
+                        }
+                    }
+                    _ => ca_invalid_count += 1,
                 }
             }
             Err(e) => {
@@ -230,6 +233,7 @@ async fn prevalidate<'a>(policy: &'a BackendTLSPolicy, client: &kube::Client) ->
         target,
         hostname,
         ca_certificate_refs,
+        ca_bundle_pem: Arc::from(ca_bundle),
         subject_alt_names,
         target_invalid,
         ca_invalid_count,
@@ -297,6 +301,7 @@ fn build_state(p: &PrePolicy<'_>, is_winner: bool) -> BackendTLSPolicyState {
         target: p.target.clone(),
         hostname: p.hostname.clone(),
         ca_certificate_refs: p.ca_certificate_refs.clone(),
+        ca_bundle_pem: p.ca_bundle_pem.clone(),
         subject_alt_names: p.subject_alt_names.clone(),
         accepted,
         accepted_reason,

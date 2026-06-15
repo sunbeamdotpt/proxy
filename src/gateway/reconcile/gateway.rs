@@ -228,6 +228,10 @@ fn ca_bundle_valid(pem: &[u8]) -> bool {
 
 /// Validate a listener's frontend client-certificate configuration.
 ///
+/// Frontend validation only applies to TLS-terminated listeners. For other
+/// listeners the configuration is ignored so that an invalid default does not
+/// break plain HTTP listeners.
+///
 /// Returns `Some(CertValidation)` when the listener references an unsupported
 /// resource kind, a missing ConfigMap, or a ConfigMap that does not contain a
 /// valid `ca.crt` entry.
@@ -237,6 +241,15 @@ pub async fn validate_listener_frontend_validation(
     listener: &serde_json::Map<String, serde_json::Value>,
     gw_tls: Option<&serde_json::Value>,
 ) -> Option<CertValidation> {
+    let protocol = listener
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HTTP");
+    let tls_mode = parse_tls_mode(listener, protocol);
+    if !matches!(protocol, "HTTPS" | "TLS") || tls_mode != Some(TlsMode::Terminate) {
+        return None;
+    }
+
     let port = listener.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
     let spec = match listener_frontend_validation(gw_tls, port) {
         Some(s) => s,
@@ -251,7 +264,7 @@ pub async fn validate_listener_frontend_validation(
         };
         if ns != gw_ns {
             return Some(CertValidation {
-                reason: "InvalidFrontendClientCertificateValidation",
+                reason: "InvalidCACertificateRef",
                 message: "Frontend CA certificate reference must be in the Gateway namespace",
             });
         }
@@ -260,7 +273,7 @@ pub async fn validate_listener_frontend_validation(
             Ok(c) => c,
             Err(_) => {
                 return Some(CertValidation {
-                    reason: "InvalidFrontendClientCertificateValidation",
+                    reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap not found",
                 })
             }
@@ -269,7 +282,7 @@ pub async fn validate_listener_frontend_validation(
             Some(d) => d,
             None => {
                 return Some(CertValidation {
-                    reason: "InvalidFrontendClientCertificateValidation",
+                    reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap has no data",
                 })
             }
@@ -278,14 +291,14 @@ pub async fn validate_listener_frontend_validation(
             Some(v) => v.as_bytes(),
             None => {
                 return Some(CertValidation {
-                    reason: "InvalidFrontendClientCertificateValidation",
+                    reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap missing ca.crt",
                 })
             }
         };
         if !ca_bundle_valid(ca) {
             return Some(CertValidation {
-                reason: "InvalidFrontendClientCertificateValidation",
+                reason: "InvalidCACertificateRef",
                 message: "Frontend CA certificate is not a valid PEM bundle",
             });
         }
@@ -306,6 +319,11 @@ pub async fn load_gateway_frontend_validations(
         let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
         let gw_tls = gw.spec.tls.as_ref();
         for listener in &mut state.listeners {
+            if !matches!(listener.protocol.as_ref(), "HTTPS" | "TLS")
+                || listener.tls_mode != Some(TlsMode::Terminate)
+            {
+                continue;
+            }
             let spec = match listener_frontend_validation(gw_tls, listener.port) {
                 Some(s) => s,
                 None => continue,
@@ -426,7 +444,7 @@ pub fn build_listener_status(
             programmed_message = "Listener has unresolved certificate references";
         }
 
-        let (accepted_status, accepted_reason, accepted_message) = listener_accepted(
+        let (mut accepted_status, mut accepted_reason, mut accepted_message) = listener_accepted(
             name,
             protocol,
             parse_tls_mode(obj, protocol),
@@ -438,6 +456,17 @@ pub fn build_listener_status(
             && (accepted_reason == "UnsupportedValue" || accepted_reason == "ProtocolConflict")
         {
             supported_kinds = Vec::new();
+        }
+        if accepted_status == "True" {
+            if let Some(err) = cert_errors.get(idx).copied().flatten() {
+                accepted_status = "False";
+                accepted_reason = if is_frontend_ca_error(err.reason) {
+                    "NoValidCACertificate"
+                } else {
+                    err.reason
+                };
+                accepted_message = err.message;
+            }
         }
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -640,6 +669,16 @@ pub(crate) fn validate_listener_kinds(
 pub struct CertValidation {
     pub reason: &'static str,
     pub message: &'static str,
+}
+
+/// Returns true when a `CertValidation` reason is one produced by frontend
+/// client-certificate validation, which uses `NoValidCACertificate` for the
+/// `Accepted` condition.
+fn is_frontend_ca_error(reason: &str) -> bool {
+    matches!(
+        reason,
+        "InvalidCACertificateRef" | "InvalidCACertificateKind" | "RefNotPermitted"
+    )
 }
 
 /// Validate a listener's TLS certificate references.

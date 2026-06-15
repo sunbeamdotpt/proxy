@@ -9,6 +9,7 @@ use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
 use sunbeam_proxy::tls::{
     merge_cert_store, CertSource, CertStore, DiskCertSource, GatewayCertSource, TlsRegistry,
+    UpstreamCaBundle,
 };
 use sunbeam_proxy::{acme, config, ir};
 
@@ -400,6 +401,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
         })
     };
 
+    let gateway_enabled = cfg.gateway.enabled;
+
     // 3b. Central TLS certificate registry.  L4 listeners terminate TLS here,
     //     and the registry is hot-swapped by RouteManager updates.
     let tls_registry = Arc::new(TlsRegistry::new());
@@ -413,28 +416,10 @@ fn run_serve(upgrade: bool) -> Result<()> {
         gateway_cert_source.snapshot(),
     ));
 
-    // Pingora now runs as a plaintext HTTP proxy on a loopback address.
+    // Pingora runs as a plaintext HTTP proxy on a loopback address.
     // The L4 manager owns the public HTTPS socket and forwards decrypted
     // traffic here.
     let pingora_http_addr = "127.0.0.1:10443";
-
-    let opt = Opt {
-        upgrade,
-        daemon: false,
-        nocapture: false,
-        test: false,
-        conf: None,
-    };
-
-    // 4. Create Pingora server and bootstrap (binds ports or inherits FDs).
-    let mut server = Server::new(Some(opt))?;
-    server.bootstrap();
-
-    // 5. Shared ACME challenge route table.  Populated by the Ingress watcher;
-    //    consulted by the proxy for every /.well-known/acme-challenge/ request.
-    //    Uses std::sync::RwLock so reads are sync and lock-guard-safe across
-    //    Pingora's async proxy calls without cross-runtime waker concerns.
-    let acme_routes: acme::AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
 
     // 2d. Spawn cluster gossip if configured.
     let cluster_handle = if let Some(cc) = &cfg.cluster {
@@ -496,6 +481,114 @@ fn run_serve(upgrade: bool) -> Result<()> {
     if let Err(e) = route_manager.apply("toml", startup_ir) {
         return Err(anyhow::anyhow!("failed to compile startup routes: {e}"));
     }
+
+    // Upstream CA bundle file. Pingora's rustls connector loads SSL_CERT_FILE
+    // once at startup, so the path is fixed and the file is updated (followed
+    // by a graceful upgrade) when BackendTLSPolicy or frontend validation CAs
+    // change.
+    let upstream_ca_bundle_path =
+        std::env::var("SUNBEAM_UPSTREAM_CA_BUNDLE").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("sunbeam-upstream-ca.crt")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let upstream_ca_bundle = Arc::new(UpstreamCaBundle::new(&upstream_ca_bundle_path));
+    if let Err(e) = upstream_ca_bundle.ensure_exists() {
+        tracing::warn!(error = %e, path = %upstream_ca_bundle_path, "failed to create upstream CA bundle");
+    }
+    unsafe { std::env::set_var("SSL_CERT_FILE", &upstream_ca_bundle_path) };
+
+    // 3c. Start metrics + health HTTP server early so readiness probes pass
+    // while Gateway API resources are being reconciled.
+    if metrics_port > 0 {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("metrics runtime");
+            rt.block_on(async {
+                sunbeam_proxy::metrics::spawn_metrics_server(metrics_port);
+                // Keep the runtime alive.
+                std::future::pending::<()>().await;
+            });
+        });
+    }
+
+    // 3d. Start the Gateway API reconciler before Pingora boots so that the
+    // upstream CA bundle is populated from BackendTLSPolicy CAs before rustls
+    // reads SSL_CERT_FILE.  Wait up to 60s for at least one CA.
+    if k8s_available && gateway_enabled {
+        let gateway_ns = cfg.kubernetes.namespace.clone();
+        let cluster_for_reconcile = cluster_handle.clone();
+        let tls_registry_for_reconcile = Arc::clone(&tls_registry);
+        let upstream_ca_bundle_for_reconcile = Arc::clone(&upstream_ca_bundle);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("gateway reconcile runtime");
+            rt.block_on(async move {
+                let client = match Client::try_default().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(error = %e, "gateway: failed to create K8s client; reconciler disabled");
+                        return;
+                    }
+                };
+                let election = sunbeam_proxy::gateway::election::Election::new(
+                    client.clone(),
+                    gateway_ns,
+                    "sunbeam-proxy-gateway".to_string(),
+                    std::env::var("HOSTNAME").unwrap_or_else(|_| "sunbeam-proxy".to_string()),
+                );
+                sunbeam_proxy::gateway::reconcile::run_reconcile_loop(
+                    election,
+                    client,
+                    routes_tx.clone(),
+                    cluster_for_reconcile,
+                    Arc::clone(&tls_registry_for_reconcile),
+                    Arc::clone(&gateway_cert_source),
+                    Arc::clone(&disk_cert_source),
+                    Arc::clone(&upstream_ca_bundle_for_reconcile),
+                ).await;
+            });
+        });
+
+        let wait_start = std::time::Instant::now();
+        while upstream_ca_bundle.is_empty()
+            && wait_start.elapsed() < std::time::Duration::from_secs(60)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if upstream_ca_bundle.is_empty() {
+            tracing::warn!("upstream CA bundle still empty after 60s; continuing with system defaults");
+        } else {
+            tracing::info!("upstream CA bundle populated from Gateway API");
+        }
+    }
+
+    // Pingora now runs as a plaintext HTTP proxy on a loopback address.
+    // The L4 manager owns the public HTTPS socket and forwards decrypted
+    // traffic here.
+
+    let opt = Opt {
+        upgrade,
+        daemon: false,
+        nocapture: false,
+        test: false,
+        conf: None,
+    };
+
+    // 4. Create Pingora server and bootstrap (binds ports or inherits FDs).
+    let mut server = Server::new(Some(opt))?;
+    server.bootstrap();
+
+    // 5. Shared ACME challenge route table.  Populated by the Ingress watcher;
+    //    consulted by the proxy for every /.well-known/acme-challenge/ request.
+    //    Uses std::sync::RwLock so reads are sync and lock-guard-safe across
+    //    Pingora's async proxy calls without cross-runtime waker concerns.
+    let acme_routes: acme::AcmeRoutes = Arc::new(RwLock::new(HashMap::new()));
 
     // 4b. Spawn the L4 socket manager and wire it to RouteManager updates.
     let l4_config = route_manager.l4_config();
@@ -594,21 +687,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     server.add_service(svc);
 
-    // 5b. Spawn metrics + health HTTP server on its own thread.
-    if metrics_port > 0 {
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("metrics runtime");
-            rt.block_on(async {
-                sunbeam_proxy::metrics::spawn_metrics_server(metrics_port);
-                // Keep the runtime alive.
-                std::future::pending::<()>().await;
-            });
-        });
-    }
-
     // 5c. SSH TCP passthrough (port 22 → Gitea SSH), if configured.
     if let Some(ssh_cfg) = &cfg.ssh {
         let listen = ssh_cfg.listen.clone();
@@ -628,43 +706,6 @@ fn run_serve(upgrade: bool) -> Result<()> {
         let k8s_cfg = cfg.kubernetes.clone();
         let cert_path = cfg.tls.cert_path.clone();
         let key_path = cfg.tls.key_path.clone();
-        let gateway_enabled = cfg.gateway.enabled;
-
-        if gateway_enabled {
-            let gateway_ns = k8s_cfg.namespace.clone();
-            let routes_tx = routes_tx.clone();
-            let cluster_for_reconcile = cluster_handle.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("gateway reconcile runtime");
-                rt.block_on(async move {
-                    let client = match Client::try_default().await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!(error = %e, "gateway: failed to create K8s client; reconciler disabled");
-                            return;
-                        }
-                    };
-                    let election = sunbeam_proxy::gateway::election::Election::new(
-                        client.clone(),
-                        gateway_ns,
-                        "sunbeam-proxy-gateway".to_string(),
-                        std::env::var("HOSTNAME").unwrap_or_else(|_| "sunbeam-proxy".to_string()),
-                    );
-                    sunbeam_proxy::gateway::reconcile::run_reconcile_loop(
-                        election,
-                        client,
-                        routes_tx,
-                        cluster_for_reconcile,
-                        Arc::clone(&tls_registry),
-                        Arc::clone(&gateway_cert_source),
-                        Arc::clone(&disk_cert_source),
-                    ).await;
-                });
-            });
-        }
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()

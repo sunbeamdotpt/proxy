@@ -55,7 +55,7 @@ pub struct FrontendValidation {
 }
 
 /// Stub for the reconciled state of a single Gateway resource.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GatewayState {
     pub namespace: Arc<str>,
     pub name: Arc<str>,
@@ -79,7 +79,7 @@ pub enum TlsMode {
 }
 
 /// Stub for a listener attached to a [`GatewayState`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListenerState {
     pub name: Arc<str>,
     pub protocol: Arc<str>,
@@ -195,7 +195,7 @@ pub struct GrantSubject {
 }
 
 /// Reconciled state of a single `BackendTLSPolicy` resource.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BackendTLSPolicyState {
     pub namespace: Arc<str>,
     pub name: Arc<str>,
@@ -204,6 +204,7 @@ pub struct BackendTLSPolicyState {
     pub target: ServiceTargetRef,
     pub hostname: Arc<str>,
     pub ca_certificate_refs: Vec<CaCertificateRef>,
+    pub ca_bundle_pem: Arc<str>,
     pub subject_alt_names: Vec<SubjectAltName>,
     pub accepted: bool,
     pub accepted_reason: Arc<str>,
@@ -215,7 +216,7 @@ pub struct BackendTLSPolicyState {
 }
 
 /// Target Service reference extracted from a `BackendTLSPolicy` `targetRef`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ServiceTargetRef {
     pub group: Arc<str>,
     pub kind: Arc<str>,

@@ -193,11 +193,7 @@ fn build_tls_policy_map(
         }
         let attachment = BackendTlsAttachment {
             hostname: Arc::clone(&policy.hostname),
-            ca_bundle_pem: policy
-                .ca_certificate_refs
-                .first()
-                .map(|_| Arc::from(""))
-                .unwrap_or_default(),
+            ca_bundle_pem: Arc::clone(&policy.ca_bundle_pem),
             subject_alt_names: policy
                 .subject_alt_names
                 .iter()

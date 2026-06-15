@@ -164,20 +164,27 @@ impl TlsRegistry {
             .map_err(|e| anyhow::anyhow!("protocol versions: {e}"))?;
 
         let mut config = if let Some((ca_bundle_pem, allow_insecure_fallback)) = client_auth {
-            let roots = root_store_from_pem(ca_bundle_pem.as_bytes())
-                .map_err(|e| anyhow::anyhow!("invalid client-auth CA bundle: {e}"))?;
-            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
-            let verifier = if allow_insecure_fallback {
-                verifier.allow_unauthenticated()
+            if ca_bundle_pem.trim().is_empty() {
+                // No CA bundle provided: do not request or validate client certificates.
+                builder
+                    .with_no_client_auth()
+                    .with_cert_resolver(Arc::new(self.clone()))
             } else {
-                verifier
-            };
-            let verifier = verifier
-                .build()
-                .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?;
-            builder
-                .with_client_cert_verifier(verifier)
-                .with_cert_resolver(Arc::new(self.clone()))
+                let roots = root_store_from_pem(ca_bundle_pem.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("invalid client-auth CA bundle: {e}"))?;
+                let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+                let verifier = if allow_insecure_fallback {
+                    verifier.allow_unauthenticated()
+                } else {
+                    verifier
+                };
+                let verifier = verifier
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?;
+                builder
+                    .with_client_cert_verifier(verifier)
+                    .with_cert_resolver(Arc::new(self.clone()))
+            }
         } else {
             builder
                 .with_no_client_auth()

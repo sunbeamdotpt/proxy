@@ -18,20 +18,21 @@ metadata:
 rules:
   # Gateway API resources (cluster-scoped read).
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways", "httproutes", "tcproutes", "udproutes", "tlsroutes", "referencegrants", "gatewayclasses", "listenersets"]
+    resources: ["gateways", "httproutes", "grpcroutes", "tcproutes", "udproutes", "tlsroutes", "referencegrants", "gatewayclasses", "listenersets", "backendtlspolicies"]
     verbs: ["get", "list", "watch"]
   # Status writeback (leader only).
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways/status", "httproutes/status", "tcproutes/status", "udproutes/status", "tlsroutes/status", "gatewayclasses/status", "listenersets/status"]
+    resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tcproutes/status", "udproutes/status", "tlsroutes/status", "gatewayclasses/status", "listenersets/status", "backendtlspolicies/status"]
     verbs: ["patch", "update"]
   # Lease API for leader election. Scoped to the single lease object we create.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: ["sunbeam-proxy-gateway"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # Core resources for backend resolution, namespace selectors, and pod/Svc endpoints.
+  # Core resources for backend resolution, namespace selectors, pod/Svc endpoints,
+  # and frontend client-certificate CA ConfigMaps.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "endpoints", "pods", "serviceaccounts"]
+    resources: ["namespaces", "services", "endpoints", "pods", "serviceaccounts", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Secrets may be referenced cross-namespace by Gateway certificateRefs when
   # permitted by a ReferenceGrant. Limiting this to named resources is not
