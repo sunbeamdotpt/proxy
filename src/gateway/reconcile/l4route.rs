@@ -1032,15 +1032,8 @@ async fn patch_l4_status<R>(
     let ns = meta.namespace.clone().unwrap_or_default();
     let new_status = serde_json::json!({ "parents": build_status_parents(parent_statuses) });
     let api: Api<R> = Api::namespaced(ctx.client.clone(), &ns);
-    if let Err(e) = patch_status_if_changed(
-        &api,
-        route,
-        new_status,
-        api_version,
-        kind,
-        "sunbeam-proxy",
-    )
-    .await
+    if let Err(e) =
+        patch_status_if_changed(&api, route, new_status, api_version, kind, "sunbeam-proxy").await
     {
         let name = meta.name.clone().unwrap_or_default();
         tracing::warn!(error = %e, name, namespace = ns, "{} status patch failed", kind);

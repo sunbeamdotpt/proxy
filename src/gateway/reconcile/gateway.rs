@@ -1528,7 +1528,10 @@ async fn reconcile_infrastructure_serviceaccount(gw: &Gateway, client: &Client) 
         "metadata": sa.metadata,
     });
     let pp = kube::api::PatchParams::apply("sunbeam-proxy").force();
-    if let Err(e) = api.patch(&sa_name, &pp, &kube::api::Patch::Apply(patch)).await {
+    if let Err(e) = api
+        .patch(&sa_name, &pp, &kube::api::Patch::Apply(patch))
+        .await
+    {
         tracing::warn!(error = %e, %name, %ns, "failed to reconcile infrastructure ServiceAccount");
     }
 }

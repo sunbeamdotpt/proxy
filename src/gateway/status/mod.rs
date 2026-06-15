@@ -84,4 +84,3 @@ impl From<&StatusCondition> for k8s_openapi::apimachinery::pkg::apis::meta::v1::
         }
     }
 }
-

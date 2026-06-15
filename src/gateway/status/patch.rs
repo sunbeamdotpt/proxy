@@ -54,7 +54,12 @@ where
     let new_stripped = strip_last_transition_time(&new_status);
 
     if old_stripped == new_stripped {
-        tracing::debug!(name, namespace = ns, kind, "status unchanged, skipping patch");
+        tracing::debug!(
+            name,
+            namespace = ns,
+            kind,
+            "status unchanged, skipping patch"
+        );
         return Ok(false);
     }
 
@@ -69,7 +74,8 @@ where
     });
 
     let pp = PatchParams::apply(field_manager);
-    api.patch_status(&name, &pp, &Patch::Apply(&patch_body)).await?;
+    api.patch_status(&name, &pp, &Patch::Apply(&patch_body))
+        .await?;
     tracing::debug!(name, namespace = ns, kind, "status patched");
     Ok(true)
 }
