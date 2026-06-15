@@ -301,6 +301,8 @@ pub async fn reconcile_tick_with_leader(
         grpc_routes.push(state);
     }
 
+    // Compute BackendTLSPolicy status before endpoint expansion replaces service
+    // FQDN backend addresses with concrete pod IPs.
     let backend_tls_policies =
         crate::gateway::reconcile::backendtlspolicy::reconcile_backend_tls_policies(
             client,
