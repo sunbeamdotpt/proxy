@@ -37,7 +37,7 @@ pub struct ClusterHandle {
     pub gateway_state_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Sender for `gateway_notify` gossip broadcasts (bytes are bincode-encoded [`ClusterMessage`]).
     pub gateway_notify_tx: Option<mpsc::Sender<Vec<u8>>>,
-    shutdown_tx: watch::Sender<bool>,
+    pub(crate) shutdown_tx: watch::Sender<bool>,
 }
 
 impl ClusterHandle {
