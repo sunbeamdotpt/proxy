@@ -16,6 +16,7 @@ use crate::gateway::reconcile::httproute::{
     listener_allows_kind, listener_hostname_intersects, namespace_allowed,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use futures::StreamExt;
 use gateway_api::experimental::tcproutes::{
@@ -25,7 +26,7 @@ use gateway_api::experimental::udproutes::{
     UdpRouteParentRefs, UdpRouteRules, UdpRouteRulesBackendRefs,
 };
 use gateway_api::tlsroutes::{TlsRouteParentRefs, TlsRouteRules, TlsRouteRulesBackendRefs};
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
 use serde_json::Value;
@@ -985,24 +986,8 @@ fn build_status_parents(parent_statuses: &[L4ParentStatus]) -> Vec<Value> {
                 .iter()
                 .map(|c| {
                     serde_json::json!({
-                        "type": match c.condition_type {
-                            ConditionType::Accepted => "Accepted",
-                            ConditionType::Programmed => "Programmed",
-                            ConditionType::ResolvedRefs => "ResolvedRefs",
-                            ConditionType::Conflicted => "Conflicted",
-                            ConditionType::Poison => "Poison",
-                            ConditionType::NoMatchingParent => "NoMatchingParent",
-                            ConditionType::RefNotPermitted => "RefNotPermitted",
-                            ConditionType::UnsupportedFeature => "UnsupportedFeature",
-                            ConditionType::InsecureFrontendValidationMode => {
-                                "InsecureFrontendValidationMode"
-                            }
-                        },
-                        "status": match c.status {
-                            ConditionStatus::True => "True",
-                            ConditionStatus::False => "False",
-                            ConditionStatus::Unknown => "Unknown",
-                        },
+                        "type": c.condition_type.to_string(),
+                        "status": c.status.to_string(),
                         "reason": c.reason,
                         "message": c.message,
                         "observedGeneration": c.observed_generation,
@@ -1045,45 +1030,20 @@ async fn patch_l4_status<R>(
 {
     let meta = route.meta();
     let ns = meta.namespace.clone().unwrap_or_default();
-    let name = meta.name.clone().unwrap_or_default();
-
     let new_status = serde_json::json!({ "parents": build_status_parents(parent_statuses) });
-
-    let old_status_json = route
-        .status()
-        .and_then(|s| serde_json::to_value(s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-    let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-
-    if old_stripped == new_stripped {
-        tracing::debug!(
-            name,
-            namespace = ns,
-            "{} status unchanged, skipping patch",
-            kind
-        );
-        return;
-    }
-
-    let patch_body = serde_json::json!({
-        "apiVersion": api_version,
-        "kind": kind,
-        "metadata": {
-            "name": name,
-            "namespace": ns,
-        },
-        "status": new_status,
-    });
     let api: Api<R> = Api::namespaced(ctx.client.clone(), &ns);
-    let pp = PatchParams::apply("sunbeam-proxy");
-    if let Err(e) = api
-        .patch_status(&name, &pp, &Patch::Apply(&patch_body))
-        .await
+    if let Err(e) = patch_status_if_changed(
+        &api,
+        route,
+        new_status,
+        api_version,
+        kind,
+        "sunbeam-proxy",
+    )
+    .await
     {
+        let name = meta.name.clone().unwrap_or_default();
         tracing::warn!(error = %e, name, namespace = ns, "{} status patch failed", kind);
-    } else {
-        tracing::debug!(name, namespace = ns, "{} status patched", kind);
     }
 }
 

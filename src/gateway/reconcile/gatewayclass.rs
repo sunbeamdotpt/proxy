@@ -7,10 +7,11 @@
 //! `Accepted` status condition.  Status writeback is gated on leadership.
 
 use crate::gateway::api::gatewayclass::GatewayClass;
+use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use futures::StreamExt;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,34 +119,6 @@ pub fn compute_accepted_condition(gc: &GatewayClass, observed_generation: i64) -
     }
 }
 
-/// Convert a [`StatusCondition`] into a Kubernetes `Condition`.
-pub fn to_k8s_condition(sc: &StatusCondition) -> Condition {
-    Condition {
-        last_transition_time: k8s_openapi::jiff::Timestamp::now().into(),
-        message: sc.message.clone(),
-        observed_generation: Some(sc.observed_generation),
-        reason: sc.reason.clone(),
-        status: match sc.status {
-            ConditionStatus::True => "True".to_string(),
-            ConditionStatus::False => "False".to_string(),
-            ConditionStatus::Unknown => "Unknown".to_string(),
-        },
-        type_: match sc.condition_type {
-            ConditionType::Accepted => "Accepted".to_string(),
-            ConditionType::Programmed => "Programmed".to_string(),
-            ConditionType::ResolvedRefs => "ResolvedRefs".to_string(),
-            ConditionType::Conflicted => "Conflicted".to_string(),
-            ConditionType::Poison => "Poison".to_string(),
-            ConditionType::NoMatchingParent => "NoMatchingParent".to_string(),
-            ConditionType::RefNotPermitted => "RefNotPermitted".to_string(),
-            ConditionType::UnsupportedFeature => "UnsupportedFeature".to_string(),
-            ConditionType::InsecureFrontendValidationMode => {
-                "InsecureFrontendValidationMode".to_string()
-            }
-        },
-    }
-}
-
 /// Context shared across GatewayClass reconcile invocations.
 #[derive(Clone)]
 pub struct GatewayClassContext {
@@ -162,7 +135,7 @@ pub async fn reconcile_gatewayclass(
     let condition = compute_accepted_condition(&gc, observed_generation);
 
     if ctx.is_leader.load(Ordering::Relaxed) {
-        let conditions = vec![to_k8s_condition(&condition)];
+        let conditions = vec![Condition::from(&condition)];
         let features: Vec<serde_json::Value> = supported_features()
             .into_iter()
             .map(|name| serde_json::json!({"name": name}))
@@ -172,28 +145,16 @@ pub async fn reconcile_gatewayclass(
             "supportedFeatures": features,
         });
 
-        let old_status_json = gc
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-
-        let name = gc.metadata.name.as_deref().unwrap_or("");
-        if old_stripped == new_stripped {
-            tracing::debug!(name, "GatewayClass status unchanged, skipping patch");
-        } else {
-            let patch = serde_json::json!({ "status": new_status });
-            let api: Api<GatewayClass> = Api::all(ctx.client.clone());
-            api.patch_status(
-                name,
-                &PatchParams::apply("sunbeam-proxy"),
-                &Patch::Merge(&patch),
-            )
-            .await?;
-            tracing::info!(name, "patched GatewayClass status");
-        }
+        let api: Api<GatewayClass> = Api::all(ctx.client.clone());
+        patch_status_if_changed(
+            &api,
+            &gc,
+            new_status,
+            "gateway.networking.k8s.io/v1",
+            "GatewayClass",
+            "sunbeam-proxy",
+        )
+        .await?;
     }
 
     crate::gateway::reconcile::trigger::trigger();
@@ -303,7 +264,7 @@ mod tests {
             message: "ok".into(),
             observed_generation: 42,
         };
-        let k8s = to_k8s_condition(&cond);
+        let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "Accepted");
         assert_eq!(k8s.status, "True");
         assert_eq!(k8s.reason, "Accepted");
@@ -320,7 +281,7 @@ mod tests {
             message: "not ready".into(),
             observed_generation: 7,
         };
-        let k8s = to_k8s_condition(&cond);
+        let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "Programmed");
         assert_eq!(k8s.status, "False");
     }
@@ -334,7 +295,7 @@ mod tests {
             message: "unknown".into(),
             observed_generation: 3,
         };
-        let k8s = to_k8s_condition(&cond);
+        let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "ResolvedRefs");
         assert_eq!(k8s.status, "Unknown");
     }
@@ -359,7 +320,7 @@ mod tests {
                 message: "msg".into(),
                 observed_generation: 1,
             };
-            let k8s = to_k8s_condition(&cond);
+            let k8s = Condition::from(&cond);
             assert_eq!(k8s.type_, expected);
         }
     }

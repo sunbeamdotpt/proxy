@@ -19,8 +19,9 @@ use crate::gateway::reconcile::gateway::parse_allowed_routes;
 use crate::gateway::reconcile::gatewayclass::supported_features;
 use crate::gateway::reconcile::httproute::parse_parent_refs;
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::status::patch::patch_status_if_changed;
 use futures::StreamExt;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -898,41 +899,18 @@ pub async fn reconcile_listenerset(
         let features: HashSet<String> = supported_features().into_iter().collect();
         let new_status = build_listener_set_status(&ls_state, &attached, &features);
 
-        let old_status_json = ls
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-
-        if old_stripped == new_stripped {
-            tracing::debug!(
-                name,
-                namespace = ns,
-                "ListenerSet status unchanged, skipping patch"
-            );
-        } else {
-            let patch_body = serde_json::json!({
-                "apiVersion": "gateway.networking.k8s.io/v1",
-                "kind": "ListenerSet",
-                "metadata": {
-                    "name": name,
-                    "namespace": ns,
-                },
-                "status": new_status,
-            });
-
-            let api: Api<ListenerSet> = Api::namespaced(ctx.client.clone(), &ns);
-            let pp = PatchParams::apply("sunbeam-proxy");
-            if let Err(e) = api
-                .patch_status(&name, &pp, &Patch::Apply(&patch_body))
-                .await
-            {
-                tracing::warn!(error = %e, name, namespace = ns, "ListenerSet status patch failed");
-            } else {
-                tracing::debug!(name, namespace = ns, "ListenerSet status patched");
-            }
+        let api: Api<ListenerSet> = Api::namespaced(ctx.client.clone(), &ns);
+        if let Err(e) = patch_status_if_changed(
+            &api,
+            &ls,
+            new_status,
+            "gateway.networking.k8s.io/v1",
+            "ListenerSet",
+            "sunbeam-proxy",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, name, namespace = ns, "ListenerSet status patch failed");
         }
     }
 
@@ -965,7 +943,6 @@ pub(crate) async fn patch_listener_set_statuses(
     }
 
     let features: HashSet<String> = supported_features().into_iter().collect();
-    let pp = PatchParams::apply("sunbeam-proxy");
     let listener_set_allowed = build_listener_set_allowed_map(listener_sets, states);
 
     for state in states {
@@ -984,34 +961,20 @@ pub(crate) async fn patch_listener_set_statuses(
         );
         let new_status = build_listener_set_status(state, &attached, &features);
 
-        let old_status_json = raw
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-        if old_stripped == new_stripped {
-            continue;
-        }
-
         let ns = state.namespace.to_string();
         let name = state.name.to_string();
-        let patch_body = serde_json::json!({
-            "apiVersion": "gateway.networking.k8s.io/v1",
-            "kind": "ListenerSet",
-            "metadata": { "name": &name, "namespace": &ns },
-            "status": new_status,
-        });
-
         let api: Api<ListenerSet> = Api::namespaced(client.clone(), &ns);
-        if let Err(e) = api
-            .patch_status(&name, &pp, &Patch::Apply(&patch_body))
-            .await
+        if let Err(e) = patch_status_if_changed(
+            &api,
+            raw,
+            new_status,
+            "gateway.networking.k8s.io/v1",
+            "ListenerSet",
+            "sunbeam-proxy",
+        )
+        .await
         {
             tracing::warn!(error = %e, name, namespace = ns, "ListenerSet status patch failed");
-        } else {
-            tracing::debug!(name, namespace = ns, "ListenerSet status patched");
         }
     }
 }

@@ -8,9 +8,7 @@
 //! plus Sunbeam-specific extensions (`Poison`, `Conflicted`).
 
 pub mod conditions;
-pub mod writer;
-
-pub use writer::StatusWriter;
+pub mod patch;
 
 /// Standard Gateway API status condition types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,12 +24,40 @@ pub enum ConditionType {
     InsecureFrontendValidationMode,
 }
 
+impl std::fmt::Display for ConditionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ConditionType::Accepted => "Accepted",
+            ConditionType::Programmed => "Programmed",
+            ConditionType::ResolvedRefs => "ResolvedRefs",
+            ConditionType::Conflicted => "Conflicted",
+            ConditionType::Poison => "Poison",
+            ConditionType::NoMatchingParent => "NoMatchingParent",
+            ConditionType::RefNotPermitted => "RefNotPermitted",
+            ConditionType::UnsupportedFeature => "UnsupportedFeature",
+            ConditionType::InsecureFrontendValidationMode => "InsecureFrontendValidationMode",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Condition status values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionStatus {
     True,
     False,
     Unknown,
+}
+
+impl std::fmt::Display for ConditionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ConditionStatus::True => "True",
+            ConditionStatus::False => "False",
+            ConditionStatus::Unknown => "Unknown",
+        };
+        f.write_str(s)
+    }
 }
 
 /// A single status condition entry.
@@ -44,27 +70,18 @@ pub struct StatusCondition {
     pub observed_generation: i64,
 }
 
-/// Write status conditions for a Gateway object.
-///
-/// This is a convenience wrapper around [`StatusWriter::write_gateway_status`].
-/// It will be removed once all call-sites are migrated to the struct.
-pub async fn write_gateway_status(_name: &str, _namespace: &str, _conditions: &[StatusCondition]) {
-    tracing::trace!("status writeback stub — use StatusWriter");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn write_gateway_status_stub_is_callable() {
-        let cond = StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::True,
-            reason: "Accepted".to_string(),
-            message: "ok".to_string(),
-            observed_generation: 1,
-        };
-        write_gateway_status("gw", "default", &[cond]).await;
+impl From<&StatusCondition> for k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition {
+    fn from(c: &StatusCondition) -> Self {
+        Self {
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ),
+            message: c.message.clone(),
+            observed_generation: Some(c.observed_generation),
+            reason: c.reason.clone(),
+            status: c.status.to_string(),
+            type_: c.condition_type.to_string(),
+        }
     }
 }
+

@@ -21,27 +21,6 @@ pub mod trigger;
 
 pub use leader::run_reconcile_loop;
 
-use serde_json::Value;
-
-/// Recursively strip `lastTransitionTime` from a JSON value so that two
-/// status objects can be compared without regard to their timestamps.
-pub fn strip_last_transition_time(v: &Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut new = serde_json::Map::new();
-            for (k, v) in map {
-                if k == "lastTransitionTime" {
-                    continue;
-                }
-                new.insert(k.clone(), strip_last_transition_time(v));
-            }
-            Value::Object(new)
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(strip_last_transition_time).collect()),
-        other => other.clone(),
-    }
-}
-
 use crate::gateway::api::{
     BackendTLSPolicy, GRPCRoute, Gateway, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute,
     TLSRoute, UDPRoute,
@@ -61,7 +40,7 @@ use crate::gateway::reconcile::l4route::{
     resolve_l4_backends_async,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -462,13 +441,18 @@ pub async fn reconcile_tick_with_leader(
                 &listener_set_states,
             );
             if current != desired {
-                let patch = serde_json::json!({ "status": { "attachedListenerSets": desired } });
+                let patch = serde_json::json!({
+                    "apiVersion": "gateway.networking.k8s.io/v1",
+                    "kind": "Gateway",
+                    "metadata": { "name": gw_name, "namespace": gw_ns },
+                    "status": { "attachedListenerSets": desired }
+                });
                 let api: Api<Gateway> = Api::namespaced(client.clone(), gw_ns);
                 if let Err(e) = api
                     .patch_status(
                         gw_name,
-                        &PatchParams::apply("sunbeam-proxy"),
-                        &Patch::Merge(&patch),
+                        &kube::api::PatchParams::apply("sunbeam-proxy"),
+                        &kube::api::Patch::Apply(&patch),
                     )
                     .await
                 {
@@ -877,35 +861,6 @@ mod tests {
             "default",
         );
         assert!(reconcile_tick(&client).await.is_none());
-    }
-
-    #[test]
-    fn strip_last_transition_time_removes_timestamp_recursively() {
-        let value = serde_json::json!({
-            "conditions": [
-                {
-                    "type": "Ready",
-                    "lastTransitionTime": "2026-01-01T00:00:00Z",
-                    "status": "True"
-                }
-            ],
-            "nested": {
-                "lastTransitionTime": "ignored",
-                "value": 1
-            }
-        });
-        let stripped = strip_last_transition_time(&value);
-        let conditions = stripped["conditions"].as_array().unwrap();
-        assert_eq!(conditions.len(), 1);
-        assert!(!conditions[0]
-            .as_object()
-            .unwrap()
-            .contains_key("lastTransitionTime"));
-        assert!(!stripped["nested"]
-            .as_object()
-            .unwrap()
-            .contains_key("lastTransitionTime"));
-        assert_eq!(stripped["nested"]["value"], 1);
     }
 
     #[tokio::test]

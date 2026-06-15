@@ -16,18 +16,18 @@ use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerState, NamespaceFrom, RouteGroupKind,
     RouteNamespaces, TlsMode,
 };
-use crate::gateway::reconcile::gatewayclass::{
-    supported_features, to_k8s_condition, CONTROLLER_NAME,
-};
+use crate::gateway::reconcile::gatewayclass::{supported_features, CONTROLLER_NAME};
 use crate::gateway::reconcile::httproute::{
     listener_allows_kind, listener_hostname_intersects, namespace_allowed, parse_route_hostnames,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use crate::ir::compile::CompiledL4Config;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::api::{Api, ListParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
 use std::collections::{BTreeMap, HashMap};
@@ -1527,8 +1527,8 @@ async fn reconcile_infrastructure_serviceaccount(gw: &Gateway, client: &Client) 
         "kind": "ServiceAccount",
         "metadata": sa.metadata,
     });
-    let pp = PatchParams::apply("sunbeam-proxy").force();
-    if let Err(e) = api.patch(&sa_name, &pp, &Patch::Apply(patch)).await {
+    let pp = kube::api::PatchParams::apply("sunbeam-proxy").force();
+    if let Err(e) = api.patch(&sa_name, &pp, &kube::api::Patch::Apply(patch)).await {
         tracing::warn!(error = %e, %name, %ns, "failed to reconcile infrastructure ServiceAccount");
     }
 }
@@ -1682,7 +1682,7 @@ pub async fn reconcile_gateway(
         }
 
         let k8s_conditions: Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> =
-            conditions.iter().map(to_k8s_condition).collect();
+            conditions.iter().map(Condition::from).collect();
         let feature_set: std::collections::HashSet<String> =
             supported_features().into_iter().collect();
         let listener_statuses = build_listener_status(
@@ -1714,27 +1714,16 @@ pub async fn reconcile_gateway(
             "attachedListenerSets": attached_listener_sets,
         });
 
-        let old_status_json = gw
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-
-        if old_stripped == new_stripped {
-            tracing::debug!(%name, %ns, "Gateway status unchanged, skipping patch");
-        } else {
-            let patch = serde_json::json!({ "status": new_status });
-            let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
-            api.patch_status(
-                &name,
-                &PatchParams::apply("sunbeam-proxy"),
-                &Patch::Merge(&patch),
-            )
-            .await?;
-            tracing::info!(%name, %ns, "patched Gateway status");
-        }
+        let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
+        patch_status_if_changed(
+            &api,
+            &gw,
+            new_status,
+            "gateway.networking.k8s.io/v1",
+            "Gateway",
+            "sunbeam-proxy",
+        )
+        .await?;
     }
 
     crate::gateway::reconcile::trigger::trigger();

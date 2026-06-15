@@ -1319,8 +1319,9 @@ fn resolved_refs_true(observed_generation: i64) -> StatusCondition {
 // HTTPRoute controller (kube::runtime::Controller)
 // ---------------------------------------------------------------------------
 
+use crate::gateway::status::patch::patch_status_if_changed;
 use futures::StreamExt;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
 use kube::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1465,24 +1466,8 @@ pub async fn reconcile_httproute(
                     .iter()
                     .map(|c| {
                         serde_json::json!({
-                            "type": match c.condition_type {
-                                ConditionType::Accepted => "Accepted",
-                                ConditionType::Programmed => "Programmed",
-                                ConditionType::ResolvedRefs => "ResolvedRefs",
-                                ConditionType::Conflicted => "Conflicted",
-                                ConditionType::Poison => "Poison",
-                                ConditionType::NoMatchingParent => "NoMatchingParent",
-                                ConditionType::RefNotPermitted => "RefNotPermitted",
-                                ConditionType::UnsupportedFeature => "UnsupportedFeature",
-                                ConditionType::InsecureFrontendValidationMode => {
-                                    "InsecureFrontendValidationMode"
-                                }
-                            },
-                            "status": match c.status {
-                                ConditionStatus::True => "True",
-                                ConditionStatus::False => "False",
-                                ConditionStatus::Unknown => "Unknown",
-                            },
+                            "type": c.condition_type.to_string(),
+                            "status": c.status.to_string(),
                             "reason": c.reason,
                             "message": c.message,
                             "observedGeneration": c.observed_generation,
@@ -1509,41 +1494,18 @@ pub async fn reconcile_httproute(
 
         let new_status = serde_json::json!({ "parents": parents });
 
-        let old_status_json = route
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-        let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-
-        if old_stripped == new_stripped {
-            tracing::debug!(
-                name,
-                namespace = ns,
-                "HTTPRoute status unchanged, skipping patch"
-            );
-        } else {
-            let patch_body = serde_json::json!({
-                "apiVersion": "gateway.networking.k8s.io/v1",
-                "kind": "HTTPRoute",
-                "metadata": {
-                    "name": name,
-                    "namespace": ns,
-                },
-                "status": new_status,
-            });
-
-            let api: Api<HTTPRoute> = Api::namespaced(ctx.client.clone(), &ns);
-            let pp = PatchParams::apply("sunbeam-proxy");
-            if let Err(e) = api
-                .patch_status(&name, &pp, &Patch::Apply(&patch_body))
-                .await
-            {
-                tracing::warn!(error = %e, name, namespace = ns, "HTTPRoute status patch failed");
-            } else {
-                tracing::debug!(name, namespace = ns, "HTTPRoute status patched");
-            }
+        let api: Api<HTTPRoute> = Api::namespaced(ctx.client.clone(), &ns);
+        if let Err(e) = patch_status_if_changed(
+            &api,
+            &route,
+            new_status,
+            "gateway.networking.k8s.io/v1",
+            "HTTPRoute",
+            "sunbeam-proxy",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, name, namespace = ns, "HTTPRoute status patch failed");
         }
     }
 

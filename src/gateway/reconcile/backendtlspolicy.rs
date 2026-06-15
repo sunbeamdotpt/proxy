@@ -13,11 +13,13 @@ use crate::gateway::model::{
     BackendTLSPolicyState, CaCertificateRef, GRPCRouteState, HTTPRouteState, ParentRef,
     ServiceTargetRef, SubjectAltName,
 };
-use crate::gateway::reconcile::gatewayclass::{to_k8s_condition, CONTROLLER_NAME};
+use crate::gateway::reconcile::gatewayclass::CONTROLLER_NAME;
 use crate::gateway::reconcile::refgrant::GrantIndex;
+use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::{Api, Patch, PatchParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::api::Api;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -499,9 +501,9 @@ async fn patch_status(
             },
             "controllerName": CONTROLLER_NAME,
             "conditions": vec![
-                to_k8s_condition(&accepted),
-                to_k8s_condition(&resolved_refs),
-                to_k8s_condition(&programmed),
+                Condition::from(&accepted),
+                Condition::from(&resolved_refs),
+                Condition::from(&programmed),
             ],
         })]
     } else {
@@ -528,9 +530,9 @@ async fn patch_status(
                     "ancestorRef": ancestor_ref,
                     "controllerName": CONTROLLER_NAME,
                     "conditions": vec![
-                        to_k8s_condition(&accepted),
-                        to_k8s_condition(&resolved_refs),
-                        to_k8s_condition(&programmed),
+                        Condition::from(&accepted),
+                        Condition::from(&resolved_refs),
+                        Condition::from(&programmed),
                     ],
                 })
             })
@@ -541,34 +543,16 @@ async fn patch_status(
         "ancestors": ancestor_entries
     });
 
-    let old_status_json = raw
-        .status
-        .as_ref()
-        .and_then(|s| serde_json::to_value(s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let old_stripped = crate::gateway::reconcile::strip_last_transition_time(&old_status_json);
-    let new_stripped = crate::gateway::reconcile::strip_last_transition_time(&new_status);
-    if old_stripped == new_stripped {
-        tracing::debug!(
-            name,
-            namespace = ns,
-            "BackendTLSPolicy status unchanged, skipping patch"
-        );
-        return;
-    }
-
-    let patch_body = serde_json::json!({
-        "apiVersion": "gateway.networking.k8s.io/v1",
-        "kind": "BackendTLSPolicy",
-        "metadata": { "name": &name, "namespace": &ns },
-        "status": new_status,
-    });
-
     let api: Api<BackendTLSPolicy> = Api::namespaced(client.clone(), &ns);
-    let pp = PatchParams::apply("sunbeam-proxy");
-    if let Err(e) = api
-        .patch_status(&name, &pp, &Patch::Apply(&patch_body))
-        .await
+    if let Err(e) = patch_status_if_changed(
+        &api,
+        raw,
+        new_status,
+        "gateway.networking.k8s.io/v1",
+        "BackendTLSPolicy",
+        "sunbeam-proxy",
+    )
+    .await
     {
         tracing::warn!(
             error = %e,
@@ -576,8 +560,6 @@ async fn patch_status(
             namespace = ns,
             "failed to patch BackendTLSPolicy status"
         );
-    } else {
-        tracing::debug!(name, namespace = ns, "patched BackendTLSPolicy status");
     }
 }
 
