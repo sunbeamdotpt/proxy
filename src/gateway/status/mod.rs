@@ -7,6 +7,7 @@
 //! the Kubernetes API server.  Conditions follow the Gateway API standard
 //! plus Sunbeam-specific extensions (`Poison`, `Conflicted`).
 
+pub mod builder;
 pub mod conditions;
 pub mod patch;
 

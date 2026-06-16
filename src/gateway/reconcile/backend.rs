@@ -4,7 +4,7 @@
 //! Shared backend-ref resolution logic for Gateway API routes.
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
-use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
 
 /// Status of resolving backend references for a route.
 #[derive(Clone, Debug)]
@@ -47,52 +47,46 @@ pub fn build_backend_resolution_conditions(
     generation: i64,
 ) -> Vec<StatusCondition> {
     let resolved_refs = match &resolution.overall {
-        BackendResolutionStatus::Ok => StatusCondition {
-            condition_type: ConditionType::ResolvedRefs,
-            status: ConditionStatus::True,
-            reason: "ResolvedRefs".to_string(),
-            message: "All backend references resolved".to_string(),
-            observed_generation: generation,
-        },
-        BackendResolutionStatus::RefNotPermitted(msg) => StatusCondition {
-            condition_type: ConditionType::ResolvedRefs,
-            status: ConditionStatus::False,
-            reason: "RefNotPermitted".to_string(),
-            message: msg.clone(),
-            observed_generation: generation,
-        },
-        BackendResolutionStatus::Unsupported(msg) => StatusCondition {
-            condition_type: ConditionType::ResolvedRefs,
-            status: ConditionStatus::False,
-            reason: "InvalidKind".to_string(),
-            message: msg.clone(),
-            observed_generation: generation,
-        },
-        BackendResolutionStatus::BackendNotFound(msg) => StatusCondition {
-            condition_type: ConditionType::ResolvedRefs,
-            status: ConditionStatus::False,
-            reason: "BackendNotFound".to_string(),
-            message: msg.clone(),
-            observed_generation: generation,
-        },
+        BackendResolutionStatus::Ok => conditions::resolved_refs_condition(
+            ConditionStatus::True,
+            "ResolvedRefs",
+            "All backend references resolved",
+            generation,
+        ),
+        BackendResolutionStatus::RefNotPermitted(msg) => conditions::resolved_refs_condition(
+            ConditionStatus::False,
+            "RefNotPermitted",
+            msg,
+            generation,
+        ),
+        BackendResolutionStatus::Unsupported(msg) => conditions::resolved_refs_condition(
+            ConditionStatus::False,
+            "InvalidKind",
+            msg,
+            generation,
+        ),
+        BackendResolutionStatus::BackendNotFound(msg) => conditions::resolved_refs_condition(
+            ConditionStatus::False,
+            "BackendNotFound",
+            msg,
+            generation,
+        ),
     };
 
     let programmed = if matches!(resolution.overall, BackendResolutionStatus::Ok) && accepted {
-        StatusCondition {
-            condition_type: ConditionType::Programmed,
-            status: ConditionStatus::True,
-            reason: "Programmed".to_string(),
-            message: "Route programmed into proxy".to_string(),
-            observed_generation: generation,
-        }
+        conditions::programmed_condition(
+            ConditionStatus::True,
+            "Programmed",
+            "Route programmed into proxy",
+            generation,
+        )
     } else {
-        StatusCondition {
-            condition_type: ConditionType::Programmed,
-            status: ConditionStatus::False,
-            reason: "NotProgrammed".to_string(),
-            message: "Route not programmed into proxy".to_string(),
-            observed_generation: generation,
-        }
+        conditions::programmed_condition(
+            ConditionStatus::False,
+            "NotProgrammed",
+            "Route not programmed into proxy",
+            generation,
+        )
     };
 
     vec![resolved_refs, programmed]
@@ -371,6 +365,13 @@ mod tests {
         }
     }
 
+    impl RuleLike for () {
+        type BackendRef = TestBackend;
+        fn backend_refs(&self) -> Option<&[Self::BackendRef]> {
+            None
+        }
+    }
+
     #[test]
     fn backend_resolution_ok_when_no_rules() {
         struct EmptyRoute;
@@ -381,12 +382,6 @@ mod tests {
             }
             fn kind() -> &'static str {
                 "TestRoute"
-            }
-        }
-        impl RuleLike for () {
-            type BackendRef = TestBackend;
-            fn backend_refs(&self) -> Option<&[Self::BackendRef]> {
-                None
             }
         }
 

@@ -159,6 +159,7 @@ mod tests {
     use crate::gateway::model::{GatewayState, ListenerState, ReconciledView};
     use std::sync::Arc;
 
+    // todo(siennathesane): replace this with standard base64 encoding library
     fn b64(input: &[u8]) -> String {
         const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();

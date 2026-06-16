@@ -7,6 +7,9 @@
 //! Only the leader runs the full reconcile loop; followers stay in
 //! data-plane mode and apply digests received via gossip.
 
+// todo(siennathesane): this needs to be replaced with a standard leader election process over gossip
+// for right now it's fine and unblocks, but this will need to be revisited.
+
 use k8s_openapi::api::coordination::v1::Lease;
 use kube::api::{Api, Patch, PatchParams};
 use std::marker::PhantomData;
@@ -30,15 +33,6 @@ pub struct LeaderToken {
 impl LeaderToken {
     pub fn is_leader(&self) -> bool {
         self.valid.load(Ordering::Relaxed)
-    }
-
-    /// Create a token for testing (crate-internal only).
-    #[cfg(test)]
-    pub(crate) fn new_for_test(valid: Arc<AtomicBool>) -> Self {
-        Self {
-            valid,
-            _not_send: PhantomData,
-        }
     }
 }
 

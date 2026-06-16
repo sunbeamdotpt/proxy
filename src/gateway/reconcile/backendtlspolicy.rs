@@ -16,7 +16,7 @@ use crate::gateway::model::{
 use crate::gateway::reconcile::gatewayclass::CONTROLLER_NAME;
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::patch::patch_status_if_changed;
-use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
+use crate::gateway::status::{conditions, ConditionStatus};
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::api::Api;
@@ -449,47 +449,44 @@ async fn patch_status(
     let name = state.name.to_string();
     let observed_generation = state.generation;
 
-    let accepted = StatusCondition {
-        condition_type: ConditionType::Accepted,
-        status: if state.accepted {
+    let accepted = conditions::accepted_condition(
+        if state.accepted {
             ConditionStatus::True
         } else {
             ConditionStatus::False
         },
-        reason: state.accepted_reason.to_string(),
-        message: state.accepted_message.to_string(),
+        &state.accepted_reason,
+        &state.accepted_message,
         observed_generation,
-    };
-    let resolved_refs = StatusCondition {
-        condition_type: ConditionType::ResolvedRefs,
-        status: if state.resolved_refs {
+    );
+    let resolved_refs = conditions::resolved_refs_condition(
+        if state.resolved_refs {
             ConditionStatus::True
         } else {
             ConditionStatus::False
         },
-        reason: state.resolved_refs_reason.to_string(),
-        message: state.resolved_refs_message.to_string(),
+        &state.resolved_refs_reason,
+        &state.resolved_refs_message,
         observed_generation,
-    };
-    let programmed = StatusCondition {
-        condition_type: ConditionType::Programmed,
-        status: if state.programmed {
+    );
+    let programmed = conditions::programmed_condition(
+        if state.programmed {
             ConditionStatus::True
         } else {
             ConditionStatus::False
         },
-        reason: if state.programmed {
-            "Programmed".to_string()
+        if state.programmed {
+            "Programmed"
         } else {
-            "NotProgrammed".to_string()
+            "NotProgrammed"
         },
-        message: if state.programmed {
-            "BackendTLSPolicy programmed".to_string()
+        if state.programmed {
+            "BackendTLSPolicy programmed"
         } else {
-            "BackendTLSPolicy not programmed".to_string()
+            "BackendTLSPolicy not programmed"
         },
         observed_generation,
-    };
+    );
 
     let ancestor_entries: Vec<serde_json::Value> = if ancestors.is_empty() {
         vec![serde_json::json!({

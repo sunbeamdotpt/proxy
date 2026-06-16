@@ -178,6 +178,28 @@ pub fn unsupported_feature_condition(
     }
 }
 
+/// Build a condition of any type.
+///
+/// Prefer the typed helpers (`accepted_condition`, `programmed_condition`,
+/// etc.) for standard condition types; this is useful for extensions such as
+/// `InsecureFrontendValidationMode` or for tests that iterate over every
+/// [`ConditionType`].
+pub fn condition(
+    condition_type: ConditionType,
+    status: ConditionStatus,
+    reason: &str,
+    message: &str,
+    observed_generation: i64,
+) -> StatusCondition {
+    StatusCondition {
+        condition_type,
+        status,
+        reason: reason.to_string(),
+        message: message.to_string(),
+        observed_generation,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

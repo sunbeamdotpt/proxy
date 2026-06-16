@@ -7,12 +7,12 @@
 //! `Accepted` status condition.  Status writeback is gated on leadership.
 
 use crate::gateway::api::gatewayclass::GatewayClass;
+use crate::gateway::reconcile::context::{run_controller, ReconcilerContext};
 use crate::gateway::status::patch::patch_status_if_changed;
-use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition};
-use futures::StreamExt;
+use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::api::Api;
-use kube::runtime::controller::{Action, Controller};
+use kube::runtime::controller::Action;
 use kube::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -95,36 +95,32 @@ pub fn supported_features() -> Vec<String> {
 /// [`CONTROLLER_NAME`], otherwise `False`.
 pub fn compute_accepted_condition(gc: &GatewayClass, observed_generation: i64) -> StatusCondition {
     let matches = gc.spec.controller_name == CONTROLLER_NAME;
-    StatusCondition {
-        condition_type: ConditionType::Accepted,
-        status: if matches {
+    let message = if matches {
+        "GatewayClass is managed by this controller".to_string()
+    } else {
+        format!(
+            "ControllerName '{}' does not match '{}'",
+            gc.spec.controller_name, CONTROLLER_NAME
+        )
+    };
+    conditions::accepted_condition(
+        if matches {
             ConditionStatus::True
         } else {
             ConditionStatus::False
         },
-        reason: if matches {
-            "Accepted".into()
+        if matches {
+            "Accepted"
         } else {
-            "InvalidControllerName".into()
+            "InvalidControllerName"
         },
-        message: if matches {
-            "GatewayClass is managed by this controller".into()
-        } else {
-            format!(
-                "ControllerName '{}' does not match '{}'",
-                gc.spec.controller_name, CONTROLLER_NAME
-            )
-        },
+        &message,
         observed_generation,
-    }
+    )
 }
 
 /// Context shared across GatewayClass reconcile invocations.
-#[derive(Clone)]
-pub struct GatewayClassContext {
-    pub client: Client,
-    pub is_leader: Arc<AtomicBool>,
-}
+pub type GatewayClassContext = ReconcilerContext;
 
 /// Reconcile a single GatewayClass.
 pub async fn reconcile_gatewayclass(
@@ -177,28 +173,20 @@ pub fn run_gatewayclass_controller(
     client: Client,
     is_leader: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    let ctx = Arc::new(GatewayClassContext {
-        client: client.clone(),
+    run_controller::<GatewayClass, _, _, _>(
+        client,
         is_leader,
-    });
-    let gatewayclasses = Api::<GatewayClass>::all(client);
-    tokio::spawn(async move {
-        Controller::new(gatewayclasses, kube::runtime::watcher::Config::default())
-            .run(reconcile_gatewayclass, error_policy, ctx)
-            .for_each(|res| async move {
-                match res {
-                    Ok(_) => {}
-                    Err(e) => tracing::error!("GatewayClass controller error: {e}"),
-                }
-            })
-            .await;
-    })
+        reconcile_gatewayclass,
+        error_policy,
+        "GatewayClass",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gateway::api::gatewayclass::GatewayClassSpec;
+    use crate::gateway::status::ConditionType;
 
     fn sample_gc(controller_name: &str) -> GatewayClass {
         GatewayClass {
@@ -257,13 +245,7 @@ mod tests {
 
     #[test]
     fn k8s_condition_encoding() {
-        let cond = StatusCondition {
-            condition_type: ConditionType::Accepted,
-            status: ConditionStatus::True,
-            reason: "Accepted".into(),
-            message: "ok".into(),
-            observed_generation: 42,
-        };
+        let cond = conditions::accepted_condition(ConditionStatus::True, "Accepted", "ok", 42);
         let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "Accepted");
         assert_eq!(k8s.status, "True");
@@ -274,13 +256,8 @@ mod tests {
 
     #[test]
     fn k8s_condition_encoding_false() {
-        let cond = StatusCondition {
-            condition_type: ConditionType::Programmed,
-            status: ConditionStatus::False,
-            reason: "Pending".into(),
-            message: "not ready".into(),
-            observed_generation: 7,
-        };
+        let cond =
+            conditions::programmed_condition(ConditionStatus::False, "Pending", "not ready", 7);
         let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "Programmed");
         assert_eq!(k8s.status, "False");
@@ -288,13 +265,8 @@ mod tests {
 
     #[test]
     fn k8s_condition_encoding_unknown() {
-        let cond = StatusCondition {
-            condition_type: ConditionType::ResolvedRefs,
-            status: ConditionStatus::Unknown,
-            reason: "Pending".into(),
-            message: "unknown".into(),
-            observed_generation: 3,
-        };
+        let cond =
+            conditions::resolved_refs_condition(ConditionStatus::Unknown, "Pending", "unknown", 3);
         let k8s = Condition::from(&cond);
         assert_eq!(k8s.type_, "ResolvedRefs");
         assert_eq!(k8s.status, "Unknown");
@@ -313,13 +285,7 @@ mod tests {
             (ConditionType::UnsupportedFeature, "UnsupportedFeature"),
         ];
         for (ct, expected) in types {
-            let cond = StatusCondition {
-                condition_type: ct,
-                status: ConditionStatus::True,
-                reason: "Test".into(),
-                message: "msg".into(),
-                observed_generation: 1,
-            };
+            let cond = conditions::condition(ct, ConditionStatus::True, "Test", "msg", 1);
             let k8s = Condition::from(&cond);
             assert_eq!(k8s.type_, expected);
         }
@@ -328,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn error_policy_requeues_after_5s() {
         let gc = Arc::new(sample_gc(CONTROLLER_NAME));
-        let ctx = Arc::new(GatewayClassContext {
+        let ctx = Arc::new(ReconcilerContext {
             client: kube::Client::new(
                 tower::service_fn(|_req| async {
                     Ok::<_, std::convert::Infallible>(http::Response::new(
@@ -352,7 +318,7 @@ mod tests {
             }),
             "default",
         );
-        let ctx = Arc::new(GatewayClassContext {
+        let ctx = Arc::new(ReconcilerContext {
             client,
             is_leader: Arc::new(AtomicBool::new(false)),
         });
@@ -381,7 +347,7 @@ mod tests {
             }),
             "default",
         );
-        let ctx = Arc::new(GatewayClassContext {
+        let ctx = Arc::new(ReconcilerContext {
             client,
             is_leader: Arc::new(AtomicBool::new(true)),
         });
@@ -405,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn gatewayclass_context_clone_smoke() {
-        let ctx = GatewayClassContext {
+        let ctx = ReconcilerContext {
             client: kube::Client::new(
                 tower::service_fn(|_req| async {
                     Ok::<_, std::convert::Infallible>(http::Response::new(

@@ -7,6 +7,8 @@
 //! for panics.  Restarts tasks with exponential backoff until a crash
 //! budget (≥3 panics in 60 s for the same key) is exhausted.
 
+// todo(siennathesane): does this need to be it's own tokio runtime or can we share with the main one?
+
 use anyhow::Result;
 use prometheus::Gauge;
 use std::collections::HashMap;
