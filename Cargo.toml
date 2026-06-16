@@ -116,6 +116,10 @@ tempfile      = { workspace = true }
 reqwest       = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 http-body-util = "0.1"
 
+[[test]]
+name = "gateway_reconcile"
+path = "tests/gateway_reconcile/main.rs"
+
 [[bench]]
 name = "scanner_bench"
 harness = false
