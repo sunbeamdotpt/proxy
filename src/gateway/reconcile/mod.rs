@@ -9,15 +9,20 @@
 
 pub mod backend;
 pub mod backendtlspolicy;
+pub mod context;
 pub mod endpoints;
 pub mod gateway;
 pub mod gatewayclass;
 pub mod grpcroute;
+pub mod header_filter;
 pub mod httproute;
 pub mod l4route;
 pub mod leader;
+pub mod listener_common;
 pub mod listenerset;
+pub mod parent;
 pub mod refgrant;
+pub mod route;
 pub mod trigger;
 
 pub use leader::run_reconcile_loop;
@@ -26,10 +31,12 @@ use crate::gateway::api::{
     BackendTLSPolicy, GRPCRoute, Gateway, HTTPRoute, ListenerSet, ReferenceGrant, TCPRoute,
     TLSRoute, UDPRoute,
 };
-use crate::gateway::model::{GatewayView, ListenerSetState, RouteState};
+use crate::gateway::model::{
+    GRPCRouteState, GatewayView, HTTPRouteState, ListenerSetState, RouteState, TCPRouteState,
+    TLSRouteState, UDPRouteState, WeightedBackend,
+};
 use crate::gateway::reconcile::backend::{
-    resolve_backend_refs_async, resolve_backend_refs_async as resolve_grpc_backend_refs_async,
-    BackendResolutionStatus,
+    resolve_backend_refs_async, BackendResolutionStatus, RuleBackendResolution,
 };
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::grpcroute::{
@@ -41,12 +48,162 @@ use crate::gateway::reconcile::httproute::{
 use crate::gateway::reconcile::l4route::{
     parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
     parse_udproute_state, reconcile_tcproutes, reconcile_tlsroutes, reconcile_udproutes,
-    resolve_l4_backends_async,
+    resolve_l4_backends_async, ReconciledL4Route,
 };
 use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::reconcile::route::{ReconciledRoute, RouteResource};
 use kube::api::Api;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Local trait for HTTP/GRPC route state post-processing.
+trait RouteStateMut {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>);
+    fn set_programmed(&mut self, programmed: bool);
+    fn update_rules_programmed(&mut self, resolutions: &[RuleBackendResolution]);
+}
+
+impl RouteStateMut for HTTPRouteState {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>) {
+        self.parent_refs = parent_refs;
+    }
+    fn set_programmed(&mut self, programmed: bool) {
+        self.programmed = programmed;
+    }
+    fn update_rules_programmed(&mut self, resolutions: &[RuleBackendResolution]) {
+        for (rule, res) in self.rules.iter_mut().zip(resolutions.iter()) {
+            rule.programmed = rule.programmed && res.ok;
+        }
+    }
+}
+
+impl RouteStateMut for GRPCRouteState {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>) {
+        self.parent_refs = parent_refs;
+    }
+    fn set_programmed(&mut self, programmed: bool) {
+        self.programmed = programmed;
+    }
+    fn update_rules_programmed(&mut self, resolutions: &[RuleBackendResolution]) {
+        for (rule, res) in self.rules.iter_mut().zip(resolutions.iter()) {
+            rule.programmed = rule.programmed && res.ok;
+        }
+    }
+}
+
+/// Collect and post-process HTTP/GRPC routes into their model states.
+async fn collect_routes<R, S, F>(
+    client: &kube::Client,
+    raw_routes: &[R],
+    reconciled: &[ReconciledRoute],
+    grant_index: &GrantIndex,
+    mut parse_state: F,
+) -> Vec<S>
+where
+    R: RouteResource,
+    F: FnMut(&R) -> S,
+    S: RouteStateMut,
+{
+    let mut routes = Vec::with_capacity(raw_routes.len());
+    for (raw, reconciled) in raw_routes.iter().zip(reconciled.iter()) {
+        let mut state = parse_state(raw);
+        state.set_parent_refs(reconciled.route_state.parent_refs.clone());
+        let route_ns = raw.metadata_namespace();
+        let backend_resolution =
+            resolve_backend_refs_async(client, raw, route_ns, grant_index).await;
+        state.set_programmed(
+            !reconciled.route_state.parent_refs.is_empty()
+                && matches!(backend_resolution.overall, BackendResolutionStatus::Ok),
+        );
+        state.update_rules_programmed(&backend_resolution.rules);
+        routes.push(state);
+    }
+    routes
+}
+
+/// Local trait for L4 route state post-processing.
+trait L4RouteStateMut {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>);
+    fn set_backends(&mut self, backends: Vec<WeightedBackend>);
+    fn set_programmed(&mut self, programmed: bool);
+}
+
+impl L4RouteStateMut for TCPRouteState {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>) {
+        self.parent_refs = parent_refs;
+    }
+    fn set_backends(&mut self, backends: Vec<WeightedBackend>) {
+        self.backends = backends;
+    }
+    fn set_programmed(&mut self, programmed: bool) {
+        self.programmed = programmed;
+    }
+}
+
+impl L4RouteStateMut for UDPRouteState {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>) {
+        self.parent_refs = parent_refs;
+    }
+    fn set_backends(&mut self, backends: Vec<WeightedBackend>) {
+        self.backends = backends;
+    }
+    fn set_programmed(&mut self, programmed: bool) {
+        self.programmed = programmed;
+    }
+}
+
+impl L4RouteStateMut for TLSRouteState {
+    fn set_parent_refs(&mut self, parent_refs: Vec<crate::gateway::model::ParentRef>) {
+        self.parent_refs = parent_refs;
+    }
+    fn set_backends(&mut self, backends: Vec<WeightedBackend>) {
+        self.backends = backends;
+    }
+    fn set_programmed(&mut self, programmed: bool) {
+        self.programmed = programmed;
+    }
+}
+
+/// Local helper type alias for parsed L4 backends.
+type ParseL4Route<R> = fn(&R) -> crate::gateway::reconcile::l4route::model::ParsedL4Route;
+
+/// Collect and post-process L4 routes into their model states.
+async fn collect_l4_routes<R, S, F>(
+    client: &kube::Client,
+    raw_routes: &[R],
+    reconciled: &[ReconciledL4Route],
+    grant_index: &GrantIndex,
+    kind: &str,
+    mut parse_state: F,
+    parse_route: ParseL4Route<R>,
+) -> Vec<S>
+where
+    R: kube::Resource<DynamicType = ()>,
+    F: FnMut(&R) -> S,
+    S: L4RouteStateMut,
+{
+    let mut routes = Vec::with_capacity(raw_routes.len());
+    for (raw, reconciled) in raw_routes.iter().zip(reconciled.iter()) {
+        let mut state = parse_state(raw);
+        state.set_parent_refs(reconciled.route_state.parent_refs.clone());
+        let route_ns = raw.meta().namespace.as_deref().unwrap_or("default");
+        let observed_generation = raw.meta().generation.unwrap_or(0);
+        let parsed = parse_route(raw);
+        let (backends, resolved_refs) = resolve_l4_backends_async(
+            client,
+            &parsed.backends,
+            route_ns,
+            kind,
+            grant_index,
+            observed_generation,
+        )
+        .await;
+        state.set_backends(backends);
+        state.set_programmed(reconciled.programmed && resolved_refs.is_none());
+        routes.push(state);
+    }
+    routes
+}
 
 /// List an optional L4 route CRD, returning an empty list when the CRD is not
 /// installed. Other list failures (e.g. API server 429 during CRD storage
@@ -236,20 +393,14 @@ pub async fn reconcile_tick_with_leader(
         &grant_index,
     );
 
-    let mut http_routes = Vec::new();
-    for (raw, reconciled) in httproute_list.items.iter().zip(reconciled_routes.iter()) {
-        let mut state = parse_httproute_state(raw);
-        state.parent_refs = reconciled.route_state.parent_refs.clone();
-        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
-        let backend_resolution =
-            resolve_backend_refs_async(client, raw, route_ns, &grant_index).await;
-        state.programmed = !state.parent_refs.is_empty()
-            && matches!(backend_resolution.overall, BackendResolutionStatus::Ok);
-        for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
-            rule.programmed = rule.programmed && res.ok;
-        }
-        http_routes.push(state);
-    }
+    let mut http_routes = collect_routes(
+        client,
+        &httproute_list.items,
+        &reconciled_routes,
+        &grant_index,
+        parse_httproute_state,
+    )
+    .await;
 
     let reconciled_grpc_routes = reconcile_grpcroutes_with_context(
         &grpcroute_list.items,
@@ -261,27 +412,14 @@ pub async fn reconcile_tick_with_leader(
         &grant_index,
     );
 
-    let mut grpc_routes = Vec::new();
-    for (raw, reconciled) in grpcroute_list
-        .items
-        .iter()
-        .zip(reconciled_grpc_routes.iter())
-    {
-        let mut state = parse_grpcroute_state(raw);
-        state.parent_refs = reconciled.route_state.parent_refs.clone();
-        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
-        let backend_resolution =
-            resolve_grpc_backend_refs_async(client, raw, route_ns, &grant_index).await;
-        state.programmed = !state.parent_refs.is_empty()
-            && matches!(
-                backend_resolution.overall,
-                crate::gateway::reconcile::BackendResolutionStatus::Ok
-            );
-        for (rule, res) in state.rules.iter_mut().zip(&backend_resolution.rules) {
-            rule.programmed = rule.programmed && res.ok;
-        }
-        grpc_routes.push(state);
-    }
+    let mut grpc_routes = collect_routes(
+        client,
+        &grpcroute_list.items,
+        &reconciled_grpc_routes,
+        &grant_index,
+        parse_grpcroute_state,
+    )
+    .await;
 
     // Compute BackendTLSPolicy status before endpoint expansion replaces service
     // FQDN backend addresses with concrete pod IPs.
@@ -352,68 +490,38 @@ pub async fn reconcile_tick_with_leader(
         &listener_allowed,
     );
 
-    let mut tcp_routes = Vec::new();
-    for (raw, reconciled) in tcp_route_items.iter().zip(tcp_reconciled.iter()) {
-        let mut state = parse_tcproute_state(raw);
-        state.parent_refs = reconciled.route_state.parent_refs.clone();
-        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
-        let observed_generation = raw.metadata.generation.unwrap_or(0);
-        let parsed = parse_tcproute(raw);
-        let (backends, resolved_refs) = resolve_l4_backends_async(
-            client,
-            &parsed.backends,
-            route_ns,
-            "TCPRoute",
-            &grant_index,
-            observed_generation,
-        )
-        .await;
-        state.backends = backends;
-        state.programmed = reconciled.programmed && resolved_refs.is_none();
-        tcp_routes.push(state);
-    }
+    let tcp_routes = collect_l4_routes(
+        client,
+        &tcp_route_items,
+        &tcp_reconciled,
+        &grant_index,
+        "TCPRoute",
+        parse_tcproute_state,
+        parse_tcproute,
+    )
+    .await;
 
-    let mut udp_routes = Vec::new();
-    for (raw, reconciled) in udp_route_items.iter().zip(udp_reconciled.iter()) {
-        let mut state = parse_udproute_state(raw);
-        state.parent_refs = reconciled.route_state.parent_refs.clone();
-        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
-        let observed_generation = raw.metadata.generation.unwrap_or(0);
-        let parsed = parse_udproute(raw);
-        let (backends, resolved_refs) = resolve_l4_backends_async(
-            client,
-            &parsed.backends,
-            route_ns,
-            "UDPRoute",
-            &grant_index,
-            observed_generation,
-        )
-        .await;
-        state.backends = backends;
-        state.programmed = reconciled.programmed && resolved_refs.is_none();
-        udp_routes.push(state);
-    }
+    let udp_routes = collect_l4_routes(
+        client,
+        &udp_route_items,
+        &udp_reconciled,
+        &grant_index,
+        "UDPRoute",
+        parse_udproute_state,
+        parse_udproute,
+    )
+    .await;
 
-    let mut tls_routes = Vec::new();
-    for (raw, reconciled) in tls_route_items.iter().zip(tls_reconciled.iter()) {
-        let mut state = parse_tlsroute_state(raw);
-        state.parent_refs = reconciled.route_state.parent_refs.clone();
-        let route_ns = raw.metadata.namespace.as_deref().unwrap_or("default");
-        let observed_generation = raw.metadata.generation.unwrap_or(0);
-        let parsed = parse_tlsroute(raw);
-        let (backends, resolved_refs) = resolve_l4_backends_async(
-            client,
-            &parsed.backends,
-            route_ns,
-            "TLSRoute",
-            &grant_index,
-            observed_generation,
-        )
-        .await;
-        state.backends = backends;
-        state.programmed = reconciled.programmed && resolved_refs.is_none();
-        tls_routes.push(state);
-    }
+    let tls_routes = collect_l4_routes(
+        client,
+        &tls_route_items,
+        &tls_reconciled,
+        &grant_index,
+        "TLSRoute",
+        parse_tlsroute_state,
+        parse_tlsroute,
+    )
+    .await;
 
     let reference_grants = grant_states;
 
