@@ -1,7 +1,7 @@
 # Gateway API Design Document
 
 ## Copyright Sunbeam Studios 2026
-## SPDX-License-Identifier: Apache-2.0
+## SPDX-License-Identifier: AGPL-3.0-or-later
 
 ---
 
@@ -56,16 +56,16 @@ loop {
 
 ## 3. Reconciler Isolation ADR
 
-**Decision:** Run the reconciler on a dedicated tokio runtime inside a separate OS
-thread, protected by an `AbortHandle` watchdog.
+**Decision:** Run the reconciler as a task on the proxy's shared Tokio runtime,
+protected by an `AbortHandle` watchdog.
 
 **Rationale:**
 - A panic in the reconcile loop must not bring down the proxy's data plane.
-- Blocking IO (K8s LIST/WATCH) can starve Pingora's async worker threads.
+- A single shared runtime keeps all Kube clients on the runtime that created them,
+  avoiding Tower worker/runtime-boundary issues.
 - The watchdog monitors the reconcile task; if it hangs longer than `2 × tick_interval`,
-  the `AbortHandle` fires and the runtime is torn down and rebuilt.
-- This mirrors the existing `cluster` subsystem pattern (`spawn_cluster` on a
-  dedicated thread with `worker_threads(2)`).
+  the `AbortHandle` fires and the task is restarted.
+- Cluster gossip and K8s watchers share the same runtime for operational simplicity.
 
 ---
 
@@ -110,39 +110,38 @@ Sunbeam-specific extensions:
 
 ---
 
-## 6. Supported-Features Target List (v1)
+## 6. Supported-Features List (as of 0.2.0)
 
 - [x] GatewayClass
 - [x] Gateway (core)
 - [x] HTTPRoute (core)
+- [x] GRPCRoute
+- [x] TCPRoute / TLSRoute
 - [x] Listener `hostname` matching
 - [x] TLS termination (Terminate mode, certificateRefs)
+- [x] TLS passthrough
 - [x] BackendRef weight-based load balancing
-- [ ] GRPCRoute (v1.1)
-- [ ] TCPRoute / TLSRoute (v1.1)
-- [ ] BackendTLSPolicy (v1.1)
-- [ ] GAMMA service mesh routes (v1.1, `dataplane` module)
-- [ ] TLS Passthrough (v1.1)
-- [ ] HTTP URLRewrite filter (v1.1)
-- [ ] HTTP RequestMirror filter (v1.1)
+- [x] BackendTLSPolicy
+- [x] HTTP URLRewrite filter
+- [x] HTTP RequestMirror filter
+- [ ] GAMMA service mesh routes (future)
 
 ---
 
 ## 7. TLS Reload ADR
 
-**Decision (v1):** Trigger TLS certificate reload on `SIGQUIT`.
+**Decision:** TLS certificates are loaded from two sources and refreshed dynamically:
+
+1. **Gateway API `certificateRefs`**: the reconciler reads referenced Secrets during
+   each reconcile tick and atomically swaps the listener-specific certificates in the
+   `TlsRegistry`.
+2. **Disk certificates** (`tls.cert_path` / `tls.key_path`): the K8s Secret/ConfigMap
+   watcher writes new cert files to disk and triggers a graceful Pingora upgrade
+   (`SIGQUIT`), which inherits listening sockets in the new process.
 
 **Rationale:**
-- Simple, POSIX-standard signal that Pingora already handles for graceful reload.
-- The gateway module hooks `SIGQUIT` to re-list all `certificateRefs`, validate
-  certificate chains, and atomically swap the `ArcSwap` holding the TLS config.
-- Zero-downtime: existing connections use the old cert; new connections use the new.
-
-**Decision (v1.1 — T2.5 fork):** Move to dynamic watcher-based reload.
-
-**Rationale:**
-- `SIGQUIT` requires an external orchestrator (e.g. `cert-manager` + `kubectl exec`).
-- T2.5 will add a Kubernetes watcher on Secrets referenced by `certificateRefs`.
-- When a watched Secret changes, the gateway reloads the affected listener(s)
-  without process restart or signal handling.
-- This removes the dependency on Pingora's reload machinery for certificate updates.
+- Gateway API certs change with the reconciled view; re-listing them every tick is
+  simple and correct for the Gateway API object model.
+- Disk certs follow the existing Pingora graceful-upgrade path, so hot reload requires
+  no extra machinery beyond the watcher.
+- Existing connections use the old cert; new connections use the new cert.
