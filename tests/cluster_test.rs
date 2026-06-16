@@ -10,6 +10,10 @@ use sunbeam_proxy::cluster;
 use sunbeam_proxy::cluster::bandwidth::BandwidthLimitResult;
 use sunbeam_proxy::config::{BandwidthClusterConfig, ClusterConfig, DiscoveryConfig};
 
+fn test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Runtime::new().expect("test runtime")
+}
+
 fn make_config(port: u16, tenant: &str, bootstrap_peers: Option<Vec<String>>) -> ClusterConfig {
     let dir = tempfile::tempdir().expect("tempdir");
     let key_path = dir.path().join("node.key");
@@ -44,13 +48,14 @@ fn make_config(port: u16, tenant: &str, bootstrap_peers: Option<Vec<String>>) ->
 fn two_nodes_exchange_bandwidth_reports() {
     // Install crypto provider (may already be installed).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let tenant = "test-tenant-e2e-001";
 
     // 1. Start node A (no bootstrap peers — it's the seed).
     let port_a = 19201;
     let cfg_a = make_config(port_a, tenant, None);
-    let handle_a = cluster::spawn_cluster(&cfg_a).expect("spawn node A");
+    let handle_a = cluster::spawn_cluster(rt.handle(), &cfg_a).expect("spawn node A");
     let id_a = handle_a.endpoint_id;
     eprintln!("Node A started: id={id_a}, port={port_a}");
 
@@ -58,7 +63,7 @@ fn two_nodes_exchange_bandwidth_reports() {
     let port_b = 19202;
     let bootstrap = vec![format!("{id_a}@127.0.0.1:{port_a}")];
     let cfg_b = make_config(port_b, tenant, Some(bootstrap));
-    let handle_b = cluster::spawn_cluster(&cfg_b).expect("spawn node B");
+    let handle_b = cluster::spawn_cluster(rt.handle(), &cfg_b).expect("spawn node B");
     let id_b = handle_b.endpoint_id;
     eprintln!("Node B started: id={id_b}, port={port_b}");
 
@@ -161,19 +166,20 @@ fn two_nodes_exchange_bandwidth_reports() {
 #[test]
 fn different_tenants_are_isolated() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     // Start two nodes on different tenants — they should never see each other's traffic.
     let port_a = 19203;
     let port_b = 19204;
 
     let cfg_a = make_config(port_a, "tenant-alpha", None);
-    let handle_a = cluster::spawn_cluster(&cfg_a).expect("spawn tenant-alpha");
+    let handle_a = cluster::spawn_cluster(rt.handle(), &cfg_a).expect("spawn tenant-alpha");
     let id_a = handle_a.endpoint_id;
 
     // Node B connects to A's address but uses a DIFFERENT tenant.
     let bootstrap = vec![format!("{id_a}@127.0.0.1:{port_a}")];
     let cfg_b = make_config(port_b, "tenant-beta", Some(bootstrap));
-    let handle_b = cluster::spawn_cluster(&cfg_b).expect("spawn tenant-beta");
+    let handle_b = cluster::spawn_cluster(rt.handle(), &cfg_b).expect("spawn tenant-beta");
 
     handle_a.bandwidth.record(9999, 8888);
     std::thread::sleep(Duration::from_secs(3));
@@ -196,13 +202,14 @@ fn different_tenants_are_isolated() {
 #[test]
 fn three_node_mesh_propagation() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let tenant = "mesh-test-001";
 
     // Node A — seed
     let port_a = 19206;
     let cfg_a = make_config(port_a, tenant, None);
-    let handle_a = cluster::spawn_cluster(&cfg_a).expect("spawn node A");
+    let handle_a = cluster::spawn_cluster(rt.handle(), &cfg_a).expect("spawn node A");
     let id_a = handle_a.endpoint_id;
 
     // Node B — bootstraps from A
@@ -212,7 +219,7 @@ fn three_node_mesh_propagation() {
         tenant,
         Some(vec![format!("{id_a}@127.0.0.1:{port_a}")]),
     );
-    let handle_b = cluster::spawn_cluster(&cfg_b).expect("spawn node B");
+    let handle_b = cluster::spawn_cluster(rt.handle(), &cfg_b).expect("spawn node B");
     let id_b = handle_b.endpoint_id;
 
     // Node C — bootstraps from B (not directly from A)
@@ -222,7 +229,7 @@ fn three_node_mesh_propagation() {
         tenant,
         Some(vec![format!("{id_b}@127.0.0.1:{port_b}")]),
     );
-    let handle_c = cluster::spawn_cluster(&cfg_c).expect("spawn node C");
+    let handle_c = cluster::spawn_cluster(rt.handle(), &cfg_c).expect("spawn node C");
 
     eprintln!("3-node mesh: A={id_a} B={id_b} C={}", handle_c.endpoint_id);
 
@@ -277,13 +284,14 @@ fn three_node_mesh_propagation() {
 #[test]
 fn aggregate_bandwidth_meter_across_nodes() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let tenant = "meter-test-001";
 
     // Node A — seed
     let port_a = 19209;
     let cfg_a = make_config(port_a, tenant, None);
-    let handle_a = cluster::spawn_cluster(&cfg_a).expect("spawn node A");
+    let handle_a = cluster::spawn_cluster(rt.handle(), &cfg_a).expect("spawn node A");
     let id_a = handle_a.endpoint_id;
 
     // Node B — bootstraps from A
@@ -293,7 +301,7 @@ fn aggregate_bandwidth_meter_across_nodes() {
         tenant,
         Some(vec![format!("{id_a}@127.0.0.1:{port_a}")]),
     );
-    let handle_b = cluster::spawn_cluster(&cfg_b).expect("spawn node B");
+    let handle_b = cluster::spawn_cluster(rt.handle(), &cfg_b).expect("spawn node B");
 
     // Simulate sustained traffic: node A does 500 MiB/s, node B does 50 MiB/s.
     // With 1s broadcast interval, each record() call simulates one interval's worth.
@@ -355,9 +363,10 @@ fn aggregate_bandwidth_meter_across_nodes() {
 #[test]
 fn standalone_mode_works_without_peers() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let cfg = make_config(19205, "standalone-test", None);
-    let handle = cluster::spawn_cluster(&cfg).expect("spawn standalone");
+    let handle = cluster::spawn_cluster(rt.handle(), &cfg).expect("spawn standalone");
 
     // Should start fine with no peers.
     handle.bandwidth.record(100, 200);
@@ -376,6 +385,7 @@ fn standalone_mode_works_without_peers() {
 #[test]
 fn bandwidth_limiter_rejects_when_over_cap() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let mut cfg = make_config(19211, "limiter-test", None);
     cfg.bandwidth = Some(BandwidthClusterConfig {
@@ -383,7 +393,7 @@ fn bandwidth_limiter_rejects_when_over_cap() {
         stale_peer_timeout_secs: 30,
         meter_window_secs: 5,
     });
-    let handle = cluster::spawn_cluster(&cfg).expect("spawn limiter node");
+    let handle = cluster::spawn_cluster(rt.handle(), &cfg).expect("spawn limiter node");
 
     // Default limit is 1 Gbps = 125 MB/s. Lower it to 0.001 Gbps = 125 KB/s for this test.
     handle
@@ -429,9 +439,10 @@ fn bandwidth_limiter_rejects_when_over_cap() {
 #[test]
 fn bandwidth_limiter_defaults_to_1gbps() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rt = test_runtime();
 
     let cfg = make_config(19212, "limiter-default", None);
-    let handle = cluster::spawn_cluster(&cfg).expect("spawn default node");
+    let handle = cluster::spawn_cluster(rt.handle(), &cfg).expect("spawn default node");
 
     // Default limit should be 1 Gbps = 125_000_000 bytes/sec.
     assert_eq!(
