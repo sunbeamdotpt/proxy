@@ -7,7 +7,8 @@
 //! relays traffic to weighted backends.
 
 use crate::ir::compile::{
-    ir_hostname_matches, CompiledL4Config, CompiledL4Route, CompiledListener,
+    ir_hostname_matches, ir_listener_specificity_score, CompiledL4Config, CompiledL4Route,
+    CompiledListener,
 };
 use crate::ir::{L4Action, L4Match, Protocol, WeightedBackend};
 use crate::l4::context::L4Context;
@@ -107,7 +108,11 @@ impl L4Router for Router {
             None
         };
 
-        let route = find_route(routes, &ctx, sni.as_deref());
+        let route = if matches!(ctx.protocol, Protocol::Tls | Protocol::Https) {
+            find_tls_route(routes, &ctx, sni.as_deref())
+        } else {
+            find_route(routes, &ctx, sni.as_deref())
+        };
         let Some(route) = route else {
             tracing::info!(
                 listener_id = %ctx.listener_id,
@@ -225,6 +230,45 @@ fn find_route<'a>(
         .find(|r| r.listener_id.as_ref() == ctx.listener_id.as_ref() && match_route(&r.match_, sni))
 }
 
+/// Find the best TLS route for an SNI-aware listener.
+///
+/// When multiple TLS listeners share a socket (e.g. several Gateway API TLS
+/// listeners on port 443), the SNI hostname is matched against each route's
+/// listener hostname, and the most specific matching listener is chosen. Routes
+/// attached to less specific listeners are not considered for that connection,
+/// which preserves listener isolation.
+fn find_tls_route<'a>(
+    routes: &'a [CompiledL4Route],
+    ctx: &L4Context,
+    sni: Option<&str>,
+) -> Option<&'a CompiledL4Route> {
+    let sni = sni?;
+    let mut candidates: Vec<(&CompiledL4Route, i32)> = routes
+        .iter()
+        .filter(|r| r.listener_id.as_ref() == ctx.listener_id.as_ref())
+        .filter_map(|r| {
+            if ir_hostname_matches(sni, &r.listener_hostname) {
+                Some((r, ir_listener_specificity_score(&r.listener_hostname)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let best_score = candidates
+        .iter()
+        .map(|(_, score)| *score)
+        .max()
+        .unwrap_or(0);
+    candidates.retain(|(_, score)| *score == best_score);
+    candidates
+        .iter()
+        .find(|(r, _)| match_route(&r.match_, Some(sni)))
+        .map(|(r, _)| *r)
+}
+
 /// Evaluate an L4 match against an optional SNI hostname.
 fn match_route(match_: &L4Match, sni: Option<&str>) -> bool {
     match match_ {
@@ -253,12 +297,7 @@ fn pick_backend(backends: &[WeightedBackend]) -> Option<&WeightedBackend> {
 
 /// Resolve a backend address string to a `SocketAddr`.
 fn resolve_backend_addr(addr: &str) -> io::Result<SocketAddr> {
-    SocketAddr::from_str(addr).or_else(|_| {
-        (addr, 0u16)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(invalid_addr)
-    })
+    SocketAddr::from_str(addr).or_else(|_| addr.to_socket_addrs()?.next().ok_or_else(invalid_addr))
 }
 
 fn invalid_addr() -> io::Error {
