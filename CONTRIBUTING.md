@@ -6,7 +6,7 @@ We're a small team and we welcome contributions. Here's what you need to know.
 
 All contributions require a signed CLA. Read [CLA.md](CLA.md) for the full text.
 
-**The short version:** you keep ownership of your code, but you grant Sunbeam Studios the right to license it under any terms (including commercial). This lets us offer dual licensing while keeping the project Apache-2.0 for everyone.
+**The short version:** you keep ownership of your code, but you grant Sunbeam Studios the right to license it under any terms (including commercial). This lets us offer dual licensing while keeping the project AGPL-3.0-or-later for everyone.
 
 ### How to sign
 
@@ -81,4 +81,4 @@ Open an issue at [src.sunbeam.pt/studio/proxy/issues](https://src.sunbeam.pt/stu
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the Apache License 2.0, and that you grant additional rights as described in [CLA.md](CLA.md).
+By contributing, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), and that you grant additional rights as described in [CLA.md](CLA.md).

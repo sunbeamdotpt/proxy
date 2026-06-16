@@ -4,7 +4,7 @@ Thank you for your interest in contributing to Sunbeam Proxy. This Contributor L
 
 ## Why a CLA?
 
-Sunbeam Proxy is licensed under Apache-2.0. We use a CLA so that Sunbeam Studios retains the ability to offer commercial licenses for organizations that need them. This is the same model used by projects like Elasticsearch (pre-BSL), Qt, and MySQL.
+Sunbeam Proxy is licensed under AGPL-3.0-or-later. We use a CLA so that Sunbeam Studios retains the ability to offer commercial licenses for organizations that need them. This is the same model used by projects like Elasticsearch (pre-BSL), Qt, and MySQL.
 
 Your contributions remain yours. You're granting us a license, not transferring ownership.
 

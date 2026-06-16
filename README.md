@@ -114,7 +114,7 @@ flowchart TD
 
 ## Fair Use
 
-This software is provided as-is, without warranty or support via the Apache License 2.0. With that, Sunbeam Proxy is free to use for any purpose, including commercial use, for up to 1GiBs of total aggregate cluster bandwidth. Anything beyond that will require a license purchase from Sunbeam Studios. This will support ongoing development and ensure billion-dollar companies don't take advantage of it.
+This software is provided as-is, without warranty or support under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). With that, Sunbeam Proxy is free to use for any purpose, including commercial use, for up to 1GiBs of total aggregate cluster bandwidth. Anything beyond that will require a license purchase from Sunbeam Studios. This will support ongoing development and ensure billion-dollar companies don't take advantage of it.
 
 If you're interested in a license, please contact us at [hello@sunbeam.pt](mailto:sunbeam@sunbeam.sh).
 
