@@ -12,7 +12,6 @@
 
 use k8s_openapi::api::coordination::v1::Lease;
 use kube::api::{Api, Patch, PatchParams};
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +23,9 @@ pub enum LeaderState {
     NotLeader,
 }
 
-/// RAII token proving current leadership. `!Clone`, `!Send`.
+/// RAII token proving current leadership. `!Clone`.
 pub struct LeaderToken {
     valid: Arc<AtomicBool>,
-    _not_send: PhantomData<*mut ()>,
 }
 
 impl LeaderToken {
@@ -138,7 +136,6 @@ impl Election {
             self.token_valid.store(true, Ordering::Relaxed);
             Some(LeaderToken {
                 valid: self.token_valid.clone(),
-                _not_send: PhantomData,
             })
         } else {
             None
@@ -155,7 +152,6 @@ mod tests {
         let valid = Arc::new(AtomicBool::new(true));
         let token = LeaderToken {
             valid: valid.clone(),
-            _not_send: PhantomData,
         };
         assert!(token.is_leader());
         drop(token);

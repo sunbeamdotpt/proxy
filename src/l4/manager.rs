@@ -3,8 +3,8 @@
 
 //! L4 socket manager.
 //!
-//! Owns the public TCP/UDP listeners, runs on a dedicated OS thread + Tokio
-//! runtime, and dispatches accepted connections and UDP packets to a router.
+//! Owns the public TCP/UDP listeners and dispatches accepted connections and
+//! UDP packets to a router. Runs as a task on the shared Tokio runtime.
 
 use crate::ir::compile::{CompiledL4Config, CompiledListener};
 use crate::ir::Protocol;
@@ -14,16 +14,17 @@ use crate::l4::{L4Router, SharedState};
 use crate::tls::TlsRegistry;
 use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
-/// Handle to an L4 socket manager running on its own thread.
+/// Handle to an L4 socket manager running as a task on the shared runtime.
 #[derive(Clone, Debug)]
 pub struct L4SocketManagerHandle {
-    tx: mpsc::Sender<Arc<CompiledL4Config>>,
+    tx: mpsc::UnboundedSender<Arc<CompiledL4Config>>,
 }
 
 impl L4SocketManagerHandle {
@@ -36,35 +37,33 @@ impl L4SocketManagerHandle {
     }
 }
 
-/// Spawn an L4 socket manager on a dedicated OS thread.
-pub fn spawn<R: L4Router>(registry: Arc<TlsRegistry>, router: Arc<R>) -> L4SocketManagerHandle {
+/// Spawn an L4 socket manager as a task on the provided Tokio runtime.
+pub fn spawn<R: L4Router>(
+    runtime: tokio::runtime::Handle,
+    registry: Arc<TlsRegistry>,
+    router: Arc<R>,
+) -> L4SocketManagerHandle {
     let config = Arc::new(ArcSwap::from_pointee(CompiledL4Config::default()));
-    spawn_with_config(registry, router, config)
+    spawn_with_config(runtime, registry, router, config)
 }
 
-/// Spawn an L4 socket manager sharing the given atomic L4 config.
+/// Spawn an L4 socket manager sharing the given atomic L4 config on the
+/// provided Tokio runtime handle.
 ///
 /// The manager stores incoming configs into `config`, so routers and other
 /// consumers that hold a clone of the same `ArcSwap` see updates immediately.
 pub fn spawn_with_config<R: L4Router>(
+    runtime: tokio::runtime::Handle,
     registry: Arc<TlsRegistry>,
     router: Arc<R>,
     config: Arc<ArcSwap<CompiledL4Config>>,
 ) -> L4SocketManagerHandle {
-    let (tx, rx) = mpsc::channel::<Arc<CompiledL4Config>>();
+    let (tx, rx) = mpsc::unbounded_channel::<Arc<CompiledL4Config>>();
 
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!(error = %e, "l4 manager: failed to create tokio runtime");
-                return;
-            }
-        };
+    let shared = Arc::new(SharedState { config, registry });
 
-        let shared = Arc::new(SharedState { config, registry });
-
-        runtime.block_on(run_manager(rx, router, shared));
+    runtime.spawn(async move {
+        run_manager(rx, router, shared).await;
     });
 
     L4SocketManagerHandle { tx }
@@ -77,14 +76,14 @@ struct ListenerHandle {
 }
 
 async fn run_manager<R: L4Router>(
-    rx: mpsc::Receiver<Arc<CompiledL4Config>>,
+    mut rx: mpsc::UnboundedReceiver<Arc<CompiledL4Config>>,
     router: Arc<R>,
     shared: Arc<SharedState>,
 ) {
     let mut active: HashMap<Arc<str>, ListenerHandle> = HashMap::new();
     let mut current: Arc<CompiledL4Config> = Arc::new(CompiledL4Config::default());
 
-    while let Ok(config) = rx.recv() {
+    while let Some(config) = rx.recv().await {
         // Drain pending updates; only the latest snapshot matters.
         let mut latest = config;
         while let Ok(c) = rx.try_recv() {
@@ -422,7 +421,7 @@ mod tests {
 
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         let config = Arc::new(CompiledL4Config {
             listeners: vec![
@@ -467,7 +466,7 @@ mod tests {
 
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         mgr.apply(Arc::new(CompiledL4Config {
             listeners: vec![tcp_listener("tcp-l", tcp_port)],
@@ -491,7 +490,7 @@ mod tests {
 
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         mgr.apply(Arc::new(CompiledL4Config {
             listeners: vec![tcp_listener("tcp-l", tcp_port)],
@@ -535,7 +534,7 @@ mod tests {
 
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         mgr.apply(Arc::new(CompiledL4Config {
             listeners: vec![
@@ -570,7 +569,7 @@ mod tests {
     async fn invalid_bind_addresses_are_handled_gracefully() {
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         mgr.apply(Arc::new(CompiledL4Config {
             listeners: vec![
@@ -604,7 +603,7 @@ mod tests {
 
         let registry = Arc::new(TlsRegistry::new());
         let router = Arc::new(crate::l4::NoOpRouter);
-        let mgr = spawn(registry, router);
+        let mgr = spawn(tokio::runtime::Handle::current(), registry, router);
 
         let config = Arc::new(CompiledL4Config {
             listeners: vec![tcp_listener("tcp-l", tcp_port)],

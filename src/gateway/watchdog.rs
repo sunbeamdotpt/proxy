@@ -16,7 +16,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -53,9 +53,9 @@ struct TaskState {
     factory: TaskFactory,
 }
 
-/// Watchdog that owns a dedicated tokio runtime for reconciler tasks.
+/// Watchdog that supervises reconciler tasks on the shared Tokio runtime.
 pub struct Watchdog {
-    runtime: Runtime,
+    runtime: Handle,
     tasks: HashMap<ReconcileKey, TaskState>,
     panic_tx: mpsc::UnboundedSender<ReconcileKey>,
     panic_rx: mpsc::UnboundedReceiver<ReconcileKey>,
@@ -64,13 +64,8 @@ pub struct Watchdog {
 }
 
 impl Watchdog {
-    /// Build a new watchdog with its own dedicated runtime.
-    pub fn new() -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("gateway-reconciler")
-            .enable_all()
-            .build()?;
+    /// Build a new watchdog using the provided shared Tokio runtime handle.
+    pub fn new(runtime: Handle) -> Result<Self> {
         let (panic_tx, panic_rx) = mpsc::unbounded_channel();
         Ok(Self {
             runtime,
@@ -165,9 +160,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Runtime::new().expect("test runtime")
+    }
+
     #[test]
     fn restart_after_panic_within_five_ticks() {
-        let mut w = Watchdog::new().unwrap();
+        let rt = test_runtime();
+        let mut w = Watchdog::new(rt.handle().clone()).unwrap();
         let count = Arc::new(AtomicUsize::new(0));
         let c = count.clone();
         w.spawn(
@@ -206,7 +206,8 @@ mod tests {
 
     #[test]
     fn poisoned_after_three_panics() {
-        let mut w = Watchdog::new().unwrap();
+        let rt = test_runtime();
+        let mut w = Watchdog::new(rt.handle().clone()).unwrap();
         w.spawn(
             ReconcileKey {
                 namespace: "default".into(),

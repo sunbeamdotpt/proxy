@@ -52,9 +52,12 @@ impl Drop for ClusterHandle {
     }
 }
 
-/// Spawn the cluster subsystem on a dedicated OS thread with its own tokio runtime.
+/// Spawn the cluster subsystem as a task on the provided Tokio runtime.
 /// Returns a handle for bandwidth recording and cluster state queries.
-pub fn spawn_cluster(cfg: &ClusterConfig) -> Result<ClusterHandle> {
+pub fn spawn_cluster(
+    runtime: &tokio::runtime::Handle,
+    cfg: &ClusterConfig,
+) -> Result<ClusterHandle> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let stale_timeout = cfg
@@ -84,30 +87,14 @@ pub fn spawn_cluster(cfg: &ClusterConfig) -> Result<ClusterHandle> {
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-    std::thread::Builder::new()
-        .name("cluster".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("cluster-worker")
-                .build()
-                .expect("cluster runtime");
-
-            rt.block_on(node::run_cluster(
-                &cluster_cfg,
-                bw,
-                cbw,
-                m,
-                shutdown_rx,
-                ready_tx,
-            ));
-        })?;
+    runtime.spawn(async move {
+        node::run_cluster(&cluster_cfg, bw, cbw, m, shutdown_rx, ready_tx).await;
+    });
 
     // Wait for the cluster to initialize (or fail).
     let ready: ClusterReady = ready_rx
         .blocking_recv()
-        .map_err(|_| anyhow::anyhow!("cluster thread exited before initialization"))??;
+        .map_err(|_| anyhow::anyhow!("cluster task exited before initialization"))??;
 
     Ok(ClusterHandle {
         bandwidth,
@@ -195,11 +182,16 @@ mod tests {
         assert_eq!(handle.limiter.limit(), gbps_to_bytes_per_sec(1.0));
     }
 
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Runtime::new().expect("test runtime")
+    }
+
     #[test]
     fn spawn_cluster_initializes_and_shuts_down() {
+        let rt = test_runtime();
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("node.key");
-        let handle = spawn_cluster(&test_cfg(&key_path)).unwrap();
+        let handle = spawn_cluster(rt.handle(), &test_cfg(&key_path)).unwrap();
 
         assert!(key_path.exists());
         assert_eq!(handle.limiter.limit(), gbps_to_bytes_per_sec(1.0));
@@ -212,6 +204,7 @@ mod tests {
 
     #[test]
     fn spawn_cluster_with_invalid_bootstrap_peers_initializes() {
+        let rt = test_runtime();
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("node.key");
         let mut cfg = test_cfg(&key_path);
@@ -219,13 +212,14 @@ mod tests {
         cfg.discovery.bootstrap_peers =
             Some(vec!["not-an-id".to_string(), "missing-at-sign".to_string()]);
 
-        let handle = spawn_cluster(&cfg).unwrap();
+        let handle = spawn_cluster(rt.handle(), &cfg).unwrap();
         assert!(handle.gateway_state_tx.is_some());
         handle.shutdown();
     }
 
     #[test]
     fn spawn_cluster_with_bootstrap_connection_failure_initializes() {
+        let rt = test_runtime();
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("node.key");
         let secret = iroh::SecretKey::generate(&mut rand::rng());
@@ -234,19 +228,20 @@ mod tests {
         // Valid format, but 127.0.0.1:1 has no listener so the pre-connect will fail.
         cfg.discovery.bootstrap_peers = Some(vec![format!("{}@127.0.0.1:1", secret.public())]);
 
-        let handle = spawn_cluster(&cfg).unwrap();
+        let handle = spawn_cluster(rt.handle(), &cfg).unwrap();
         assert!(handle.gateway_state_tx.is_some());
         handle.shutdown();
     }
 
     #[test]
     fn spawn_cluster_with_unknown_discovery_initializes() {
+        let rt = test_runtime();
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("node.key");
         let mut cfg = test_cfg(&key_path);
         cfg.discovery.method = "unknown".to_string();
 
-        let handle = spawn_cluster(&cfg).unwrap();
+        let handle = spawn_cluster(rt.handle(), &cfg).unwrap();
         assert!(handle.gateway_state_tx.is_some());
         handle.shutdown();
     }
