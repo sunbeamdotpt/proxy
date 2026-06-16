@@ -5,14 +5,13 @@
 # Unified Gateway API conformance and coverage helper.
 #
 # Usage:
-#   ./scripts/conformance.sh run [options] [test1 test2 ...]
+#   ./scripts/conformance.sh run [options]
 #   ./scripts/conformance.sh coverage-diff [base-ref]
 #
 # Run options:
 #   -B, --skip-build        Skip cargo build + container image build
 #   -C, --skip-crds         Skip Gateway API CRD install/reinstall
 #   -d, --debug             Build a debug binary instead of release
-#   -t, --target-set        Run the current feature target set
 #   -T, --run-test <name>   Run a single upstream conformance test
 #   -s, --skip-tests <list> Comma-separated list of tests to skip
 #   -n, --dry-run           Print the computed command and exit
@@ -34,7 +33,9 @@ MULTIPASS_VM="${MULTIPASS_VM:-sunbeam-proxy-dev}"
 DOCKER_TAG="${DOCKER_TAG:-}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GATEWAY_API_CHANNEL="${GATEWAY_API_CHANNEL:-experimental}"
-SUPPORTED_FEATURES="${SUPPORTED_FEATURES:-Gateway,HTTPRoute,GRPCRoute,ReferenceGrant,BackendTLSPolicy,BackendTLSPolicySANValidation,GatewayPort8080,GatewayHTTPListenerIsolation,ListenerSet,TCPRoute,UDPRoute,TLSRoute,TLSRouteModeTerminate,TLSRouteModeMixed,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteBackendRequestHeaderModification,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRouteHostRewrite,HTTPRouteCORS,HTTPRouteRequestMirror,HTTPRouteRequestMultipleMirrors,HTTPRouteRequestPercentageMirror,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteParentRefPort,HTTPRouteDestinationPortMatching,HTTPRouteNamedRouteRule,GatewayStaticAddresses,GatewayAddressEmpty,GatewayInfrastructurePropagation,GatewayBackendClientCertificate,GatewayFrontendClientCertificateValidation,GatewayFrontendClientCertificateValidationInsecureFallback,GatewayInvalidFrontendClientCertificateValidation,GatewayFrontendInvalidDefaultClientCertificateValidation,GatewayInvalidTLSBackendConfiguration,GatewayHTTPSListenerDetectMisdirectedRequests,GRPCExactMethodMatching,GRPCRouteHeaderMatching,GRPCRouteListenerHostnameMatching,GRPCRouteNamedRouteRule,GRPCRouteWeight}"
+# Mesh tests are unsupported and skipped by default. Use -s/--skip-tests to
+# override or add additional skips.
+DEFAULT_SKIP_TESTS="MeshBasic,MeshConsumerRoute,MeshFrontend,MeshFrontendHostname,MeshGRPCRouteWeight,MeshHTTPRoute303Redirect,MeshHTTPRoute307Redirect,MeshHTTPRoute308Redirect,MeshHTTPRouteBackendRequestHeaderModifier,MeshHTTPRouteMatching,MeshHTTPRouteNamedRule,MeshHTTPRouteQueryParamMatching,MeshHTTPRouteRedirectHostAndStatus,MeshHTTPRouteRedirectPath,MeshHTTPRouteRedirectPort,MeshHTTPRouteRequestHeaderModifier,MeshHTTPRouteRewritePath,MeshHTTPRouteSchemeRedirect,MeshHTTPRouteSimpleSameNamespace,MeshHTTPRouteWeight,MeshPorts,MeshTrafficSplit"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_CRDS="${SKIP_CRDS:-0}"
@@ -46,34 +47,6 @@ CONFORMANCE_BINARY="${CONFORMANCE_BINARY:-${PROJECT_ROOT}/target/gateway-api-${G
 
 STABLE_TAG="sunbeam-proxy:conformance"
 
-DEFAULT_TARGET_TESTS=(
-    BackendTLSPolicy
-    BackendTLSPolicyConflictResolution
-    BackendTLSPolicyInvalidCACertificateRef
-    BackendTLSPolicyInvalidKind
-    BackendTLSPolicyObservedGenerationBump
-    BackendTLSPolicySANValidation
-    GatewayInfrastructure
-    GatewayOptionalAddressValue
-    GatewayStaticAddresses
-    GatewayFrontendClientCertificateValidation
-    GatewayFrontendClientCertificateValidationInsecureFallback
-    GatewayInvalidFrontendClientCertificateValidation
-    GatewayFrontendInvalidDefaultClientCertificateValidation
-    GatewayBackendClientCertificateFeature
-    GatewayInvalidTLSBackendConfiguration
-    GRPCExactMethodMatching
-    GRPCRouteHeaderMatching
-    GRPCRouteListenerHostnameMatching
-    GRPCRouteNamedRule
-    GRPCRouteWeight
-    HTTPRouteHTTPSListenerDetectMisdirectedRequests
-    HTTPRouteInvalidParentRefNotMatchingListenerPort
-    HTTPRouteInvalidParentRefSectionNameNotMatchingPort
-    HTTPRouteListenerPortMatching
-    HTTPRouteNamedRule
-)
-
 export KUBECONFIG
 
 usage() {
@@ -81,16 +54,16 @@ usage() {
 Usage: ./scripts/conformance.sh <command> [options]
 
 Commands:
-  run [options] [test1 test2 ...]   Run the Gateway API conformance suite
+  run [options]                     Run the Gateway API conformance suite
   coverage-diff [base-ref]          Print line coverage for changed Rust files
 
 Run options:
   -B, --skip-build                  Skip cargo build + container image build
   -C, --skip-crds                   Skip Gateway API CRD install/reinstall
   -d, --debug                       Build a debug binary instead of release
-  -t, --target-set                  Run the current feature target set
   -T, --run-test <name>             Run a single upstream conformance test
   -s, --skip-tests <list>           Comma-separated list of tests to skip
+                                    (defaults to the mesh test suite)
   -n, --dry-run                     Print the computed command and exit
   -h, --help                        Show this help
 EOF
@@ -259,38 +232,8 @@ build_conformance_binary() {
     )
 }
 
-compute_target_skip_tests() {
-    local -n targets="$1"
-    local upstream_dir="${GATEWAY_API_DIR}/conformance"
-    if [[ ! -d "${upstream_dir}" ]]; then
-        echo "ERROR: upstream conformance suite not found at ${upstream_dir}" >&2
-        exit 1
-    fi
-    mapfile -t all_tests < <(
-        grep -Rh 'ShortName:' "${upstream_dir}/tests" \
-            | sed -E 's/.*ShortName:[[:space:]]*"([^"]+)".*/\1/' \
-            | sort -u
-    )
-    local -a skip=()
-    for t in "${all_tests[@]}"; do
-        local found=0
-        for target in "${targets[@]}"; do
-            if [[ "${t}" == "${target}" ]]; then
-                found=1
-                break
-            fi
-        done
-        if [[ "${found}" -eq 0 ]]; then
-            skip+=("${t}")
-        fi
-    done
-    if [[ ${#skip[@]} -gt 0 ]]; then
-        echo "$(IFS=,; echo "${skip[*]}")"
-    fi
-}
-
 run_tests() {
-    log "running conformance tests with features: ${SUPPORTED_FEATURES}"
+    log "running conformance tests (all features; mesh tests skipped by default)"
     local -a args=()
     if [[ -n "${SKIP_TESTS:-}" ]]; then
         args+=(-skip-tests "${SKIP_TESTS}")
@@ -307,7 +250,7 @@ run_tests() {
         # shellcheck disable=SC2048
         "${CONFORMANCE_BINARY}" -test.v \
             -gateway-class sunbeam \
-            -supported-features "${SUPPORTED_FEATURES}" \
+            -all-features \
             -usable-address "${GATEWAY_ADDR}" \
             -unusable-address "240.0.0.1" \
             -organization "Sunbeam Studios" \
@@ -322,7 +265,7 @@ run_tests() {
         # shellcheck disable=SC2048
         go test . -v \
             -gateway-class sunbeam \
-            -supported-features "${SUPPORTED_FEATURES}" \
+            -all-features \
             -usable-address "${GATEWAY_ADDR}" \
             -unusable-address "240.0.0.1" \
             -organization "Sunbeam Studios" \
@@ -342,13 +285,12 @@ generate_detailed_report() {
     local log_file="$1"
     local report_file="$2"
 
-    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" "${SUPPORTED_FEATURES}" "${DEFAULT_TARGET_TESTS[*]}" <<'PY'
+    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" <<'PY'
 import re
 import sys
 from datetime import datetime, timezone
 
-log_file, report_file, gw_version, features, targets_str = sys.argv[1:6]
-target_tests = targets_str.split()
+log_file, report_file, gw_version = sys.argv[1:4]
 
 status_re = re.compile(r'^\s*--- (PASS|FAIL|SKIP):\s+(.+?)\s*(?:\(([^)]+)\))?\s*$')
 
@@ -377,20 +319,6 @@ for r in records:
         summary['skipped'] += 1
 summary['total'] = len(records)
 
-# Derive target test results from top-level conformance tests.
-target_results = []
-for target in target_tests:
-    prefix = f'TestConformance/{target}'
-    matched = [r for r in records if r['name'] == prefix or r['name'].startswith(prefix + '/')]
-    if not matched:
-        target_results.append({'name': target, 'status': 'not_run'})
-    elif any(r['status'] == 'failed' for r in matched):
-        target_results.append({'name': target, 'status': 'failed'})
-    elif all(r['status'] == 'skipped' for r in matched):
-        target_results.append({'name': target, 'status': 'skipped'})
-    else:
-        target_results.append({'name': target, 'status': 'passed'})
-
 def esc(s):
     return s.replace('\\', '\\\\').replace('"', '\\"')
 
@@ -405,16 +333,12 @@ with open(report_file, 'w') as out:
     out.write('  url: https://sunbeam.pt\n')
     out.write('  version: v0.1.0\n')
     out.write(f'  contact: "hello@sunbeam.pt"\n')
-    out.write(f'supportedFeatures: "{esc(features)}"\n')
+    out.write(f'supportedFeatures: "all"\n')
     out.write('summary:\n')
     out.write(f'  total: {summary["total"]}\n')
     out.write(f'  passed: {summary["passed"]}\n')
     out.write(f'  failed: {summary["failed"]}\n')
     out.write(f'  skipped: {summary["skipped"]}\n')
-    out.write('targetTests:\n')
-    for t in target_results:
-        out.write(f'  - name: {t["name"]}\n')
-        out.write(f'    status: {t["status"]}\n')
     out.write('tests:\n')
     for r in records:
         out.write(f'  - name: {r["name"]}\n')
@@ -425,10 +349,8 @@ PY
 }
 
 run_command() {
-    local -a target_tests=()
-    local target_set=0
     local run_test=""
-    local user_skip_tests=""
+    local user_skip_tests="${DEFAULT_SKIP_TESTS}"
     local dry_run=0
 
     while [[ $# -gt 0 ]]; do
@@ -436,7 +358,6 @@ run_command() {
             -B|--skip-build) SKIP_BUILD=1; shift;;
             -C|--skip-crds) SKIP_CRDS=1; shift;;
             -d|--debug) DEBUG_BUILD=1; shift;;
-            -t|--target-set) target_set=1; shift;;
             -T|--run-test)
                 if [[ $# -lt 2 ]]; then echo "ERROR: --run-test requires a value" >&2; exit 1; fi
                 run_test="$2"; shift 2;;
@@ -445,37 +366,18 @@ run_command() {
                 user_skip_tests="$2"; shift 2;;
             -n|--dry-run) dry_run=1; shift;;
             -h|--help) usage; exit 0;;
-            --) shift; target_tests+=("$@"); break;;
             -*) echo "ERROR: unknown option $1" >&2; usage; exit 1;;
-            *) target_tests+=("$1"); shift;;
+            *) echo "ERROR: unknown positional argument $1" >&2; usage; exit 1;;
         esac
     done
 
-    if [[ ${#target_tests[@]} -eq 0 && "${target_set}" -eq 1 ]]; then
-        target_tests=("${DEFAULT_TARGET_TESTS[@]}")
-    fi
-
-    clone_upstream
-
-    SKIP_TESTS=""
-    if [[ ${#target_tests[@]} -gt 0 ]]; then
-        SKIP_TESTS="$(compute_target_skip_tests target_tests)"
-    fi
-    if [[ -n "${user_skip_tests}" ]]; then
-        if [[ -n "${SKIP_TESTS}" ]]; then
-            SKIP_TESTS="${SKIP_TESTS},${user_skip_tests}"
-        else
-            SKIP_TESTS="${user_skip_tests}"
-        fi
-    fi
+    SKIP_TESTS="${user_skip_tests}"
     RUN_TEST="${run_test}"
 
     if [[ "${dry_run}" -eq 1 ]]; then
         echo "SKIP_BUILD=${SKIP_BUILD} SKIP_CRDS=${SKIP_CRDS} DEBUG_BUILD=${DEBUG_BUILD} \\"
         echo "  ${SCRIPT_DIR}/conformance.sh run \\"
-        if [[ -n "${SKIP_TESTS}" ]]; then
-            echo "    -skip-tests '${SKIP_TESTS}' \\"
-        fi
+        echo "    -skip-tests '${SKIP_TESTS}' \\"
         if [[ -n "${RUN_TEST}" ]]; then
             echo "    -run-test '${RUN_TEST}'"
         fi
