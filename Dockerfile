@@ -1,5 +1,5 @@
 # Copyright Sunbeam Studios 2026
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Build from the WORKSPACE ROOT, not from platform/proxy. The proxy crate
 # inherits deps from the root [workspace.dependencies] table and pulls
