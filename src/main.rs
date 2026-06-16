@@ -285,6 +285,11 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 1. Init telemetry (JSON logs + optional OTEL traces).
     telemetry::init(&cfg.telemetry.otlp_endpoint);
 
+    // Shared Tokio runtime for all application async work. Pingora still manages
+    // its own runtime internally via server.run_forever().
+    let runtime = tokio::runtime::Runtime::new().expect("shared tokio runtime");
+    let rt_handle = runtime.handle().clone();
+
     // 1b. Spawn metrics HTTP server (needs a tokio runtime for the TCP listener).
     let metrics_port = cfg.telemetry.metrics_port;
 
@@ -367,38 +372,33 @@ fn run_serve(upgrade: bool) -> Result<()> {
     };
 
     // 3. Fetch the TLS cert from K8s before Pingora binds the TLS port.
-    //    The Client is created and dropped within this temp runtime — we do NOT
+    //    The Client is created and dropped within the shared runtime — we do NOT
     //    carry it across runtime boundaries, which would kill its tower workers.
-    //    The watcher thread creates its own fresh Client on its own runtime.
-    let k8s_available = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        rt.block_on(async {
-            match Client::try_default().await {
-                Ok(c) => {
-                    if !upgrade {
-                        if let Err(e) =
-                            sunbeam_proxy::cert::fetch_and_write(
-                                &c,
-                                &cfg.kubernetes.namespace,
-                                &cfg.kubernetes.tls_secret,
-                                &cfg.tls.cert_path,
-                                &cfg.tls.key_path,
-                            ).await
-                        {
-                            tracing::warn!(error = %e, "cert fetch from K8s failed; using existing files");
-                        }
+    //    The watcher task creates its own fresh Client on the same runtime.
+    let k8s_available = runtime.block_on(async {
+        match Client::try_default().await {
+            Ok(c) => {
+                if !upgrade {
+                    if let Err(e) =
+                        sunbeam_proxy::cert::fetch_and_write(
+                            &c,
+                            &cfg.kubernetes.namespace,
+                            &cfg.kubernetes.tls_secret,
+                            &cfg.tls.cert_path,
+                            &cfg.tls.key_path,
+                        ).await
+                    {
+                        tracing::warn!(error = %e, "cert fetch from K8s failed; using existing files");
                     }
-                    true
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "no K8s client; cert auto-reload and ACME routing disabled");
-                    false
-                }
+                true
             }
-        })
-    };
+            Err(e) => {
+                tracing::warn!(error = %e, "no K8s client; cert auto-reload and ACME routing disabled");
+                false
+            }
+        }
+    });
 
     let gateway_enabled = cfg.gateway.enabled;
 
@@ -423,7 +423,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 2d. Spawn cluster gossip if configured.
     let cluster_handle = if let Some(cc) = &cfg.cluster {
         if cc.enabled {
-            match sunbeam_proxy::cluster::spawn_cluster(cc) {
+            match sunbeam_proxy::cluster::spawn_cluster(&rt_handle, cc) {
                 Ok(handle) => {
                     tracing::info!(
                         endpoint_id = %handle.endpoint_id,
@@ -491,16 +491,8 @@ fn run_serve(upgrade: bool) -> Result<()> {
     // 3c. Start metrics + health HTTP server early so readiness probes pass
     // while Gateway API resources are being reconciled.
     if metrics_port > 0 {
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("metrics runtime");
-            rt.block_on(async {
-                sunbeam_proxy::metrics::spawn_metrics_server(metrics_port);
-                // Keep the runtime alive.
-                std::future::pending::<()>().await;
-            });
+        rt_handle.spawn(async move {
+            sunbeam_proxy::metrics::spawn_metrics_server(metrics_port);
         });
     }
 
@@ -511,35 +503,29 @@ fn run_serve(upgrade: bool) -> Result<()> {
         let gateway_ns = cfg.kubernetes.namespace.clone();
         let cluster_for_reconcile = cluster_handle.clone();
         let tls_registry_for_reconcile = Arc::clone(&tls_registry);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("gateway reconcile runtime");
-            rt.block_on(async move {
-                let client = match Client::try_default().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!(error = %e, "gateway: failed to create K8s client; reconciler disabled");
-                        return;
-                    }
-                };
-                let election = sunbeam_proxy::gateway::election::Election::new(
-                    client.clone(),
-                    gateway_ns,
-                    "sunbeam-proxy-gateway".to_string(),
-                    std::env::var("HOSTNAME").unwrap_or_else(|_| "sunbeam-proxy".to_string()),
-                );
-                sunbeam_proxy::gateway::reconcile::run_reconcile_loop(
-                    election,
-                    client,
-                    routes_tx.clone(),
-                    cluster_for_reconcile,
-                    Arc::clone(&tls_registry_for_reconcile),
-                    Arc::clone(&gateway_cert_source),
-                    Arc::clone(&disk_cert_source),
-                ).await;
-            });
+        rt_handle.spawn(async move {
+            let client = match Client::try_default().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = %e, "gateway: failed to create K8s client; reconciler disabled");
+                    return;
+                }
+            };
+            let election = sunbeam_proxy::gateway::election::Election::new(
+                client.clone(),
+                gateway_ns,
+                "sunbeam-proxy-gateway".to_string(),
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "sunbeam-proxy".to_string()),
+            );
+            sunbeam_proxy::gateway::reconcile::run_reconcile_loop(
+                election,
+                client,
+                routes_tx.clone(),
+                cluster_for_reconcile,
+                Arc::clone(&tls_registry_for_reconcile),
+                Arc::clone(&gateway_cert_source),
+                Arc::clone(&disk_cert_source),
+            ).await;
         });
     }
 
@@ -585,6 +571,7 @@ fn run_serve(upgrade: bool) -> Result<()> {
         Arc::clone(&http_context),
     ));
     let l4_manager = sunbeam_proxy::l4::manager::spawn_with_config(
+        rt_handle.clone(),
         Arc::clone(&tls_registry),
         l4_router,
         Arc::clone(&l4_config),
@@ -678,51 +665,41 @@ fn run_serve(upgrade: bool) -> Result<()> {
         let listen = ssh_cfg.listen.clone();
         let backend = ssh_cfg.backend.clone();
         tracing::info!(%listen, %backend, "SSH TCP proxy enabled");
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("ssh proxy runtime");
-            rt.block_on(sunbeam_proxy::ssh::run_tcp_proxy(&listen, &backend));
+        rt_handle.spawn(async move {
+            sunbeam_proxy::ssh::run_tcp_proxy(&listen, &backend).await;
         });
     }
 
-    // 6. Background K8s watchers on their own OS thread + tokio runtime.
+    // 6. Background K8s watchers as tasks on the shared runtime.
     if k8s_available {
         let k8s_cfg = cfg.kubernetes.clone();
         let cert_path = cfg.tls.cert_path.clone();
         let key_path = cfg.tls.key_path.clone();
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("watcher runtime");
-            rt.block_on(async move {
-                let client = match Client::try_default().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!(error = %e, "watcher: failed to create K8s client; watchers disabled");
-                        return;
-                    }
-                };
+        rt_handle.spawn(async move {
+            let client = match Client::try_default().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = %e, "watcher: failed to create K8s client; watchers disabled");
+                    return;
+                }
+            };
 
-                tokio::join!(
-                    acme::watch_ingresses(
-                        client.clone(),
-                        k8s_cfg.namespace.clone(),
-                        acme_routes,
-                    ),
-                    watcher::run_watcher(
-                        client,
-                        k8s_cfg.namespace,
-                        k8s_cfg.tls_secret,
-                        k8s_cfg.config_configmap,
-                        cert_path,
-                        key_path,
-                    ),
-                );
-            });
+            tokio::join!(
+                acme::watch_ingresses(
+                    client.clone(),
+                    k8s_cfg.namespace.clone(),
+                    acme_routes,
+                ),
+                watcher::run_watcher(
+                    client,
+                    k8s_cfg.namespace,
+                    k8s_cfg.tls_secret,
+                    k8s_cfg.config_configmap,
+                    cert_path,
+                    key_path,
+                ),
+            );
         });
     }
 
