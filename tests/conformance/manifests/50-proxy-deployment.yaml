@@ -5,6 +5,11 @@ metadata:
   namespace: gateway-conformance
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: sunbeam-proxy
@@ -105,8 +110,8 @@ data:
 
     [kubernetes]
     namespace = "gateway-conformance"
-    tls_secret = "pingora-tls"
-    config_configmap = "pingora-config"
+    tls_secret = "sunbeam-proxy-tls"
+    config_configmap = "sunbeam-proxy-config"
 
     [gateway]
     enabled = true

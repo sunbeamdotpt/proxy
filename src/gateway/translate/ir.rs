@@ -49,11 +49,10 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
 
                 for filter in &rule.filters {
                     if let RouteFilter::UrlRewrite { hostname, path } = filter {
-                        if let Some(path) = path {
-                            if let Some(rw) = translate_rewrite(path) {
+                        if let Some(path) = path
+                            && let Some(rw) = translate_rewrite(path) {
                                 rewrites.push(rw);
                             }
-                        }
                         // hostname rewrite is handled per-path-route below
                         let _ = hostname;
                     }
@@ -62,8 +61,8 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
 
             // If no paths were produced, create a default catch-all path
             // using the first backend from the first rule (common case).
-            if paths.is_empty() && !http_route.rules.is_empty() {
-                if let Some(first_backend) = http_route.rules[0].backends.first() {
+            if paths.is_empty() && !http_route.rules.is_empty()
+                && let Some(first_backend) = http_route.rules[0].backends.first() {
                     paths.push(PathRoute {
                         prefix: "/".to_string(),
                         backend: first_backend.backend.to_string(),
@@ -95,7 +94,6 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
                         cors: None,
                     });
                 }
-            }
 
             let group = groups.entry(key).or_insert_with(|| RouteConfig {
                 host_prefix: host_prefix.clone(),

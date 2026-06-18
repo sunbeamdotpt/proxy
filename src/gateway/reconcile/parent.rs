@@ -158,8 +158,8 @@ pub fn resolve_listener_parent(
         }
     }
 
-    if let Some(port) = parsed.port {
-        if matching_listeners.is_empty() {
+    if let Some(port) = parsed.port
+        && matching_listeners.is_empty() {
             return (
                 None,
                 vec![conditions::accepted_condition(
@@ -173,7 +173,6 @@ pub fn resolve_listener_parent(
                 )],
             );
         }
-    }
 
     let mut kind_allowed = false;
     let mut protocol_allowed = expected_protocols.is_none();

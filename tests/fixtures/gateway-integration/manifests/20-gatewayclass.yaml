@@ -3,4 +3,4 @@ kind: GatewayClass
 metadata:
   name: sunbeam
 spec:
-  controllerName: sunbeam.io/gateway-controller
+  controllerName: sunbeam.pt/sunbeam-proxy

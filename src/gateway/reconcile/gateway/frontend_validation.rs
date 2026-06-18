@@ -78,11 +78,10 @@ pub(crate) fn gateway_insecure_frontend_mode(gw: &Gateway) -> bool {
             continue;
         }
         let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-        if let Some(spec) = listener_frontend_validation(gw_tls, port) {
-            if spec.allow_insecure_fallback {
+        if let Some(spec) = listener_frontend_validation(gw_tls, port)
+            && spec.allow_insecure_fallback {
                 return true;
             }
-        }
     }
     false
 }

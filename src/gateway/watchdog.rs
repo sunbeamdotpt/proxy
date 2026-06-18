@@ -92,11 +92,10 @@ impl Watchdog {
         let inner = self.runtime.spawn(f);
         let abort = inner.abort_handle();
         self.runtime.spawn(async move {
-            if let Err(e) = inner.await {
-                if e.is_panic() {
+            if let Err(e) = inner.await
+                && e.is_panic() {
                     let _ = panic_tx.send(k);
                 }
-            }
         });
         self.tasks.insert(key, TaskState { abort, factory });
     }

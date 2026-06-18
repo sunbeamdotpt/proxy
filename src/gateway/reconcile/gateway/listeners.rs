@@ -160,8 +160,8 @@ pub fn build_listener_status(
         {
             supported_kinds = Vec::new();
         }
-        if accepted_status == "True" {
-            if let Some(err) = cert_errors.get(idx).copied().flatten() {
+        if accepted_status == "True"
+            && let Some(err) = cert_errors.get(idx).copied().flatten() {
                 accepted_status = "False";
                 accepted_reason = if is_frontend_ca_error(err.reason) {
                     "NoValidCACertificate"
@@ -170,7 +170,6 @@ pub fn build_listener_status(
                 };
                 accepted_message = err.message;
             }
-        }
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let conditions = standard_listener_conditions(

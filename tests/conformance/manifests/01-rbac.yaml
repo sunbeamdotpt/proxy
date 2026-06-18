@@ -44,11 +44,11 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["sunbeam-proxy-config", "pingora-config"]
+    resourceNames: ["sunbeam-proxy-config"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["pingora-tls"]
+    resourceNames: ["sunbeam-proxy-tls"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

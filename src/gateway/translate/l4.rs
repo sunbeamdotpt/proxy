@@ -130,11 +130,10 @@ pub(crate) fn translate_l4_routes(
                 if listener.protocol.as_ref() != "TLS" {
                     continue;
                 }
-                if let Some(section) = section_filter {
-                    if listener.name.as_ref() != section {
+                if let Some(section) = section_filter
+                    && listener.name.as_ref() != section {
                         continue;
                     }
-                }
                 let listener_match = listener
                     .hostname
                     .as_deref()
@@ -306,11 +305,10 @@ fn add_l4_routes_for_parents<S, F>(
             if listener.protocol.as_ref() != expected_protocol {
                 continue;
             }
-            if let Some(section) = section_filter {
-                if listener.name.as_ref() != section {
+            if let Some(section) = section_filter
+                && listener.name.as_ref() != section {
                     continue;
                 }
-            }
             add_l4_listener(listeners, gateway, listener);
             let id: Arc<str> = Arc::from(format!(
                 "{}/{}/{}",

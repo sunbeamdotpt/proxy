@@ -106,8 +106,8 @@ pub async fn run_reconcile_loop(
                 Some(evt) = digest_events_rx.recv() => {
                     match evt {
                         DigestEvent::Broadcast(digest) => {
-                            if let Some(ref ch) = cluster_for_digest {
-                                if let Some(ref tx) = ch.gateway_state_tx {
+                            if let Some(ref ch) = cluster_for_digest
+                                && let Some(ref tx) = ch.gateway_state_tx {
                                     let msg = ClusterMessage {
                                         version: 1,
                                         sender: node_id,
@@ -117,7 +117,6 @@ pub async fn run_reconcile_loop(
                                         let _ = tx.try_send(data);
                                     }
                                 }
-                            }
                         }
                         DigestEvent::ForceReconcile => {
                             // Handled by the main loop via `force_notify`.
@@ -127,8 +126,8 @@ pub async fn run_reconcile_loop(
                 Some(evt) = notify_events_rx.recv() => {
                     match evt {
                         NotifyEvent::Broadcast(notify) => {
-                            if let Some(ref ch) = cluster_for_notify {
-                                if let Some(ref tx) = ch.gateway_notify_tx {
+                            if let Some(ref ch) = cluster_for_notify
+                                && let Some(ref tx) = ch.gateway_notify_tx {
                                     let msg = ClusterMessage {
                                         version: 1,
                                         sender: node_id,
@@ -138,7 +137,6 @@ pub async fn run_reconcile_loop(
                                         let _ = tx.try_send(data);
                                     }
                                 }
-                            }
                         }
                         NotifyEvent::TriggerReconcile => {
                             // Handled by the main loop via `force_notify`.
@@ -188,13 +186,12 @@ pub async fn run_reconcile_loop(
 
         // If we hold a token but the background lease task invalidated it,
         // drop it and update the flag immediately.
-        if let Some(ref t) = token {
-            if !t.is_leader() {
+        if let Some(ref t) = token
+            && !t.is_leader() {
                 token = None;
                 is_leader.store(false, Ordering::Relaxed);
                 tracing::info!("LeaderToken invalidated — status writeback disabled");
             }
-        }
 
         // Full reconcile tick: fetch, translate, and send to proxy.
         let leader = is_leader.load(Ordering::Relaxed);

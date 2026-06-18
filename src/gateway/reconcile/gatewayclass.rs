@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Name of the controller as advertised in GatewayClass `controllerName`.
-pub const CONTROLLER_NAME: &str = "sunbeam.io/gateway-controller";
+pub const CONTROLLER_NAME: &str = "sunbeam.pt/sunbeam-proxy";
 
 /// Core and extended features supported by this controller.
 ///

@@ -232,7 +232,7 @@ mod tests {
                 - parentRef:
                     name: gw-1
                     namespace: default
-                  controllerName: sunbeam.io/gateway-controller
+                  controllerName: sunbeam.pt/sunbeam-proxy
                   conditions:
                     - type: Accepted
                       status: "True"

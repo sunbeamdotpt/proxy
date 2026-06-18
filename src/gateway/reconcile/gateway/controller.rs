@@ -247,14 +247,13 @@ pub async fn reconcile_gateway(
         );
 
     if ctx.is_leader.load(Ordering::Relaxed) {
-        if programmed_true {
-            if let Some(l4_swap) = crate::l4::current::get() {
+        if programmed_true
+            && let Some(l4_swap) = crate::l4::current::get() {
                 let l4_config = l4_swap.load();
                 if !gateway_l4_ready(&gw, &l4_config, &cert_errors) {
                     return Ok(Action::requeue(Duration::from_millis(100)));
                 }
             }
-        }
 
         let k8s_conditions: Vec<Condition> = conditions.iter().map(Condition::from).collect();
         let feature_set: std::collections::HashSet<String> =
