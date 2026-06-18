@@ -1,19 +1,18 @@
 [package]
 name        = "sunbeam-proxy"
 version = "0.2.0"
-edition     = "2021"
-description = "Pingora-based reverse proxy with ML-powered security"
+edition     = "2024"
+description = "A cloud-native reverse proxy with ML-powered security"
 license     = "AGPL-3.0-or-later"
-repository    = "https://src.sunbeam.pt/studio/sunbeam"
+repository    = "https://github.com/sunbeamdotpt/proxy"
+publish = false
 
 [lib]
 name = "sunbeam_proxy"
 path = "src/lib.rs"
 
 [dependencies]
-# Pingora with rustls backend (pure Rust TLS, no BoringSSL C build)
-# Version pins are NOT workspace = true because pingora is path-patched via
-# [patch.crates-io] in the root Cargo.toml (3p/pingora submodule @ 0.8.0).
+# Pingora with rustls backend
 pingora       = { version = "0.8", features = ["rustls"] }
 pingora-proxy = { version = "0.8", features = ["rustls"] }
 pingora-core  = { version = "0.8", features = ["rustls"] }
@@ -65,6 +64,9 @@ uuid = { workspace = true }
 # Static file serving and body rewriting
 bytes = { workspace = true }
 regex = { workspace = true }
+
+# Allocator
+mimalloc = "*"
 
 # Auth subrequests
 reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
@@ -170,7 +172,7 @@ uuid = "1"
 bytes = "1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false }
-kube = "3"
+kube = { version = "3", default-features = false }
 k8s-openapi = "0.27"
 chrono = "0.4"
 libc = "0.2"
