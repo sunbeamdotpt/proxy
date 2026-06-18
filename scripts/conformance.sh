@@ -248,7 +248,7 @@ run_tests() {
             -unusable-address "240.0.0.1" \
             -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
-            -url "https://sunbeam.pt" \
+            -url "https://github.com/sunbeamdotpt/proxy" \
             -version "v${PROJECT_VERSION}" \
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
@@ -263,7 +263,7 @@ run_tests() {
             -unusable-address "240.0.0.1" \
             -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
-            -url "https://sunbeam.pt" \
+            -url "https://github.com/sunbeamdotpt/proxy" \
             -version "v${PROJECT_VERSION}" \
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
