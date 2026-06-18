@@ -375,21 +375,18 @@ impl SunbeamProxy {
         let headers = &session.req_header().headers;
 
         for header in &["cf-connecting-ip", "x-real-ip"] {
-            if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok()) {
-                if let Ok(ip) = val.trim().parse::<IpAddr>() {
+            if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok())
+                && let Ok(ip) = val.trim().parse::<IpAddr>() {
                     return Some(ip);
                 }
-            }
         }
 
         // X-Forwarded-For: client, proxy1, proxy2 — take the first entry
-        if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = val.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+        if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(first) = val.split(',').next()
+                && let Ok(ip) = first.trim().parse::<IpAddr>() {
                     return Some(ip);
                 }
-            }
-        }
 
         Some(socket_ip)
     }
@@ -435,15 +432,14 @@ fn downstream_local_addr(session: &Session) -> Option<SocketAddr> {
 /// port that should be used for redirects.
 fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u16> {
     for route in &l4_config.https_routes {
-        if let L4Action::TerminateAndHttp(target) = &route.action {
-            if let Ok(target_addr) = target.as_ref().parse::<SocketAddr>() {
-                if target_addr == local {
-                    if let Some(listener) = l4_config
+        if let L4Action::TerminateAndHttp(target) = &route.action
+            && let Ok(target_addr) = target.as_ref().parse::<SocketAddr>()
+                && target_addr == local
+                    && let Some(listener) = l4_config
                         .listeners
                         .iter()
                         .find(|l| l.id.as_ref() == route.listener_id.as_ref())
-                    {
-                        if matches!(listener.protocol, Protocol::Https | Protocol::Tls) {
+                        && matches!(listener.protocol, Protocol::Https | Protocol::Tls) {
                             return listener
                                 .bind_addr
                                 .as_ref()
@@ -451,10 +447,6 @@ fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Opti
                                 .next()
                                 .and_then(|p| p.parse().ok());
                         }
-                    }
-                }
-            }
-        }
     }
     None
 }
@@ -464,15 +456,14 @@ fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Opti
 /// public listener port so route matching can use it.
 fn http_relay_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u16> {
     for route in &l4_config.http_routes {
-        if let L4Action::HttpRelay(target) = &route.action {
-            if let Ok(target_addr) = target.as_ref().parse::<SocketAddr>() {
-                if target_addr == local {
-                    if let Some(listener) = l4_config
+        if let L4Action::HttpRelay(target) = &route.action
+            && let Ok(target_addr) = target.as_ref().parse::<SocketAddr>()
+                && target_addr == local
+                    && let Some(listener) = l4_config
                         .listeners
                         .iter()
                         .find(|l| l.id.as_ref() == route.listener_id.as_ref())
-                    {
-                        if listener.protocol == Protocol::Http {
+                        && listener.protocol == Protocol::Http {
                             return listener
                                 .bind_addr
                                 .as_ref()
@@ -480,10 +471,6 @@ fn http_relay_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u1
                                 .next()
                                 .and_then(|p| p.parse().ok());
                         }
-                    }
-                }
-            }
-        }
     }
     None
 }
@@ -658,11 +645,10 @@ impl ProxyHttp for SunbeamProxy {
             },
         };
 
-        if code > 0 {
-            if let Err(err) = session.respond_error(code).await {
+        if code > 0
+            && let Err(err) = session.respond_error(code).await {
                 tracing::error!(%err, "failed to send error response to downstream");
             }
-        }
 
         pingora_proxy::FailToProxy {
             error_code: code,

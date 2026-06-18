@@ -138,11 +138,10 @@ impl SunbeamProxy {
             );
         });
 
-        if let Some(detector) = &self.ddos_detector {
-            if let Some(ip) = self.extract_client_ip(session) {
+        if let Some(detector) = &self.ddos_detector
+            && let Some(ip) = self.extract_client_ip(session) {
                 detector.record_response(ip, status, duration_ms as u32);
             }
-        }
     }
 }
 

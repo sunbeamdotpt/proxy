@@ -513,11 +513,10 @@ where
     S: Stream<Item = Result<Event, E>> + Unpin,
 {
     while let Some(Ok(event)) = receiver.next().await {
-        if let Event::Received(message) = event {
-            if let Ok(msg) = ClusterMessage::decode(&message.content) {
+        if let Event::Received(message) = event
+            && let Ok(msg) = ClusterMessage::decode(&message.content) {
                 apply_stub_message(&msg, channel);
             }
-        }
     }
 }
 

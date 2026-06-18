@@ -53,17 +53,15 @@ pub fn cors_allow_origin(
         }
         // Wildcard matching: e.g. "*.example.com" or "https://*.example.com"
         // matches "foo.example.com" or "https://foo.example.com" respectively.
-        if let Some((prefix, suffix)) = allowed.split_once("*.") {
-            if let Some(rest) = origin.strip_prefix(prefix) {
-                if rest
+        if let Some((prefix, suffix)) = allowed.split_once("*.")
+            && let Some(rest) = origin.strip_prefix(prefix)
+                && rest
                     .strip_suffix(suffix)
                     .and_then(|rest| rest.strip_suffix('.'))
                     .is_some_and(|rest| !rest.is_empty())
                 {
                     return true;
                 }
-            }
-        }
     }
     false
 }

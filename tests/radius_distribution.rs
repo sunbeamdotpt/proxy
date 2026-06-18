@@ -22,7 +22,7 @@ use sunbeam_proxy::dataset::sample::{
 };
 use sunbeam_proxy::ensemble::crown::certified_radius;
 use sunbeam_proxy::ensemble::ddos_crown::ddos_certified_radius;
-use sunbeam_proxy::ensemble::gen::{ddos_weights, scanner_weights};
+use sunbeam_proxy::ensemble::weights::{ddos_weights, scanner_weights};
 
 const SAMPLE_CAP: usize = 1000;
 const MAX_EPS: f32 = 0.5;

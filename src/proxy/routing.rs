@@ -98,13 +98,12 @@ impl SunbeamProxy {
                 client_cert_present = client_cert.is_some(),
                 "upstream_peer: route plan"
             );
-            if !backend.is_empty() {
-                if let Some(peer) =
+            if !backend.is_empty()
+                && let Some(peer) =
                     make_peer(&backend, upstream.timeout, protocol, tls, client_cert).await
                 {
                     return Ok(peer);
                 }
-            }
             let mut resp = ResponseHeader::build(502, None)?;
             resp.insert_header("Content-Length", "0")?;
             session.write_response_header(Box::new(resp), true).await?;

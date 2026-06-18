@@ -49,21 +49,19 @@ impl UpstreamCaBundle {
 
         for gw in &view.gateways {
             for listener in &gw.listeners {
-                if let Some(v) = listener.frontend_validation.as_ref() {
-                    if !v.ca_bundle_pem.is_empty() {
+                if let Some(v) = listener.frontend_validation.as_ref()
+                    && !v.ca_bundle_pem.is_empty() {
                         bundles.push(Arc::clone(&v.ca_bundle_pem));
                     }
-                }
             }
         }
 
         for ls in &view.listener_sets {
             for listener in &ls.listeners {
-                if let Some(v) = listener.frontend_validation.as_ref() {
-                    if !v.ca_bundle_pem.is_empty() {
+                if let Some(v) = listener.frontend_validation.as_ref()
+                    && !v.ca_bundle_pem.is_empty() {
                         bundles.push(Arc::clone(&v.ca_bundle_pem));
                     }
-                }
             }
         }
 

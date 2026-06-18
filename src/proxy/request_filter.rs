@@ -59,8 +59,8 @@ impl SunbeamProxy {
 
         // HTTPS listener misdirected request detection: if the SNI selected a
         // different listener than the request Host/Authority, return 421.
-        if ctx.downstream_scheme == "https" {
-            if let Some(sni) = self.sni_for_session(session) {
+        if ctx.downstream_scheme == "https"
+            && let Some(sni) = self.sni_for_session(session) {
                 let host = extract_host(session);
                 let port = ctx.downstream_port;
                 let l4 = self.l4_config.load();
@@ -78,7 +78,6 @@ impl SunbeamProxy {
                     return Ok(true);
                 }
             }
-        }
 
         if is_plain_http(session) {
             // cert-manager HTTP-01 challenge: look up the token path in the
@@ -125,9 +124,9 @@ impl SunbeamProxy {
                 // CORS preflight requests are answered locally so that the upstream
                 // backend never sees them. The synthetic 204 carries the configured
                 // CORS headers when the Origin is allowed.
-                if let Some(plan) = ctx.plan.as_ref() {
-                    if session.req_header().method == http::Method::OPTIONS {
-                        if let Some(cors) = plan.response_mutations.iter().find_map(|m| match m {
+                if let Some(plan) = ctx.plan.as_ref()
+                    && session.req_header().method == http::Method::OPTIONS
+                        && let Some(cors) = plan.response_mutations.iter().find_map(|m| match m {
                             crate::ir::compile::ResponseMutation::Cors(c) => Some(c),
                             _ => None,
                         }) {
@@ -145,8 +144,6 @@ impl SunbeamProxy {
                                 return Ok(true);
                             }
                         }
-                    }
-                }
 
                 if let Some(plan) = ctx.plan.as_ref() {
                     for stage in &plan.request_stages {
@@ -206,8 +203,8 @@ impl SunbeamProxy {
             // fall through to the route lookup
         } else {
             // DDoS detection: check the client IP against the KNN model.
-            if let Some(detector) = &self.ddos_detector {
-                if let Some(ip) = self.extract_client_ip(session) {
+            if let Some(detector) = &self.ddos_detector
+                && let Some(ip) = self.extract_client_ip(session) {
                     let method = session.req_header().method.as_str();
                     let path = session.req_header().uri.path();
                     let host = extract_host(session);
@@ -281,7 +278,6 @@ impl SunbeamProxy {
                         return Ok(true);
                     }
                 }
-            }
 
             // Scanner detection: per-request classification of scanner/bot probes.
             if let Some(scanner_swap) = &self.scanner_detector {
@@ -380,8 +376,8 @@ impl SunbeamProxy {
             }
 
             // Rate limiting: per-identity throttling.
-            if let Some(limiter) = &self.rate_limiter {
-                if let Some(ip) = self.extract_client_ip(session) {
+            if let Some(limiter) = &self.rate_limiter
+                && let Some(ip) = self.extract_client_ip(session) {
                     let cookie = session
                         .req_header()
                         .headers
@@ -429,7 +425,6 @@ impl SunbeamProxy {
                         return Ok(true);
                     }
                 }
-            }
 
             // Cluster-wide bandwidth cap enforcement.
             if let Some(c) = &self.cluster {
@@ -575,11 +570,10 @@ impl SunbeamProxy {
                     "auth subrequest succeeded"
                 );
                 for hdr_name in &auth.capture_headers {
-                    if let Some(val) = resp.headers().get(hdr_name.as_ref()) {
-                        if let Ok(v) = val.to_str() {
+                    if let Some(val) = resp.headers().get(hdr_name.as_ref())
+                        && let Ok(v) = val.to_str() {
                             ctx.auth_headers.push((hdr_name.to_string(), v.to_string()));
                         }
-                    }
                 }
                 Ok(false) // continue to next stage
             }
@@ -630,15 +624,14 @@ impl SunbeamProxy {
 
         if req_method.eq_ignore_ascii_case("OPTIONS") && requested_method.is_some() {
             let mut resp = ResponseHeader::build(204, None)?;
-            if let Some(origin) = origin {
-                if cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials) {
+            if let Some(origin) = origin
+                && cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials) {
                     resp.insert_header("Access-Control-Allow-Origin", origin)?;
                     resp.insert_header("Vary", "Origin")?;
                     if cors.allow_credentials {
                         resp.insert_header("Access-Control-Allow-Credentials", "true")?;
                     }
                 }
-            }
             if !cors.allow_methods.is_empty() {
                 let allowed_methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
                     if cors.allow_credentials {

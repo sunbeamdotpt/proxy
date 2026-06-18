@@ -114,8 +114,8 @@ impl BotAllowlist {
                     .verified_cache
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
-                if let Some(entry) = cache.get(&ip) {
-                    if entry.created.elapsed() < self.cache_ttl {
+                if let Some(entry) = cache.get(&ip)
+                    && entry.created.elapsed() < self.cache_ttl {
                         if entry.verified && entry.rule_idx == idx {
                             return Some(&rule.reason);
                         }
@@ -123,7 +123,6 @@ impl BotAllowlist {
                         return None;
                     }
                     // Expired — fall through to re-queue.
-                }
                 drop(cache);
 
                 // Cache miss or expired → queue for background verification.
@@ -165,11 +164,10 @@ fn dns_verification_worker(
                 .verified_cache
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = cache.get(&req.ip) {
-                if entry.created.elapsed() < allowlist.cache_ttl {
+            if let Some(entry) = cache.get(&req.ip)
+                && entry.created.elapsed() < allowlist.cache_ttl {
                     continue;
                 }
-            }
         }
 
         let verified = verify_dns(req.ip, &req.dns_suffixes);

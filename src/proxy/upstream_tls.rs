@@ -366,8 +366,8 @@ fn first_server_name(
 
 fn san_values(cert: &CertificateDer<'_>) -> Vec<String> {
     let mut names = Vec::new();
-    if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref()) {
-        if let Ok(Some(san)) = parsed.subject_alternative_name() {
+    if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref())
+        && let Ok(Some(san)) = parsed.subject_alternative_name() {
             for name in &san.value.general_names {
                 match name {
                     x509_parser::extensions::GeneralName::DNSName(d) => {
@@ -385,7 +385,6 @@ fn san_values(cert: &CertificateDer<'_>) -> Vec<String> {
                 }
             }
         }
-    }
     names
 }
 

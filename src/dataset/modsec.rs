@@ -47,7 +47,7 @@ fn parse_modsec_content(content: &str) -> Result<Vec<(AuditFields, String)>> {
     for line in content.lines() {
         if let Some((id, section)) = parse_boundary(line) {
             // Flush previous section.
-            if let (Some(ref cid), Some(sec)) = (&current_id, current_section) {
+            if let (Some(cid), Some(sec)) = (&current_id, current_section) {
                 let entry = sections.entry(cid.clone()).or_default();
                 entry.entry(sec).or_default().append(&mut current_lines);
             }
@@ -62,18 +62,17 @@ fn parse_modsec_content(content: &str) -> Result<Vec<(AuditFields, String)>> {
         }
     }
     // Flush last section.
-    if let (Some(ref cid), Some(sec)) = (&current_id, current_section) {
+    if let (Some(cid), Some(sec)) = (&current_id, current_section) {
         let entry = sections.entry(cid.clone()).or_default();
         entry.entry(sec).or_default().append(&mut current_lines);
     }
 
     // Convert each transaction into AuditFields.
     for id in &id_order {
-        if let Some(secs) = sections.get(id) {
-            if let Some(fields) = transaction_to_audit_fields(secs) {
+        if let Some(secs) = sections.get(id)
+            && let Some(fields) = transaction_to_audit_fields(secs) {
                 results.push(fields);
             }
-        }
     }
 
     Ok(results)

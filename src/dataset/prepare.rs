@@ -113,8 +113,8 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
     }
 
     // --- 3. Legacy OWASP path (kept for backwards compat) ---
-    if let Some(owasp_path) = &args.owasp {
-        if args.inject_modsec.as_deref() != Some(owasp_path.as_str()) {
+    if let Some(owasp_path) = &args.owasp
+        && args.inject_modsec.as_deref() != Some(owasp_path.as_str()) {
             eprintln!("parsing OWASP ModSec audit log from {owasp_path}...");
             let modsec_entries =
                 crate::dataset::modsec::parse_modsec_audit_log(Path::new(owasp_path))?;
@@ -130,7 +130,6 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
             eprintln!("  OWASP: {} scanner samples", modsec_samples.len());
             scanner_samples.extend(modsec_samples);
         }
-    }
 
     // --- 4. CIC-IDS2017 (direct DDoS samples + timing profiles for synthetic) ---
     let cicids_profiles = if let Some(cached_path) = crate::dataset::download::cicids_cached_path()

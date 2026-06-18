@@ -84,11 +84,10 @@ fn parse_csic_content(content: &str) -> Vec<ParsedRequest> {
             current_lines.push(line);
         }
     }
-    if !current_lines.is_empty() {
-        if let Some(req) = parse_single_request(&current_lines) {
+    if !current_lines.is_empty()
+        && let Some(req) = parse_single_request(&current_lines) {
             requests.push(req);
         }
-    }
     requests
 }
 

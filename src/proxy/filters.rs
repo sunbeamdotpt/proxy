@@ -65,13 +65,12 @@ impl SunbeamProxy {
             }
 
             // Apply the selected backend's request mutations, if any.
-            if let (Some(idx), Some(upstream)) = (ctx.backend_index, plan.upstream.as_ref()) {
-                if let Some(mutations) = upstream.backend_request_mutations.get(idx) {
+            if let (Some(idx), Some(upstream)) = (ctx.backend_index, plan.upstream.as_ref())
+                && let Some(mutations) = upstream.backend_request_mutations.get(idx) {
                     for mutation in mutations {
                         apply_upstream_request_mutation(upstream_req, mutation)?;
                     }
                 }
-            }
         }
 
         // Strip Expect: 100-continue.
@@ -418,8 +417,8 @@ pub(crate) fn apply_response_mutation(
             let allowed = origin.is_some_and(|origin| {
                 cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials)
             });
-            if allowed {
-                if let Some(origin) = origin {
+            if allowed
+                && let Some(origin) = origin {
                     let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
                     let _ = upstream_response.insert_header("Vary", "Origin");
                     if cors.allow_credentials {
@@ -475,7 +474,6 @@ pub(crate) fn apply_response_mutation(
                             .insert_header("Access-Control-Max-Age", max_age.to_string());
                     }
                 }
-            }
         }
     }
 

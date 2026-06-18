@@ -1305,21 +1305,18 @@ fn resolve_node_plans(
                 result.extend(any.iter().cloned());
             }
             DiscriminatorKind::ByHeader { name, exact, any } => {
-                if let Some(val) = _headers.get(name.as_ref()).and_then(|v| v.to_str().ok()) {
-                    if let Some(bucket) = exact.get(val) {
+                if let Some(val) = _headers.get(name.as_ref()).and_then(|v| v.to_str().ok())
+                    && let Some(bucket) = exact.get(val) {
                         result.extend(bucket.iter().cloned());
                     }
-                }
                 result.extend(any.iter().cloned());
             }
             DiscriminatorKind::ByQuery { name, exact, any } => {
-                if let Some(q) = _query {
-                    if let Some(val) = extract_query_param(q, name.as_ref()) {
-                        if let Some(bucket) = exact.get(val) {
+                if let Some(q) = _query
+                    && let Some(val) = extract_query_param(q, name.as_ref())
+                        && let Some(bucket) = exact.get(val) {
                             result.extend(bucket.iter().cloned());
                         }
-                    }
-                }
                 result.extend(any.iter().cloned());
             }
         }
@@ -1353,11 +1350,10 @@ fn plan_matches(
     let m = &plan.matches;
 
     // Method.
-    if let Some(ref expected) = m.method {
-        if !expected.as_ref().eq_ignore_ascii_case(method) {
+    if let Some(ref expected) = m.method
+        && !expected.as_ref().eq_ignore_ascii_case(method) {
             return false;
         }
-    }
 
     // Headers.
     for hm in &m.headers {

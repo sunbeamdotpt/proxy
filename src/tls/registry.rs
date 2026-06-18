@@ -331,13 +331,12 @@ fn validate_cert_key_pair(
     }
 
     // Reject certificates that explicitly forbid TLS server authentication.
-    if let Ok(Some(eku)) = cert.extended_key_usage() {
-        if !eku.value.server_auth {
+    if let Ok(Some(eku)) = cert.extended_key_usage()
+        && !eku.value.server_auth {
             return Err(anyhow::anyhow!(
                 "certificate lacks TLS server authentication extended key usage"
             ));
         }
-    }
 
     let signer = rustls::crypto::aws_lc_rs::sign::any_supported_type(key)
         .map_err(|e| anyhow::anyhow!("unsupported private key: {e}"))?;
