@@ -378,18 +378,16 @@ fn run_serve(upgrade: bool) -> Result<()> {
     let k8s_available = runtime.block_on(async {
         match Client::try_default().await {
             Ok(c) => {
-                if !upgrade {
-                    if let Err(e) =
-                        sunbeam_proxy::cert::fetch_and_write(
-                            &c,
-                            &cfg.kubernetes.namespace,
-                            &cfg.kubernetes.tls_secret,
-                            &cfg.tls.cert_path,
-                            &cfg.tls.key_path,
-                        ).await
-                    {
-                        tracing::warn!(error = %e, "cert fetch from K8s failed; using existing files");
-                    }
+                if !upgrade
+                    && let Err(e) = sunbeam_proxy::cert::fetch_and_write(
+                        &c,
+                        &cfg.kubernetes.namespace,
+                        &cfg.kubernetes.tls_secret,
+                        &cfg.tls.cert_path,
+                        &cfg.tls.key_path,
+                    ).await
+                {
+                    tracing::warn!(error = %e, "cert fetch from K8s failed; using existing files");
                 }
                 true
             }

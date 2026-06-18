@@ -31,14 +31,14 @@ where
         let mut value: serde_json::Value =
             serde_json::from_str(&buf).map_err(|_| std::fmt::Error)?;
 
-        if let Some(obj) = value.as_object_mut() {
-            if let Some(target) = obj.get("target").and_then(|v| v.as_str()) {
-                let line = event.metadata().line().unwrap_or(0);
-                obj.insert(
-                    "target".to_string(),
-                    serde_json::Value::String(format!("{}:{}", target, line)),
-                );
-            }
+        if let Some(obj) = value.as_object_mut()
+            && let Some(target) = obj.get("target").and_then(|v| v.as_str())
+        {
+            let line = event.metadata().line().unwrap_or(0);
+            obj.insert(
+                "target".to_string(),
+                serde_json::Value::String(format!("{}:{}", target, line)),
+            );
         }
 
         write!(

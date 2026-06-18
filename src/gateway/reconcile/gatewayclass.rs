@@ -31,61 +31,52 @@ pub fn supported_features() -> Vec<String> {
         // Core
         "Gateway".to_string(),
         "HTTPRoute".to_string(),
+        "GRPCRoute".to_string(),
+        "TLSRoute".to_string(),
         "ReferenceGrant".to_string(),
+        "BackendTLSPolicy".to_string(),
         // Gateway extended
         "GatewayPort8080".to_string(),
+        "GatewayStaticAddresses".to_string(),
         "GatewayHTTPListenerIsolation".to_string(),
+        "GatewayHTTPSListenerDetectMisdirectedRequests".to_string(),
+        "GatewayInfrastructurePropagation".to_string(),
+        "GatewayAddressEmpty".to_string(),
+        "GatewayBackendClientCertificate".to_string(),
+        "GatewayFrontendClientCertificateValidation".to_string(),
+        "GatewayFrontendClientCertificateValidationInsecureFallback".to_string(),
         "ListenerSet".to_string(),
-        // L4 route support
-        "TCPRoute".to_string(),
-        "TLSRoute".to_string(),
-        "TLSRouteModeTerminate".to_string(),
-        "TLSRouteModeMixed".to_string(),
         // HTTPRoute extended
-        "HTTPRouteMethodMatching".to_string(),
+        "HTTPRouteDestinationPortMatching".to_string(),
+        "HTTPRouteBackendRequestHeaderModification".to_string(),
         "HTTPRouteQueryParamMatching".to_string(),
+        "HTTPRouteMethodMatching".to_string(),
+        "HTTPRouteResponseHeaderModification".to_string(),
         "HTTPRoutePortRedirect".to_string(),
         "HTTPRouteSchemeRedirect".to_string(),
         "HTTPRoutePathRedirect".to_string(),
-        "HTTPRoutePathRewrite".to_string(),
         "HTTPRouteHostRewrite".to_string(),
-        "HTTPRouteResponseHeaderModification".to_string(),
-        "HTTPRouteBackendRequestHeaderModification".to_string(),
-        "HTTPRouteCORS".to_string(),
+        "HTTPRoutePathRewrite".to_string(),
         "HTTPRouteRequestMirror".to_string(),
         "HTTPRouteRequestMultipleMirrors".to_string(),
         "HTTPRouteRequestPercentageMirror".to_string(),
         "HTTPRouteRequestTimeout".to_string(),
         "HTTPRouteBackendTimeout".to_string(),
+        "HTTPRouteParentRefPort".to_string(),
         "HTTPRouteBackendProtocolH2C".to_string(),
         "HTTPRouteBackendProtocolWebSocket".to_string(),
+        "HTTPRouteNamedRouteRule".to_string(),
+        "HTTPRouteCORS".to_string(),
         "HTTPRoute303RedirectStatusCode".to_string(),
         "HTTPRoute307RedirectStatusCode".to_string(),
         "HTTPRoute308RedirectStatusCode".to_string(),
-        "HTTPRouteParentRefPort".to_string(),
-        "HTTPRouteDestinationPortMatching".to_string(),
-        "HTTPRouteNamedRouteRule".to_string(),
-        "GatewayHTTPSListenerDetectMisdirectedRequests".to_string(),
-        "GatewayStaticAddresses".to_string(),
-        "GatewayAddressEmpty".to_string(),
-        "GatewayInfrastructurePropagation".to_string(),
-        "GatewayInfrastructure".to_string(),
-        "GatewayOptionalAddressValue".to_string(),
-        "GatewayFrontendClientCertificateValidation".to_string(),
-        "GatewayFrontendClientCertificateValidationInsecureFallback".to_string(),
-        "GatewayBackendClientCertificate".to_string(),
-        "BackendTLSPolicy".to_string(),
-        "BackendTLSPolicyConflictResolution".to_string(),
-        "BackendTLSPolicyObservedGenerationBump".to_string(),
-        "BackendTLSPolicySANValidation".to_string(),
-        "GRPCExactMethodMatching".to_string(),
-        "GRPCRouteHeaderMatching".to_string(),
-        "GRPCRouteListenerHostnameMatching".to_string(),
+        // GRPCRoute extended
         "GRPCRouteNamedRule".to_string(),
-        "GRPCRouteWeight".to_string(),
-        "HTTPRouteHTTPSListenerDetectMisdirectedRequests".to_string(),
-        "HTTPRouteListenerPortMatching".to_string(),
-        "HTTPRouteNamedRule".to_string(),
+        // TLSRoute extended
+        "TLSRouteModeTerminate".to_string(),
+        "TLSRouteModeMixed".to_string(),
+        // BackendTLSPolicy extended
+        "BackendTLSPolicySANValidation".to_string(),
     ]
 }
 
@@ -216,19 +207,28 @@ mod tests {
     #[test]
     fn supported_features_lists_core_capabilities() {
         let features = supported_features();
+        assert!(features.contains(&"Gateway".to_string()));
         assert!(features.contains(&"HTTPRoute".to_string()));
+        assert!(features.contains(&"GRPCRoute".to_string()));
+        assert!(features.contains(&"TLSRoute".to_string()));
+        assert!(features.contains(&"ReferenceGrant".to_string()));
+        assert!(features.contains(&"BackendTLSPolicy".to_string()));
         assert!(features.contains(&"HTTPRouteMethodMatching".to_string()));
         assert!(features.contains(&"HTTPRoutePathRedirect".to_string()));
         assert!(features.contains(&"HTTPRouteRequestTimeout".to_string()));
         assert!(features.contains(&"HTTPRouteBackendTimeout".to_string()));
         assert!(features.contains(&"HTTPRouteRequestMirror".to_string()));
         assert!(features.contains(&"HTTPRouteBackendProtocolH2C".to_string()));
-        assert!(features.contains(&"TCPRoute".to_string()));
-        assert!(!features.contains(&"UDPRoute".to_string()));
-        assert!(features.contains(&"TLSRoute".to_string()));
+        assert!(features.contains(&"HTTPRouteNamedRouteRule".to_string()));
+        assert!(features.contains(&"GRPCRouteNamedRule".to_string()));
         assert!(features.contains(&"TLSRouteModeTerminate".to_string()));
         assert!(features.contains(&"TLSRouteModeMixed".to_string()));
+        assert!(features.contains(&"GatewayInfrastructurePropagation".to_string()));
+        assert!(features.contains(&"GatewayAddressEmpty".to_string()));
+        assert!(features.contains(&"GatewayHTTPSListenerDetectMisdirectedRequests".to_string()));
+        assert!(features.contains(&"ListenerSet".to_string()));
         assert!(features.contains(&"BackendTLSPolicySANValidation".to_string()));
+        assert!(!features.contains(&"Mesh".to_string()));
         assert!(!features.is_empty());
     }
 
