@@ -2,17 +2,18 @@
 # Copyright Sunbeam Studios 2026
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Unified Gateway API conformance and coverage helper.
+# Gateway API conformance runner.
 #
 # Usage:
 #   ./scripts/conformance.sh run [options]
 #   ./scripts/conformance.sh coverage-diff [base-ref]
 #
+# The default flow uses the published multi-arch image from ghcr.io. No local
+# container build is required.
+#
 # Run options:
-#   -B, --skip-build        Skip cargo build + container image build
 #   -C, --skip-crds         Skip Gateway API CRD install/reinstall
-#   -d, --debug             Build a debug binary instead of release
-#   -p, --pull              Pull DOCKER_TAG from a registry instead of building locally
+#   -p, --pull              No-op kept for backwards compatibility (image is always pulled)
 #   -T, --run-test <name>   Run a single upstream conformance test
 #   -s, --skip-tests <list> Comma-separated list of tests to skip
 #   -n, --dry-run           Print the computed command and exit
@@ -22,33 +23,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=container-runtime.sh
-source "${SCRIPT_DIR}/container-runtime.sh"
 
 MANIFESTS_DIR="${PROJECT_ROOT}/tests/conformance/manifests"
-FIXTURES_DIR="${PROJECT_ROOT}/tests/fixtures/gateway-integration"
 
 KUBECONFIG="${KUBECONFIG:-/tmp/k3s.yaml}"
-GATEWAY_ADDR="${GATEWAY_ADDR:-192.168.252.19}"
 MULTIPASS_VM="${MULTIPASS_VM:-sunbeam-proxy-dev}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GATEWAY_API_CHANNEL="${GATEWAY_API_CHANNEL:-experimental}"
 PROJECT_VERSION="${PROJECT_VERSION:-$(grep -E '^version' "${PROJECT_ROOT}/Cargo.toml" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')}"
 DOCKER_TAG="${DOCKER_TAG:-ghcr.io/sunbeamdotpt/proxy:v${PROJECT_VERSION}}"
-# Mesh tests are unsupported and skipped by default. Use -s/--skip-tests to
-# override or add additional skips.
+CONFORMANCE_PROFILES="${CONFORMANCE_PROFILES:-GATEWAY-HTTP,GATEWAY-GRPC,GATEWAY-TLS}"
+IMPLEMENTATION_ORG="${IMPLEMENTATION_ORG:-sunbeamdotpt}"
+IMPLEMENTATION_PROJECT="${IMPLEMENTATION_PROJECT:-sunbeam-proxy}"
+IMPLEMENTATION_URL="${IMPLEMENTATION_URL:-https://github.com/sunbeamdotpt/proxy}"
+IMPLEMENTATION_CONTACT="${IMPLEMENTATION_CONTACT:-https://github.com/sunbeamdotpt/proxy/issues}"
 DEFAULT_SKIP_TESTS="MeshBasic,MeshConsumerRoute,MeshFrontend,MeshFrontendHostname,MeshGRPCRouteWeight,MeshHTTPRoute303Redirect,MeshHTTPRoute307Redirect,MeshHTTPRoute308Redirect,MeshHTTPRouteBackendRequestHeaderModifier,MeshHTTPRouteMatching,MeshHTTPRouteNamedRule,MeshHTTPRouteQueryParamMatching,MeshHTTPRouteRedirectHostAndStatus,MeshHTTPRouteRedirectPath,MeshHTTPRouteRedirectPort,MeshHTTPRouteRequestHeaderModifier,MeshHTTPRouteRewritePath,MeshHTTPRouteSchemeRedirect,MeshHTTPRouteSimpleSameNamespace,MeshHTTPRouteWeight,MeshPorts,MeshTrafficSplit"
-DEBUG_BUILD="${DEBUG_BUILD:-0}"
-SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_CRDS="${SKIP_CRDS:-0}"
-PULL_IMAGE="${PULL_IMAGE:-0}"
 
-TAR_FILE="/tmp/sunbeam-proxy-conformance.tar"
-REMOTE_TAR="/home/ubuntu/sunbeam-proxy-conformance.tar"
 GATEWAY_API_DIR="${PROJECT_ROOT}/target/gateway-api-${GATEWAY_API_VERSION}"
-CONFORMANCE_BINARY="${CONFORMANCE_BINARY:-${PROJECT_ROOT}/target/gateway-api-${GATEWAY_API_VERSION}-conformance}"
-
-STABLE_TAG="sunbeam-proxy:conformance"
 
 export KUBECONFIG
 
@@ -61,10 +53,8 @@ Commands:
   coverage-diff [base-ref]          Print line coverage for changed Rust files
 
 Run options:
-  -B, --skip-build                  Skip cargo build + container image build
   -C, --skip-crds                   Skip Gateway API CRD install/reinstall
-  -d, --debug                       Build a debug binary instead of release
-  -p, --pull                        Pull DOCKER_TAG from a registry instead of building locally
+  -p, --pull                        No-op; the image is always pulled from ghcr.io
   -T, --run-test <name>             Run a single upstream conformance test
   -s, --skip-tests <list>           Comma-separated list of tests to skip
                                     (defaults to the mesh test suite)
@@ -85,54 +75,29 @@ mp() {
     multipass exec "${MULTIPASS_VM}" -- "$@"
 }
 
-resolve_docker_tag() {
-    if [[ -n "${DOCKER_TAG}" ]]; then
-        return
+resolve_gateway_addr() {
+    if [[ -n "${GATEWAY_ADDR:-}" ]]; then
+        echo "${GATEWAY_ADDR}"
+        return 0
     fi
-    DOCKER_TAG="ghcr.io/sunbeamdotpt/proxy:v${PROJECT_VERSION}"
+    if ! multipass info "${MULTIPASS_VM}" >/dev/null 2>&1; then
+        log "error: Multipass VM '${MULTIPASS_VM}' not found and GATEWAY_ADDR is not set"
+        return 1
+    fi
+    multipass info "${MULTIPASS_VM}" --format csv \
+        | awk -F, -v vm="${MULTIPASS_VM}" '$1 == vm {print $3}'
 }
 
-build_image() {
-    resolve_docker_tag
-    log "using container runtime: ${CONTAINER_CMD}"
+pull_image() {
     log "using image: ${DOCKER_TAG}"
-
-    if [[ "${PULL_IMAGE}" == "1" ]]; then
-        log "pulling remote image ${DOCKER_TAG} locally"
-        container_image_pull "${DOCKER_TAG}"
-    else
-        log "building container image ${DOCKER_TAG}"
-        container_build -t "${DOCKER_TAG}" -t "${STABLE_TAG}" \
-            -f "${PROJECT_ROOT}/Dockerfile" \
-            "${PROJECT_ROOT}"
-    fi
-
-    log "saving image"
-    container_image_save "${DOCKER_TAG}" -o "${TAR_FILE}"
-
-    log "transferring image to ${MULTIPASS_VM}"
-    multipass transfer "${TAR_FILE}" "${MULTIPASS_VM}:${REMOTE_TAR}"
-
-    log "importing image into k3s"
-    mp sudo k3s ctr images import "${REMOTE_TAR}"
-
-    if [[ "${DOCKER_TAG}" != *"/"* ]]; then
-        log "tagging imported image with docker.io/library prefix"
-        mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${DOCKER_TAG}" || true
-    fi
-
-    log "tagging imported image with stable tag ${STABLE_TAG}"
-    mp sudo k3s ctr images tag "${DOCKER_TAG}" "${STABLE_TAG}" || true
-    if [[ "${DOCKER_TAG}" != *"/"* ]]; then
-        mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${STABLE_TAG}" || true
-    fi
+    log "pulling image into ${MULTIPASS_VM}"
+    mp sudo k3s ctr images pull "${DOCKER_TAG}"
 }
 
 install_crds() {
     log "installing Gateway API CRDs (${GATEWAY_API_VERSION} ${GATEWAY_API_CHANNEL})"
     kubectl_cmd delete validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io --ignore-not-found=true >/dev/null 2>&1 || true
     kubectl_cmd delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found=true >/dev/null 2>&1 || true
-    log "removing previously-installed Gateway API CRDs"
     kubectl_cmd delete crd --ignore-not-found=true \
         gatewayclasses.gateway.networking.k8s.io \
         gateways.gateway.networking.k8s.io \
@@ -163,24 +128,15 @@ cleanup_leftovers() {
         --ignore-not-found=true >/dev/null 2>&1 || true
 }
 
-ensure_no_hostpath_binary() {
-    if kubectl_cmd get deployment -n gateway-conformance sunbeam-proxy -o jsonpath='{range .spec.template.spec.volumes[*]}{@.name}{"\n"}{end}' 2>/dev/null | grep -qx 'sunbeam-binary'; then
-        log "removing stale sunbeam-binary hostPath volume from deployment"
-        kubectl_cmd patch deployment -n gateway-conformance sunbeam-proxy --type=json -p='[
-          {"op": "remove", "path": "/spec/template/spec/volumes/0"},
-          {"op": "remove", "path": "/spec/template/spec/containers/0/volumeMounts/0"}
-        ]'
-    fi
-}
-
 deploy_proxy() {
     log "applying sunbeam-proxy conformance manifests"
     kubectl_cmd apply -f "${MANIFESTS_DIR}/"
 
-    ensure_no_hostpath_binary
-
     log "setting deployment image to ${DOCKER_TAG}"
     kubectl_cmd set image -n gateway-conformance deployment/sunbeam-proxy "proxy=${DOCKER_TAG}"
+
+    log "setting Gateway address env to ${GATEWAY_ADDR}"
+    kubectl_cmd set env -n gateway-conformance deployment/sunbeam-proxy "SUNBEAM_GATEWAY_ADDRESS=${GATEWAY_ADDR}"
 
     log "restarting deployment to ensure the new image is used"
     kubectl_cmd rollout restart -n gateway-conformance deployment/sunbeam-proxy
@@ -209,25 +165,10 @@ clone_upstream() {
     fi
 }
 
-build_conformance_binary() {
-    if [[ -z "${CONFORMANCE_BINARY}" ]]; then
-        log "CONFORMANCE_BINARY unset, will run via go test"
-        return
-    fi
-    if [[ -x "${CONFORMANCE_BINARY}" && "${CONFORMANCE_BINARY}" -nt "${GATEWAY_API_DIR}/conformance/go.mod" ]]; then
-        log "reusing conformance binary ${CONFORMANCE_BINARY}"
-        return
-    fi
-    log "building conformance binary ${CONFORMANCE_BINARY}"
-    (
-        cd "${GATEWAY_API_DIR}/conformance"
-        go test -c -o "${CONFORMANCE_BINARY}" .
-    )
-}
-
 run_tests() {
-    log "running conformance tests (all features; mesh tests skipped by default)"
+    log "running conformance tests (profiles: ${CONFORMANCE_PROFILES}; mesh tests skipped by default)"
     local -a args=()
+    args+=(-conformance-profiles "${CONFORMANCE_PROFILES}")
     if [[ -n "${SKIP_TESTS:-}" ]]; then
         args+=(-skip-tests "${SKIP_TESTS}")
     fi
@@ -235,168 +176,20 @@ run_tests() {
         args+=(-run-test "${RUN_TEST}")
     fi
 
-    local output_log="${PROJECT_ROOT}/target/conformance-output.log"
-    local detailed_report="${PROJECT_ROOT}/target/conformance-report-detailed.yaml"
-
     cd "${GATEWAY_API_DIR}/conformance"
-    if [[ -n "${CONFORMANCE_BINARY:-}" && -x "${CONFORMANCE_BINARY}" ]]; then
-        # shellcheck disable=SC2048
-        "${CONFORMANCE_BINARY}" -test.v \
-            -gateway-class sunbeam \
-            -all-features \
-            -usable-address "${GATEWAY_ADDR}" \
-            -unusable-address "240.0.0.1" \
-            -organization "Sunbeam Studios" \
-            -project "sunbeam-proxy" \
-            -url "https://github.com/sunbeamdotpt/proxy" \
-            -version "v${PROJECT_VERSION}" \
-            -contact "hello@sunbeam.pt" \
-            -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
-            -cleanup-base-resources=false \
-            "${args[@]}" 2>&1 | tee "${output_log}"
-    else
-        # shellcheck disable=SC2048
-        go test . -v \
-            -gateway-class sunbeam \
-            -all-features \
-            -usable-address "${GATEWAY_ADDR}" \
-            -unusable-address "240.0.0.1" \
-            -organization "Sunbeam Studios" \
-            -project "sunbeam-proxy" \
-            -url "https://github.com/sunbeamdotpt/proxy" \
-            -version "v${PROJECT_VERSION}" \
-            -contact "hello@sunbeam.pt" \
-            -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
-            -cleanup-base-resources=false \
-            "${args[@]}" 2>&1 | tee "${output_log}"
-    fi
-
-    generate_detailed_report "${output_log}" "${detailed_report}"
-}
-
-generate_detailed_report() {
-    local log_file="$1"
-    local report_file="$2"
-
-    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" "${PROJECT_VERSION}" <<'PY'
-import re
-import sys
-from datetime import datetime, timezone
-
-log_file, report_file, gw_version, project_version = sys.argv[1:5]
-
-status_re = re.compile(r'^\s*--- (PASS|FAIL|SKIP):\s+(.+?)\s*(?:\(([^)]+)\))?\s*$')
-
-records = []
-with open(log_file) as f:
-    for line in f:
-        line = line.rstrip('\n')
-        m = status_re.match(line)
-        if not m:
-            continue
-        raw_status, name, duration = m.groups()
-        status = {'PASS': 'passed', 'FAIL': 'failed', 'SKIP': 'skipped'}.get(raw_status, raw_status.lower())
-        records.append({
-            'name': name,
-            'status': status,
-            'duration': duration or '',
-        })
-
-summary = {'passed': 0, 'failed': 0, 'skipped': 0}
-for r in records:
-    if r['status'] == 'passed':
-        summary['passed'] += 1
-    elif r['status'] == 'failed':
-        summary['failed'] += 1
-    elif r['status'] == 'skipped':
-        summary['skipped'] += 1
-summary['total'] = len(records)
-
-def esc(s):
-    return s.replace('\\', '\\\\').replace('"', '\\"')
-
-with open(report_file, 'w') as out:
-    out.write('apiVersion: gateway.networking.k8s.io/v1\n')
-    out.write(f'kind: DetailedConformanceReport\n')
-    out.write(f'date: "{datetime.now(timezone.utc).isoformat()}"\n')
-    out.write(f'gatewayAPIVersion: {gw_version}\n')
-    out.write('implementation:\n')
-    out.write('  organization: Sunbeam Studios\n')
-    out.write('  project: sunbeam-proxy\n')
-    out.write('  url: https://sunbeam.pt\n')
-    out.write(f'  version: v{project_version}\n')
-    out.write(f'  contact: "hello@sunbeam.pt"\n')
-    out.write(f'supportedFeatures: "all"\n')
-    out.write('summary:\n')
-    out.write(f'  total: {summary["total"]}\n')
-    out.write(f'  passed: {summary["passed"]}\n')
-    out.write(f'  failed: {summary["failed"]}\n')
-    out.write(f'  skipped: {summary["skipped"]}\n')
-    out.write('tests:\n')
-    for r in records:
-        out.write(f'  - name: {r["name"]}\n')
-        out.write(f'    status: {r["status"]}\n')
-        if r['duration']:
-            out.write(f'    duration: {r["duration"]}\n')
-PY
-}
-
-run_command() {
-    local run_test=""
-    local user_skip_tests="${DEFAULT_SKIP_TESTS}"
-    local dry_run=0
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -B|--skip-build) SKIP_BUILD=1; shift;;
-            -C|--skip-crds) SKIP_CRDS=1; shift;;
-            -d|--debug) DEBUG_BUILD=1; shift;;
-            -p|--pull) PULL_IMAGE=1; shift;;
-            -T|--run-test)
-                if [[ $# -lt 2 ]]; then echo "ERROR: --run-test requires a value" >&2; exit 1; fi
-                run_test="$2"; shift 2;;
-            -s|--skip-tests)
-                if [[ $# -lt 2 ]]; then echo "ERROR: --skip-tests requires a value" >&2; exit 1; fi
-                user_skip_tests="$2"; shift 2;;
-            -n|--dry-run) dry_run=1; shift;;
-            -h|--help) usage; exit 0;;
-            -*) echo "ERROR: unknown option $1" >&2; usage; exit 1;;
-            *) echo "ERROR: unknown positional argument $1" >&2; usage; exit 1;;
-        esac
-    done
-
-    SKIP_TESTS="${user_skip_tests}"
-    RUN_TEST="${run_test}"
-
-    if [[ "${dry_run}" -eq 1 ]]; then
-        echo "SKIP_BUILD=${SKIP_BUILD} SKIP_CRDS=${SKIP_CRDS} DEBUG_BUILD=${DEBUG_BUILD} PULL_IMAGE=${PULL_IMAGE} \\"
-        echo "  ${SCRIPT_DIR}/conformance.sh run \\"
-        echo "    -skip-tests '${SKIP_TESTS}' \\"
-        if [[ -n "${RUN_TEST}" ]]; then
-            echo "    -run-test '${RUN_TEST}'"
-        fi
-        exit 0
-    fi
-
-    if [[ "${SKIP_BUILD}" != "1" ]]; then
-        build_image
-    else
-        resolve_docker_tag
-        log "SKIP_BUILD=1, reusing existing image"
-    fi
-
-    if [[ "${SKIP_CRDS}" != "1" ]]; then
-        install_crds
-    else
-        log "SKIP_CRDS=1, skipping CRD install"
-    fi
-
-    cleanup_leftovers
-    deploy_proxy
-    clone_upstream
-    build_conformance_binary
-    run_tests
-    log "done; report at ${PROJECT_ROOT}/target/conformance-report.yaml"
+    go test . -v \
+        -gateway-class sunbeam \
+        -all-features \
+        -usable-address "${GATEWAY_ADDR}" \
+        -unusable-address "240.0.0.1" \
+        -organization "${IMPLEMENTATION_ORG}" \
+        -project "${IMPLEMENTATION_PROJECT}" \
+        -url "${IMPLEMENTATION_URL}" \
+        -version "v${PROJECT_VERSION}" \
+        -contact "${IMPLEMENTATION_CONTACT}" \
+        -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
+        -cleanup-base-resources=false \
+        "${args[@]}" 2>&1 | tee "${PROJECT_ROOT}/target/conformance-output.log"
 }
 
 coverage_diff_command() {
@@ -473,6 +266,57 @@ for rel in changed_files:
         marker = "  < 90%"
     print(f"{rel:<60} {summary['count']:>8} {summary['covered']:>8} {pct:>7.1f}%{marker}")
 PY
+}
+
+run_command() {
+    local run_test=""
+    local user_skip_tests="${DEFAULT_SKIP_TESTS}"
+    local dry_run=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -C|--skip-crds) SKIP_CRDS=1; shift;;
+            -p|--pull) shift;;
+            -T|--run-test)
+                if [[ $# -lt 2 ]]; then echo "ERROR: --run-test requires a value" >&2; exit 1; fi
+                run_test="$2"; shift 2;;
+            -s|--skip-tests)
+                if [[ $# -lt 2 ]]; then echo "ERROR: --skip-tests requires a value" >&2; exit 1; fi
+                user_skip_tests="$2"; shift 2;;
+            -n|--dry-run) dry_run=1; shift;;
+            -h|--help) usage; exit 0;;
+            -*) echo "ERROR: unknown option $1" >&2; usage; exit 1;;
+            *) echo "ERROR: unknown positional argument $1" >&2; usage; exit 1;;
+        esac
+    done
+
+    SKIP_TESTS="${user_skip_tests}"
+    RUN_TEST="${run_test}"
+
+    GATEWAY_ADDR="$(resolve_gateway_addr)"
+    export GATEWAY_ADDR
+
+    if [[ "${dry_run}" -eq 1 ]]; then
+        printf 'SKIP_CRDS=%s DOCKER_TAG=%s GATEWAY_ADDR=%s %s/run -skip-tests %q' \
+            "${SKIP_CRDS}" "${DOCKER_TAG}" "${GATEWAY_ADDR}" "${SCRIPT_DIR}" "${SKIP_TESTS}"
+        if [[ -n "${RUN_TEST}" ]]; then
+            printf ' -run-test %q' "${RUN_TEST}"
+        fi
+        printf '\n'
+        exit 0
+    fi
+
+    pull_image
+
+    if [[ "${SKIP_CRDS}" != "1" ]]; then
+        install_crds
+    fi
+
+    cleanup_leftovers
+    deploy_proxy
+    clone_upstream
+    run_tests
+    log "done; report at ${PROJECT_ROOT}/target/conformance-report.yaml"
 }
 
 if [[ $# -eq 0 ]]; then

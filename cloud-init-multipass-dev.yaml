@@ -30,7 +30,7 @@ users:
     # Dev VM: sudo is restricted to a command whitelist rather than a blanket
     # NOPASSWD rule. Production nodes should require a password or use SSH-agent
     # forwarding for privileged operations.
-    sudo: "NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
+    sudo: "ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
     ssh_import_id:
       - gh:siennathesane
 
@@ -40,7 +40,7 @@ users:
     # Dev VM: sudo is restricted to a command whitelist rather than a blanket
     # NOPASSWD rule. Production nodes should require a password or use SSH-agent
     # forwarding for privileged operations.
-    sudo: "NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
+    sudo: "ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
     ssh_authorized_keys:
       - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEIFS3ieCOXbUOCV5FTFBN2Vl2AxzeWCork5fhanimwL Lonni Faber <lonni@r3t.io>"
 
@@ -50,7 +50,7 @@ users:
     # Dev VM: sudo is restricted to a command whitelist rather than a blanket
     # NOPASSWD rule. Production nodes should require a password or use SSH-agent
     # forwarding for privileged operations.
-    sudo: "NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
+    sudo: "ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl, /usr/local/bin/kubectl, /usr/local/bin/helm, /sbin/ufw, /usr/bin/sysctl, /usr/bin/mount"
     ssh_authorized_keys:
       - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICOt4ZBM8uAg7SkVj4h6iw4dsSPRaC4bg+cm48M4hVmr tmckenzie@hekla"
 
@@ -208,8 +208,11 @@ write_files:
           configuration:
             apiVersion: pod-security.admission.config.k8s.io/v1
             kind: PodSecurityConfiguration
+            # Dev / conformance VM: default to privileged so upstream test pods
+            # (which do not carry a full restricted securityContext) can run
+            # without per-namespace labeling. Production nodes keep restricted.
             defaults:
-              enforce: "restricted"
+              enforce: "privileged"
               enforce-version: "latest"
               audit: "restricted"
               audit-version: "latest"

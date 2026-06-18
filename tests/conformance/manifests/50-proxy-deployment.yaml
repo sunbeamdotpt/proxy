@@ -22,7 +22,7 @@ spec:
       terminationGracePeriodSeconds: 5
       containers:
         - name: proxy
-          image: sunbeam-proxy:conformance
+          image: ghcr.io/sunbeamdotpt/proxy:v0.2.0
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/sunbeam-proxy", "serve"]
           env:

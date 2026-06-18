@@ -2,7 +2,7 @@
 
 ## Critical Rules
 
-**Read before you write.** Read every file you intend to modify. Do not guess at code structure, function signatures, or types. This is a ~500-line Rust codebase — read the actual source.
+**Read before you write.** Read every file you intend to modify. Do not guess at code structure, function signatures, or types.
 
 **Minimal changes only.** Do exactly what is asked. Do not:
 - Add features, abstractions, or "improvements" beyond the request
@@ -58,6 +58,16 @@ src/gateway/         — Kubernetes Gateway API v1.5 reconciler + translator
                        (reconcile/, model/, translate/, api/, listeners/, dataplane/)
 src/route_manager.rs — Lifecycle manager: merges sources, drives the compiler,
                        versions compiled tables, and atomically hot-swaps the proxy table
+src/l4/              — L4 listener manager and Gateway API TCP/TLS passthrough routing
+src/tls/             — TLS context, certificate loading, and BackendTLSPolicy verification
+src/cluster/         — Gossip-based cluster membership and leader election (iroh-gossip)
+src/ddos/            — KNN-based DDoS detection (model, detector, training, replay)
+src/scanner/         — Logistic regression scanner detection (model, detector, features, training, allowlist, watcher)
+src/ensemble/        — MLP ensemble inference and certified radius runtime
+src/training/        — Model trainers (burn) and weight export
+src/autotune/        — Bayesian hyperparameter optimization
+src/dataset/         — Dataset preparation and heuristic labeling
+src/rate_limit/      — Leaky bucket rate limiter (limiter, key extraction)
 src/acme.rs          — Ingress watcher: maintains AcmeRoutes (path → solver backend)
 src/watcher.rs       — Secret/ConfigMap watcher: cert write + graceful upgrade trigger
 src/cert.rs          — fetch_and_write / write_from_secret: K8s Secret → cert files on disk
@@ -66,12 +76,11 @@ src/ssh.rs           — TCP proxy: tokio TcpListener + copy_bidirectional
 src/metrics.rs       — Prometheus counters/histograms/gauge, metrics HTTP server, /health endpoint
 src/static_files.rs  — Static file serving with try_files chain and SPA fallback
 src/cache.rs         — pingora-cache MemCache backend and Cache-Control TTL parser
-src/ddos/            — KNN-based DDoS detection (model, detector, training, replay)
-src/scanner/         — Logistic regression scanner detection (model, detector, features, training, allowlist, watcher)
-src/rate_limit/      — Leaky bucket rate limiter (limiter, key extraction)
 src/dual_stack.rs    — Dual-stack (IPv4+IPv6) TCP listener
+src/upgrade.rs       — Pingora graceful binary upgrade helpers
 tests/e2e.rs         — end-to-end test: real SunbeamProxy over plain HTTP with echo backend
 tests/proptest.rs    — property-based tests for static files, rewrites, config, metrics, etc.
+tests/conformance/   — Gateway API v1.5 conformance manifests and helper data
 ```
 
 ## Architecture Invariants — Do Not Break These
@@ -118,11 +127,11 @@ cargo clippy -- -D warnings
 # Format check
 cargo fmt -- --check
 
-# Run Gateway API conformance tests for the current feature set
-./scripts/conformance.sh run --target-set
+# Run the Gateway API conformance suite (pulls the published ghcr.io image)
+./scripts/conformance.sh run
 
-# Run the full Gateway API conformance suite
-KUBECONFIG=/tmp/k3s.yaml ./scripts/conformance.sh run
+# Run a single upstream conformance test
+./scripts/conformance.sh run -T TestConformance/<name>
 
 # Show unit-test line coverage for changed Rust files
 ./scripts/conformance.sh coverage-diff
@@ -130,12 +139,11 @@ KUBECONFIG=/tmp/k3s.yaml ./scripts/conformance.sh run
 
 ## Container Runtime
 
-Image builds use the native macOS `container` CLI on Darwin and fall back to Docker on Linux:
+Production image builds use the native macOS `container` CLI on Darwin and fall back to Docker on Linux:
 
 - `scripts/container-runtime.sh` selects the runtime (`container` on macOS, `docker` elsewhere; override with `CONTAINER_RUNTIME=...`).
 - `scripts/container-package.sh` replaces `docker buildx build --push` for the `package` target.
-- `scripts/conformance.sh` builds and saves the conformance image, runs the suite,
-  and prints coverage diffs for changed files.
+- `scripts/conformance.sh` pulls the published `ghcr.io/sunbeamdotpt/proxy` image, deploys it, runs the upstream Gateway API conformance suite, and can print coverage diffs for changed files.
 
 **Always run `cargo check` after making changes.** If it doesn't compile, fix it before proceeding. Do not submit code that doesn't compile.
 

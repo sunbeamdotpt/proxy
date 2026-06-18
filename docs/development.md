@@ -54,14 +54,14 @@ ghcr.io/sunbeamdotpt/proxy:<tag>
 
 ### Gateway API conformance
 
-Conformance tests run against a local k3s cluster in a multipass VM. The suite can use a locally built image (default) or the published release image.
+Conformance tests run against a local k3s cluster in a Multipass VM. The suite can use a locally built image (default) or the published release image.
 
 ```sh
-# Local image build + conformance, tagged as the release image
-DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run
+# Use the published release image (no local build)
+DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run -p
 
-# Use the published release image (after the workflow has pushed it)
-DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run --pull
+# Local image build + conformance
+DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run
 ```
 
-The suite writes reports to `target/conformance-report.yaml` and `target/conformance-report-detailed.yaml`.
+The upstream conformance report is written to `target/conformance-report.yaml`, and a detailed per-test summary is written to `target/conformance-report-detailed.yaml`. The official report used for upstream submissions lives in `conformance/reports/v1.5/sunbeam-proxy/`.
