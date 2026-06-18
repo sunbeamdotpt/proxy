@@ -9,7 +9,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sunbeam_proxy::ensemble::crown::{certified_radius, ibp_mlp_pre_sigmoid};
-use sunbeam_proxy::ensemble::gen::ddos_weights;
+use sunbeam_proxy::ensemble::weights::ddos_weights;
 
 /// Representative DDoS input: 14 normalized features mid-range with some
 /// spread to avoid sitting exactly on the decision boundary.

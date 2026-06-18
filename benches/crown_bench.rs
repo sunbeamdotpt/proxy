@@ -13,7 +13,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sunbeam_proxy::ensemble::crown::{certified_radius, ibp_mlp_pre_sigmoid};
-use sunbeam_proxy::ensemble::gen::scanner_weights;
+use sunbeam_proxy::ensemble::weights::scanner_weights;
 
 /// Representative production input: 12 normalized features for the scanner.
 const SCANNER_INPUT: [f32; 12] = [0.8, 0.3, 1.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 1.0];

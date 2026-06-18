@@ -3,7 +3,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sunbeam_proxy::config::RouteConfig;
-use sunbeam_proxy::ensemble::gen::scanner_weights;
+use sunbeam_proxy::ensemble::weights::scanner_weights;
 use sunbeam_proxy::ensemble::mlp::mlp_predict_32;
 use sunbeam_proxy::ensemble::scanner::scanner_ensemble_predict;
 use sunbeam_proxy::ensemble::tree::tree_predict;
