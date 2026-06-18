@@ -12,6 +12,7 @@
 #   -B, --skip-build        Skip cargo build + container image build
 #   -C, --skip-crds         Skip Gateway API CRD install/reinstall
 #   -d, --debug             Build a debug binary instead of release
+#   -p, --pull              Pull DOCKER_TAG from a registry instead of building locally
 #   -T, --run-test <name>   Run a single upstream conformance test
 #   -s, --skip-tests <list> Comma-separated list of tests to skip
 #   -n, --dry-run           Print the computed command and exit
@@ -30,15 +31,17 @@ FIXTURES_DIR="${PROJECT_ROOT}/tests/fixtures/gateway-integration"
 KUBECONFIG="${KUBECONFIG:-/tmp/k3s.yaml}"
 GATEWAY_ADDR="${GATEWAY_ADDR:-192.168.252.19}"
 MULTIPASS_VM="${MULTIPASS_VM:-sunbeam-proxy-dev}"
-DOCKER_TAG="${DOCKER_TAG:-}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GATEWAY_API_CHANNEL="${GATEWAY_API_CHANNEL:-experimental}"
+PROJECT_VERSION="${PROJECT_VERSION:-$(grep -E '^version' "${PROJECT_ROOT}/Cargo.toml" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')}"
+DOCKER_TAG="${DOCKER_TAG:-ghcr.io/sunbeamdotpt/proxy:v${PROJECT_VERSION}}"
 # Mesh tests are unsupported and skipped by default. Use -s/--skip-tests to
 # override or add additional skips.
 DEFAULT_SKIP_TESTS="MeshBasic,MeshConsumerRoute,MeshFrontend,MeshFrontendHostname,MeshGRPCRouteWeight,MeshHTTPRoute303Redirect,MeshHTTPRoute307Redirect,MeshHTTPRoute308Redirect,MeshHTTPRouteBackendRequestHeaderModifier,MeshHTTPRouteMatching,MeshHTTPRouteNamedRule,MeshHTTPRouteQueryParamMatching,MeshHTTPRouteRedirectHostAndStatus,MeshHTTPRouteRedirectPath,MeshHTTPRouteRedirectPort,MeshHTTPRouteRequestHeaderModifier,MeshHTTPRouteRewritePath,MeshHTTPRouteSchemeRedirect,MeshHTTPRouteSimpleSameNamespace,MeshHTTPRouteWeight,MeshPorts,MeshTrafficSplit"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_CRDS="${SKIP_CRDS:-0}"
+PULL_IMAGE="${PULL_IMAGE:-0}"
 
 TAR_FILE="/tmp/sunbeam-proxy-conformance.tar"
 REMOTE_TAR="/home/ubuntu/sunbeam-proxy-conformance.tar"
@@ -61,6 +64,7 @@ Run options:
   -B, --skip-build                  Skip cargo build + container image build
   -C, --skip-crds                   Skip Gateway API CRD install/reinstall
   -d, --debug                       Build a debug binary instead of release
+  -p, --pull                        Pull DOCKER_TAG from a registry instead of building locally
   -T, --run-test <name>             Run a single upstream conformance test
   -s, --skip-tests <list>           Comma-separated list of tests to skip
                                     (defaults to the mesh test suite)
@@ -85,38 +89,23 @@ resolve_docker_tag() {
     if [[ -n "${DOCKER_TAG}" ]]; then
         return
     fi
-    if [[ "${SKIP_BUILD}" == "1" ]]; then
-        DOCKER_TAG="${STABLE_TAG}"
-        return
-    fi
-    local commit_short
-    commit_short="$(cd "${PROJECT_ROOT}" && git rev-parse --short HEAD)"
-    if [[ -n "$(cd "${PROJECT_ROOT}" && git status --porcelain)" ]]; then
-        DOCKER_TAG="sunbeam-proxy:conformance-${commit_short}-dirty-$(date +%s)"
-    else
-        DOCKER_TAG="sunbeam-proxy:conformance-${commit_short}"
-    fi
+    DOCKER_TAG="ghcr.io/sunbeamdotpt/proxy:v${PROJECT_VERSION}"
 }
 
 build_image() {
     resolve_docker_tag
     log "using container runtime: ${CONTAINER_CMD}"
-    if [[ "${DEBUG_BUILD}" == "1" ]]; then
-        log "building debug binary"
-        cargo build --locked --target aarch64-unknown-linux-musl
-        cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/debug/sunbeam-proxy" \
-            "${FIXTURES_DIR}/sunbeam-proxy"
-    else
-        log "building release binary"
-        cargo build --locked --release --target aarch64-unknown-linux-musl
-        cp "${PROJECT_ROOT}/target/aarch64-unknown-linux-musl/release/sunbeam-proxy" \
-            "${FIXTURES_DIR}/sunbeam-proxy"
-    fi
+    log "using image: ${DOCKER_TAG}"
 
-    log "building container image ${DOCKER_TAG}"
-    container_build -t "${DOCKER_TAG}" -t "${STABLE_TAG}" \
-        -f "${FIXTURES_DIR}/Dockerfile" \
-        "${FIXTURES_DIR}"
+    if [[ "${PULL_IMAGE}" == "1" ]]; then
+        log "pulling remote image ${DOCKER_TAG} locally"
+        container_image_pull "${DOCKER_TAG}"
+    else
+        log "building container image ${DOCKER_TAG}"
+        container_build -t "${DOCKER_TAG}" -t "${STABLE_TAG}" \
+            -f "${PROJECT_ROOT}/Dockerfile" \
+            "${PROJECT_ROOT}"
+    fi
 
     log "saving image"
     container_image_save "${DOCKER_TAG}" -o "${TAR_FILE}"
@@ -127,12 +116,16 @@ build_image() {
     log "importing image into k3s"
     mp sudo k3s ctr images import "${REMOTE_TAR}"
 
-    log "tagging imported image with docker.io/library prefix"
-    mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${DOCKER_TAG}" || true
+    if [[ "${DOCKER_TAG}" != *"/"* ]]; then
+        log "tagging imported image with docker.io/library prefix"
+        mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${DOCKER_TAG}" || true
+    fi
 
     log "tagging imported image with stable tag ${STABLE_TAG}"
     mp sudo k3s ctr images tag "${DOCKER_TAG}" "${STABLE_TAG}" || true
-    mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${STABLE_TAG}" || true
+    if [[ "${DOCKER_TAG}" != *"/"* ]]; then
+        mp sudo k3s ctr images tag "${DOCKER_TAG}" "docker.io/library/${STABLE_TAG}" || true
+    fi
 }
 
 install_crds() {
@@ -256,7 +249,7 @@ run_tests() {
             -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
             -url "https://sunbeam.pt" \
-            -version "v0.1.0" \
+            -version "v${PROJECT_VERSION}" \
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
@@ -271,7 +264,7 @@ run_tests() {
             -organization "Sunbeam Studios" \
             -project "sunbeam-proxy" \
             -url "https://sunbeam.pt" \
-            -version "v0.1.0" \
+            -version "v${PROJECT_VERSION}" \
             -contact "hello@sunbeam.pt" \
             -report-output "${PROJECT_ROOT}/target/conformance-report.yaml" \
             -cleanup-base-resources=false \
@@ -285,12 +278,12 @@ generate_detailed_report() {
     local log_file="$1"
     local report_file="$2"
 
-    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" <<'PY'
+    python3 - "${log_file}" "${report_file}" "${GATEWAY_API_VERSION}" "${PROJECT_VERSION}" <<'PY'
 import re
 import sys
 from datetime import datetime, timezone
 
-log_file, report_file, gw_version = sys.argv[1:4]
+log_file, report_file, gw_version, project_version = sys.argv[1:5]
 
 status_re = re.compile(r'^\s*--- (PASS|FAIL|SKIP):\s+(.+?)\s*(?:\(([^)]+)\))?\s*$')
 
@@ -331,7 +324,7 @@ with open(report_file, 'w') as out:
     out.write('  organization: Sunbeam Studios\n')
     out.write('  project: sunbeam-proxy\n')
     out.write('  url: https://sunbeam.pt\n')
-    out.write('  version: v0.1.0\n')
+    out.write(f'  version: v{project_version}\n')
     out.write(f'  contact: "hello@sunbeam.pt"\n')
     out.write(f'supportedFeatures: "all"\n')
     out.write('summary:\n')
@@ -358,6 +351,7 @@ run_command() {
             -B|--skip-build) SKIP_BUILD=1; shift;;
             -C|--skip-crds) SKIP_CRDS=1; shift;;
             -d|--debug) DEBUG_BUILD=1; shift;;
+            -p|--pull) PULL_IMAGE=1; shift;;
             -T|--run-test)
                 if [[ $# -lt 2 ]]; then echo "ERROR: --run-test requires a value" >&2; exit 1; fi
                 run_test="$2"; shift 2;;
@@ -375,7 +369,7 @@ run_command() {
     RUN_TEST="${run_test}"
 
     if [[ "${dry_run}" -eq 1 ]]; then
-        echo "SKIP_BUILD=${SKIP_BUILD} SKIP_CRDS=${SKIP_CRDS} DEBUG_BUILD=${DEBUG_BUILD} \\"
+        echo "SKIP_BUILD=${SKIP_BUILD} SKIP_CRDS=${SKIP_CRDS} DEBUG_BUILD=${DEBUG_BUILD} PULL_IMAGE=${PULL_IMAGE} \\"
         echo "  ${SCRIPT_DIR}/conformance.sh run \\"
         echo "    -skip-tests '${SKIP_TESTS}' \\"
         if [[ -n "${RUN_TEST}" ]]; then

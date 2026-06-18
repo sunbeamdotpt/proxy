@@ -47,4 +47,12 @@ container_image_push() {
     fi
 }
 
+container_image_pull() {
+    if [[ "${CONTAINER_CMD}" == "container" ]]; then
+        container image pull "$@"
+    else
+        docker pull "$@"
+    fi
+}
+
 export CONTAINER_CMD
