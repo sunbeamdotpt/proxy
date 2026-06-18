@@ -1,43 +1,48 @@
 # Copyright Sunbeam Studios 2026
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Build from the WORKSPACE ROOT, not from platform/proxy. The proxy crate
-# inherits deps from the root [workspace.dependencies] table and pulls
-# pingora via `[patch.crates-io] pingora-proxy = { path = "forks/pingora/…" }`
-# in the root Cargo.toml, so a standalone build context can't resolve its
-# manifest.
+# Build from the project root. The proxy crate inherits deps from the root
+# [workspace.dependencies] table and uses path-patched crates, so a standalone
+# build context cannot resolve its manifest.
 #
-#   docker buildx build -f platform/proxy/Dockerfile -t sunbeam-proxy:latest .
+#   container build -f Dockerfile -t sunbeam-proxy:latest .
 #
-# Context pruning lives in `platform/proxy/Dockerfile.dockerignore` (BuildKit
-# sidecar dockerignore). Keep that file narrow — anything a workspace path
-# dep needs must NOT be excluded.
+# Context pruning lives in `.dockerignore`. Keep it narrow — anything a
+# workspace path dependency needs must NOT be excluded.
 
 # ── Stage 1: build ──────────────────────────────────────────────
-FROM rust:1.86-slim AS builder
+FROM rust:1.96-slim-bookworm AS builder
 
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      musl-tools curl ca-certificates cmake pkg-config && \
+      gcc g++ curl ca-certificates cmake pkg-config make && \
     rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in \
-      "amd64") RUST_TARGET="x86_64-unknown-linux-musl" ;; \
-      "arm64") RUST_TARGET="aarch64-unknown-linux-musl" ;; \
+      "amd64") TRIPLE="x86_64-linux-gnu" ; echo "x86_64-unknown-linux-gnu" > /rust-target ;; \
+      "arm64") TRIPLE="aarch64-linux-gnu" ; echo "aarch64-unknown-linux-gnu" > /rust-target ;; \
       *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    echo "${RUST_TARGET}" > /rust-target && \
-    rustup target add "${RUST_TARGET}" && \
+    rustup target add "$(cat /rust-target)" && \
+    ln -sf "$(which gcc)" "/usr/local/bin/${TRIPLE}-gcc" && \
+    ln -sf "$(which g++)" "/usr/local/bin/${TRIPLE}-g++" && \
     mkdir -p /root/.cargo && \
-    printf '[target.%s]\nlinker = "musl-gcc"\n' "${RUST_TARGET}" \
-      >> /root/.cargo/config.toml
+    printf '[target.%s]\nlinker = "gcc"\n' "$(cat /rust-target)" >> /root/.cargo/config.toml && \
+    mkdir -p /runtime-libs && \
+    cp "/usr/lib/${TRIPLE}/libgcc_s.so.1" /runtime-libs/libgcc_s.so.1 || \
+    cp "/lib/${TRIPLE}/libgcc_s.so.1" /runtime-libs/libgcc_s.so.1
 
-ENV RUSTFLAGS="-C target-feature=+crt-static"
+ENV CC_x86_64_unknown_linux_gnu="gcc" \
+    CXX_x86_64_unknown_linux_gnu="g++" \
+    CC_aarch64_unknown_linux_gnu="gcc" \
+    CXX_aarch64_unknown_linux_gnu="g++" \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="gcc" \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="gcc"
 WORKDIR /build
 COPY . .
 
-ARG CARGO_BUILD_JOBS
+ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN cargo build \
@@ -63,11 +68,12 @@ RUN case "${TARGETARCH}" in \
     chmod +x /tini
 
 # ── Stage 2: distroless final ────────────────────────────────────
-# Pinned digest for gcr.io/distroless/static-debian12:nonroot (multi-arch index).
-FROM gcr.io/distroless/static-debian12@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+# Pinned digest for gcr.io/distroless/cc-debian12:nonroot (multi-arch index).
+FROM gcr.io/distroless/cc-debian12@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985
 
 COPY --from=builder --chown=65532:65532 /tini                       /tini
 COPY --from=builder --chown=65532:65532 /sunbeam-proxy              /usr/local/bin/sunbeam-proxy
+COPY --from=builder --chown=65532:65532 /runtime-libs/libgcc_s.so.1 /lib/libgcc_s.so.1
 
 USER 65532:65532
 
