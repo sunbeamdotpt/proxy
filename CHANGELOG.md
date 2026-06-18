@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - 2026-06-16
+## [0.2.0] - 2026-06-18
 
 ### Features
 - feat(telemetry): append source line number to log target
@@ -159,6 +159,8 @@
 - refactor(gateway): phase 4 extract shared header-filter translation
 - refactor(gateway): phase 3 L4 backend-ref consolidation
 - refactor(gateway): phase 2 shared backend-ref resolution
+- refactor(gateway): consolidate supported feature list for Gateway API conformance
+- refactor(main,telemetry): use let-chains for nested option checks
 - refactor(gateway): phase 1 shared primitives — centralize condition conversion and status patching
 - refactor(proxy): remove monolithic proxy.rs after splitting into phase modules
 - refactor(gateway): prune unused gRPC/TCP/TLS route and dataplane stubs
@@ -180,11 +182,17 @@
 - test: add property-based tests for new proxy features
 
 ### Build & CI
+- build(conformance): default conformance runner to published ghcr image and auto-detect gateway address
+- build(conformance): use privileged PodSecurity labels in conformance namespace and VM cloud-init
+- build(conformance): commit published ghcr image in conformance deployment manifest
 - build(conformance): run all non-mesh Gateway API tests by default
 - build(scripts): unify conformance runner and coverage helper
 - build(lean4): pin v4.29.0 toolchain and require TorchLean
 
 ### Documentation
+- docs(conformance): add Gateway API v1.5.1 conformance report and reproduction README
+- docs(agents): update conformance commands and current project state
+- docs(development): document simplified conformance runner flow
 - docs(agents): update architecture and module documentation
 - docs(proxy): add gateway API controller design document
 - docs(platform/proxy): rustdocs for config, detection, rate limiting, and training

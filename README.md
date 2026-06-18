@@ -1,3 +1,4 @@
+<!--
 ---
 title: Sunbeam Proxy
 description: A cloud-native reverse proxy with adaptive ML threat detection.
@@ -9,6 +10,7 @@ tags:
 status: published
 visibility: public
 ---
+-->
 
 # Sunbeam Proxy
 
