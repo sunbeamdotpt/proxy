@@ -10,7 +10,7 @@
 //! monotone non-decreasing in feature `i`. With the tree no longer wired
 //! into production verdicts, that's the only side condition that matters.
 
-use super::gen::scanner_weights::{TREE_NODES, W1, W2};
+use super::weights::scanner_weights::{TREE_NODES, W1, W2};
 
 /// Number of input features for the scanner.
 pub const NUM_FEATURES: usize = 12;

@@ -8,7 +8,7 @@
 //! `cookie_ratio`, where bots typically *lack* cookies) are out of scope —
 //! they need a negative-direction argument or a sign-flip in the extractor.
 
-use super::gen::ddos_weights::{TREE_NODES, W1, W2};
+use super::weights::ddos_weights::{TREE_NODES, W1, W2};
 
 /// Number of input features for the DDoS ensemble.
 pub const NUM_FEATURES: usize = 14;

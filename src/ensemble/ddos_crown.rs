@@ -16,7 +16,7 @@
 //! at `inputDim = 14`.
 
 use super::crown::{certified_radius, ibp_mlp_pre_sigmoid, PreSigmoidInterval};
-use super::gen::ddos_weights;
+use super::weights::ddos_weights;
 
 /// Pre-sigmoid output interval for the DDoS MLP over the L∞ ε-box around the
 /// given normalized input.
