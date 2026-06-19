@@ -8,7 +8,7 @@ use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
 use sunbeam_proxy::tls::{
-    merge_cert_store, CertSource, CertStore, DiskCertSource, GatewayCertSource, TlsRegistry,
+    CertSource, CertStore, DiskCertSource, GatewayCertSource, TlsRegistry, merge_cert_store,
 };
 use sunbeam_proxy::{acme, config, ir};
 
@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kube::Client;
-use pingora::server::{configuration::Opt, Server};
+use pingora::server::{Server, configuration::Opt};
 use pingora_core::apps::HttpServerOptions;
 use pingora_proxy::http_proxy_service;
 use std::sync::RwLock;
@@ -36,6 +36,17 @@ enum Commands {
         /// Pingora --upgrade flag for zero-downtime reload
         #[arg(long)]
         upgrade: bool,
+
+        /// Path to a Caddyfile to load as a route source. Takes precedence over
+        /// TOML [[routes]] but is overridden by Gateway API resources.
+        #[arg(long, env = "SUNBEAM_CADDYFILE")]
+        caddyfile: Option<String>,
+
+        /// Directory containing Caddyfiles (`Caddyfile` or `*.caddyfile`) to
+        /// load as route sources. Merged alphabetically; later files win for
+        /// the same hostname.
+        #[arg(long, env = "SUNBEAM_CADDYFILE_DIR")]
+        caddyfile_dir: Option<String>,
     },
     /// Replay audit logs through ensemble models (scanner + DDoS)
     Replay {
@@ -165,8 +176,16 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Commands::Serve { upgrade: false }) {
-        Commands::Serve { upgrade } => run_serve(upgrade),
+    match cli.command.unwrap_or(Commands::Serve {
+        upgrade: false,
+        caddyfile: None,
+        caddyfile_dir: None,
+    }) {
+        Commands::Serve {
+            upgrade,
+            caddyfile,
+            caddyfile_dir,
+        } => run_serve(upgrade, caddyfile.as_deref(), caddyfile_dir.as_deref()),
         Commands::Replay {
             input,
             window_secs,
@@ -271,7 +290,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_serve(upgrade: bool) -> Result<()> {
+fn run_serve(upgrade: bool, caddyfile: Option<&str>, caddyfile_dir: Option<&str>) -> Result<()> {
     // Install the aws-lc-rs crypto provider for rustls before any TLS init.
     // Required because rustls 0.23 no longer auto-selects a provider at compile time.
     rustls::crypto::aws_lc_rs::default_provider()
@@ -281,6 +300,13 @@ fn run_serve(upgrade: bool) -> Result<()> {
     let config_path =
         std::env::var("SUNBEAM_CONFIG").unwrap_or_else(|_| "/etc/pingora/config.toml".to_string());
     let cfg = config::Config::load(&config_path)?;
+
+    if !cfg.routes.is_empty() {
+        return Err(anyhow::anyhow!(
+            "config.toml [[routes]] has been removed; migrate routes to a Caddyfile \
+             (see --caddyfile / SUNBEAM_CADDYFILE)"
+        ));
+    }
 
     // 1. Init telemetry (JSON logs + optional OTEL traces).
     telemetry::init(&cfg.telemetry.otlp_endpoint);
@@ -303,7 +329,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 "DDoS ensemble detector enabled"
             );
             if ddos_cfg.observe_only {
-                tracing::warn!("DDoS detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked");
+                tracing::warn!(
+                    "DDoS detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked"
+                );
             }
             Some(detector)
         } else {
@@ -319,9 +347,11 @@ fn run_serve(upgrade: bool) -> Result<()> {
             let limiter = Arc::new(rate_limit::limiter::RateLimiter::new(rl_cfg));
             let evict_limiter = limiter.clone();
             let interval = rl_cfg.eviction_interval_secs;
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(interval));
-                evict_limiter.evict_stale();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+                    evict_limiter.evict_stale();
+                }
             });
             tracing::info!(
                 auth_burst = rl_cfg.authenticated.burst,
@@ -361,7 +391,9 @@ fn run_serve(upgrade: bool) -> Result<()> {
                 "scanner ensemble detector enabled"
             );
             if scanner_cfg.observe_only {
-                tracing::warn!("scanner detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked");
+                tracing::warn!(
+                    "scanner detector in OBSERVE-ONLY mode — decisions are logged but traffic is never blocked"
+                );
             }
             (Some(handle), bot_allowlist)
         } else {
@@ -445,6 +477,25 @@ fn run_serve(upgrade: bool) -> Result<()> {
 
     let (route_manager, routes_tx) = sunbeam_proxy::route_manager::RouteManager::spawn(10);
     sunbeam_proxy::l4::current::set(route_manager.l4_config());
+
+    // Source precedence: Gateway API > Caddyfile > legacy TOML.
+    route_manager.set_priority("gateway-api", 100);
+    route_manager.set_priority("caddyfile", 50);
+    route_manager.set_priority("toml", 0);
+
+    // Load Caddyfile route source(s) if provided.
+    let caddyfile_table = match (caddyfile, caddyfile_dir) {
+        (Some(path), _) => Some(sunbeam_proxy::caddyfile::parse_file(path.as_ref())),
+        (None, Some(dir)) => Some(sunbeam_proxy::caddyfile::parse_dir(dir.as_ref())),
+        (None, None) => None,
+    };
+    if let Some(table) = caddyfile_table {
+        let table = table.map_err(|e| anyhow::anyhow!("failed to load Caddyfile: {e}"))?;
+        route_manager
+            .apply("caddyfile", table)
+            .map_err(|e| anyhow::anyhow!("failed to compile Caddyfile routes: {e}"))?;
+    }
+
     let mut startup_ir = ir::from_config::from_route_configs(&cfg.routes);
     if !cfg.listen.https.is_empty() {
         let https_listener_id: Arc<str> = Arc::from("https");
