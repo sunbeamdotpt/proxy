@@ -1,7 +1,7 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 #[derive(Debug, Clone)]
 /// Paramtype.

@@ -52,10 +52,10 @@ rustc-hash  = "2"
 arc-swap    = "1"
 
 # Reverse DNS for bot IP verification
-dns-lookup  = "2"
+dns-lookup  = "3"
 
 # Prometheus metrics
-prometheus  = "0.13"
+prometheus  = "0.14"
 
 # Request IDs
 uuid = "1"
@@ -68,13 +68,13 @@ regex = "1"
 mimalloc = "*"
 
 # Auth subrequests
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 
 # Rustls crypto provider — must be installed before any TLS init.
 # Uses aws-lc-rs (required by pingora-rustls).
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2"
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # K8s watcher for cert/config hot-reload
 kube        = { version = "3", default-features = false, features = ["derive", "runtime", "rustls-tls"] }
@@ -91,8 +91,8 @@ iroh        = "1.0"
 iroh-gossip = "0.101"
 blake3      = "1"
 hex         = "0.4"
-# rand 0.9 is used by iroh 1.0 APIs.
-rand        = "0.9"
+# rand 0.10 is used by iroh 1.0 APIs.
+rand        = "0.10"
 tempfile    = "3"
 
 # Dataset ingestion (CIC-IDS2017 CSV parsing)
@@ -107,10 +107,10 @@ tokio-rustls = "0.26"
 training = ["burn"]
 
 [dev-dependencies]
-criterion     = { version = "0.5", features = ["html_reports"] }
+criterion     = { version = "0.8", features = ["html_reports"] }
 proptest      = "1"
 tempfile      = "3"
-reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest       = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 http-body-util = "0.1"
 
 [[test]]

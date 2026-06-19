@@ -217,7 +217,7 @@ fn verify_dns(ip: IpAddr, suffixes: &[String]) -> bool {
 
     // Step 3: forward DNS — the hostname must resolve back to our IP.
     match dns_lookup::lookup_host(&hostname) {
-        Ok(addrs) => addrs.contains(&ip),
+        Ok(mut addrs) => addrs.any(|a| a == ip),
         Err(_) => false,
     }
 }
