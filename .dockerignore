@@ -26,6 +26,11 @@ lean4/
 docs/
 
 # Non-Rust top-level trees and files that the workspace never references.
+.agents/
+.github/
+benches/
+build/
+conformance/
 forks/
 owned-forks/
 research/
@@ -33,6 +38,7 @@ engines/
 infra/
 k8s/
 scripts/
+tests/
 *.zip
 session_*.zip
 sunbeam.yaml
