@@ -26,6 +26,10 @@ lean4/
 docs/
 
 # Non-Rust top-level trees and files that the workspace never references.
+.agents/
+.github/
+build/
+conformance/
 forks/
 owned-forks/
 research/
