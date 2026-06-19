@@ -5,7 +5,7 @@
 //!
 //! Combines production logs, external datasets (CSIC, OWASP ModSec), and
 //! synthetic data (CIC-IDS2017 timing profiles + wordlists) into a single
-//! `DatasetManifest` serialized as bincode.
+//! `DatasetManifest` serialized as rkyv.
 
 use crate::dataset::sample::{DataSource, DatasetManifest, DatasetStats, TrainingSample};
 use crate::ddos::audit_log::{AuditFields, AuditLog};
@@ -27,7 +27,7 @@ pub struct PrepareDatasetArgs {
     pub owasp: Option<String>,
     /// Path to wordlist directory (optional, enhances synthetic scanner).
     pub wordlists: Option<String>,
-    /// Output path for the bincode dataset file.
+    /// Output path for the rkyv dataset file.
     pub output: String,
     /// RNG seed for synthetic generation.
     pub seed: u64,

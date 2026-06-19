@@ -6,13 +6,24 @@ use crate::ddos::audit_log::AuditLog;
 use crate::ddos::features::{method_to_u8, FeatureVector, LogIpState, NormParams, NUM_FEATURES};
 use anyhow::{bail, Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 
 /// Legacy KNN training types — kept for the `train-ddos` CLI command
-/// which produces bincode model files for offline evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// which produces rkyv model files for offline evaluation.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub enum TrafficLabel {
     /// Normal.
     Normal,
@@ -20,7 +31,7 @@ pub enum TrafficLabel {
     Attack,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, SerdeSerialize, SerdeDeserialize)]
 /// Serializedmodel.
 pub struct SerializedModel {
     /// Points.
@@ -35,7 +46,7 @@ pub struct SerializedModel {
     pub threshold: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(SerdeDeserialize)]
 /// Heuristicthresholds.
 pub struct HeuristicThresholds {
     /// Requests/second above which an IP is labeled attack
@@ -447,8 +458,9 @@ pub fn run(args: TrainArgs) -> Result<()> {
         result.normal_count
     );
 
-    let encoded = bincode::serialize(&result.model).context("serializing model")?;
-    std::fs::write(&args.output, &encoded)
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&result.model)
+        .context("serializing model")?;
+    std::fs::write(&args.output, encoded.as_slice())
         .with_context(|| format!("writing model to {}", args.output))?;
 
     eprintln!(

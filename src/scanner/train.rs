@@ -6,10 +6,18 @@ use crate::scanner::features::{
     self, fx_hash_bytes, ScannerFeatureVector, ScannerNormParams, NUM_SCANNER_FEATURES,
     NUM_SCANNER_WEIGHTS,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Legacy linear scanner model — kept for the `train-scanner` CLI command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub struct ScannerModel {
     /// Weights.
     pub weights: [f64; NUM_SCANNER_WEIGHTS],
@@ -23,8 +31,9 @@ pub struct ScannerModel {
 
 impl ScannerModel {
     pub fn save(&self, path: &Path) -> Result<()> {
-        let data = bincode::serialize(self).context("serializing scanner model")?;
-        std::fs::write(path, data)
+        let data = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .context("serializing scanner model")?;
+        std::fs::write(path, data.as_slice())
             .with_context(|| format!("writing scanner model to {}", path.display()))?;
         Ok(())
     }
@@ -1515,7 +1524,8 @@ mod tests {
         assert!(path.exists());
 
         let data = std::fs::read(&path).unwrap();
-        let loaded: ScannerModel = bincode::deserialize(&data).unwrap();
+        let loaded: ScannerModel =
+            rkyv::from_bytes::<ScannerModel, rkyv::rancor::Error>(&data).unwrap();
         assert_eq!(loaded.threshold, 0.5);
         assert_eq!(loaded.fragments, vec![".env".to_string()]);
     }

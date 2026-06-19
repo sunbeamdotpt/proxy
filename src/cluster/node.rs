@@ -43,7 +43,7 @@ fn load_or_generate_key(path: &Path) -> Result<SecretKey> {
             .map_err(|_| anyhow::anyhow!("invalid key file length"))?;
         Ok(SecretKey::from_bytes(&bytes))
     } else {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -139,7 +139,7 @@ pub async fn run_cluster(
     let secret_key = try_init!(load_or_generate_key(Path::new(key_path)));
 
     // 2. Create iroh endpoint.
-    let builder = Endpoint::builder()
+    let builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .secret_key(secret_key)
         .relay_mode(RelayMode::Disabled)
         .alpns(vec![ALPN.to_vec()])
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_key_loads_existing_key() {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(&key.to_bytes()).unwrap();
         let loaded = load_or_generate_key(tmp.path()).unwrap();
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn parse_bootstrap_peer_valid() {
-        let secret = SecretKey::generate(&mut rand::rng());
+        let secret = SecretKey::generate();
         let id = secret.public();
         let entry = format!("{}@127.0.0.1:11204", id);
         let (parsed_id, addr) = parse_bootstrap_peer(&entry).unwrap();
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn parse_bootstrap_peer_invalid_addr() {
-        let secret = SecretKey::generate(&mut rand::rng());
+        let secret = SecretKey::generate();
         let id = secret.public();
         assert!(parse_bootstrap_peer(&format!("{}@bad-addr", id)).is_none());
     }
@@ -729,7 +729,7 @@ mod tests {
         let event = Event::Received(Message {
             content: Bytes::from(report.encode().unwrap()),
             scope: DeliveryScope::Neighbors,
-            delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+            delivered_from: SecretKey::generate().public(),
         });
 
         let cluster_bw = Arc::new(ClusterBandwidthState::new(30));
@@ -776,12 +776,12 @@ mod tests {
             Ok::<Event, std::convert::Infallible>(Event::Received(Message {
                 content: Bytes::from(announce.encode().unwrap()),
                 scope: DeliveryScope::Neighbors,
-                delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+                delivered_from: SecretKey::generate().public(),
             })),
             Ok::<Event, std::convert::Infallible>(Event::Received(Message {
                 content: Bytes::from(chunk.encode().unwrap()),
                 scope: DeliveryScope::Neighbors,
-                delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+                delivered_from: SecretKey::generate().public(),
             })),
         ]);
 
@@ -806,7 +806,7 @@ mod tests {
         let event = Event::Received(Message {
             content: Bytes::from(msg.encode().unwrap()),
             scope: DeliveryScope::Neighbors,
-            delivered_from: SecretKey::generate(&mut rand::rng()).public(),
+            delivered_from: SecretKey::generate().public(),
         });
 
         handle_stub_events(

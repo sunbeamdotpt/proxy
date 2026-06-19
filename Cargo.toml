@@ -20,102 +20,97 @@ pingora-http   = "0.8"
 pingora-cache  = { version = "0.8", features = ["rustls"] }
 
 # HTTP header constants
-http = { workspace = true }
+http = "1.4"
 
 # Config
-serde      = { workspace = true }
-# toml: workspace pins 0.9; proxy needs 0.8 (pingora config API surface).
-# Keep inline until workspace bumps to 0.9 and proxy is validated against it.
+serde      = "1"
+# proxy needs 0.8 (pingora config API surface).
 toml       = "0.8"
 
 # Async
-tokio      = { workspace = true }
-futures    = { workspace = true }
-async-trait = { workspace = true }
-pin-project-lite = { workspace = true }
+tokio      = "1"
+futures    = "0.3"
+async-trait = "0.1"
+pin-project-lite = "0.2"
 
 # Structured logging + OTEL
-tracing              = { workspace = true }
-tracing-subscriber   = { workspace = true, features = ["env-filter", "json"] }
-tracing-opentelemetry = { workspace = true }
-opentelemetry         = { workspace = true }
-opentelemetry_sdk     = { workspace = true }
-opentelemetry-otlp    = { workspace = true }
-serde_json = { workspace = true }
-anyhow     = { workspace = true }
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.27"
+opentelemetry         = "0.27"
+opentelemetry_sdk     = "0.27"
+opentelemetry-otlp    = "0.27"
+serde_json = "1"
+anyhow     = "1"
 
 # CLI + serialization
-clap        = { workspace = true }
-bincode     = { workspace = true }
-rustc-hash  = { workspace = true }
+clap        = "4"
+rkyv        = "0.8"
+rustc-hash  = "2"
 
-# Lock-free Arc swapping for hot-reload (scanner model)
-arc-swap    = { workspace = true }
+# Lock-free Arc swapping
+arc-swap    = "1"
 
 # Reverse DNS for bot IP verification
-dns-lookup  = { workspace = true }
+dns-lookup  = "2"
 
 # Prometheus metrics
-prometheus  = { workspace = true }
+prometheus  = "0.13"
 
 # Request IDs
-uuid = { workspace = true }
+uuid = "1"
 
 # Static file serving and body rewriting
-bytes = { workspace = true }
-regex = { workspace = true }
+bytes = "1"
+regex = "1"
 
 # Allocator
 mimalloc = "*"
 
 # Auth subrequests
-reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 # Rustls crypto provider — must be installed before any TLS init.
-# Uses aws-lc-rs (required by pingora-rustls); workspace pins "ring" variant
-# for non-proxy crates. Keep inline to avoid feature unification forcing
-# aws-lc-rs onto all workspace members.
+# Uses aws-lc-rs (required by pingora-rustls).
 rustls      = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2"
 x509-parser = "0.16"
 
 # K8s watcher for cert/config hot-reload
-kube        = { workspace = true, default-features = false, features = ["derive", "runtime", "rustls-tls"] }
+kube        = { version = "3", default-features = false, features = ["derive", "runtime", "rustls-tls"] }
 kube-derive = "3.1"
-k8s-openapi = { workspace = true, features = ["schemars", "v1_32"] }
-chrono      = { workspace = true }
-libc        = { workspace = true }
+k8s-openapi = { version = "0.27", features = ["schemars", "v1_32"] }
+chrono      = "0.4"
+libc        = "0.2"
 schemars    = "1"
-serde_yaml  = { workspace = true }
+serde_yaml  = "0.9"
 tower       = { version = "0.5", default-features = false }
 
 # Cluster gossip (iroh QUIC + HyParView/PlumTree)
-# Aligned from 0.96 → 0.95 to match workspace pin.
-iroh        = { workspace = true }
-iroh-gossip = { workspace = true }
+iroh        = "1.0"
+iroh-gossip = "0.101"
 blake3      = "1"
-hex         = { workspace = true }
-# rand 0.9 (proxy) vs 0.8 (workspace/estafeta-server) — different majors;
-# cargo can multi-version these but workspace = true would force 0.8. Keep inline.
+hex         = "0.4"
+# rand 0.9 is used by iroh 1.0 APIs.
 rand        = "0.9"
-tempfile    = { workspace = true }
+tempfile    = "3"
 
 # Dataset ingestion (CIC-IDS2017 CSV parsing)
-csv         = { workspace = true }
+csv         = "1"
 
 # burn-rs ML framework (training only, behind `training` feature)
-burn = { workspace = true, optional = true, features = ["wgpu", "autodiff", "train", "std"] }
+burn = { version = "0.20", optional = true, features = ["wgpu", "autodiff", "train", "std"] }
 gateway-api = { version = "0.21", features = ["experimental"] }
-tokio-rustls = { workspace = true }
+tokio-rustls = "0.26"
 
 [features]
 training = ["burn"]
 
 [dev-dependencies]
 criterion     = { version = "0.5", features = ["html_reports"] }
-proptest      = { workspace = true }
-tempfile      = { workspace = true }
-reqwest       = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+proptest      = "1"
+tempfile      = "3"
+reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 http-body-util = "0.1"
 
 [[test]]
@@ -143,46 +138,3 @@ opt-level = 3
 lto       = true
 codegen-units = 1
 strip     = true
-
-[workspace]
-members = ["."]
-
-[workspace.dependencies]
-http = "1.4"
-serde = "1"
-tokio = "1"
-futures = "0.3"
-async-trait = "0.1"
-pin-project-lite = "0.2"
-tracing = "0.1"
-tracing-subscriber = "0.3"
-tracing-opentelemetry = "0.27"
-opentelemetry = "0.27"
-opentelemetry_sdk = "0.27"
-opentelemetry-otlp = "0.27"
-serde_json = "1"
-anyhow = "1"
-clap = "4"
-bincode = "1"
-rustc-hash = "2"
-arc-swap = "1"
-dns-lookup = "2"
-prometheus = "0.13"
-uuid = "1"
-bytes = "1"
-regex = "1"
-reqwest = { version = "0.12", default-features = false }
-kube = { version = "3", default-features = false }
-k8s-openapi = "0.27"
-chrono = "0.4"
-libc = "0.2"
-hex = "0.4"
-tempfile = "3"
-csv = "1"
-burn = "0.20"
-proptest = "1"
-serde_yaml = "0.9"
-tokio-rustls = "0.26"
-tower = "0.5"
-iroh = "0.96"
-iroh-gossip = "0.96"

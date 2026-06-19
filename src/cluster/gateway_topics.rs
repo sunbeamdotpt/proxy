@@ -3,13 +3,11 @@
 
 //! Gossip topic schemas for the Gateway API feature.
 //!
-//! Messages are serialized with bincode before broadcast.
-
-use serde::{Deserialize, Serialize};
+//! Messages are serialized with rkyv before broadcast.
 
 /// Periodic digest broadcast by the leader so followers can
 /// cross-validate their local reconciled view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct GatewayStateDigest {
     /// Topic schema version (bumped on breaking changes).
     pub topic_version: u32,
@@ -26,7 +24,7 @@ pub struct GatewayStateDigest {
 /// Ad-hoc notification sent when a Gateway API CRD changes.
 /// Followers use this to trigger early cache invalidation instead of
 /// waiting for the next poll cycle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct GatewayResourceNotify {
     /// Topic schema version (bumped on breaking changes).
     pub topic_version: u32,
@@ -55,8 +53,9 @@ mod tests {
             node_id: [0xcd; 32],
             timestamp: 1_700_000_000,
         };
-        let bytes = bincode::serialize(&original).unwrap();
-        let decoded: GatewayStateDigest = bincode::deserialize(&bytes).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
+        let decoded: GatewayStateDigest =
+            rkyv::from_bytes::<GatewayStateDigest, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original.topic_version, decoded.topic_version);
         assert_eq!(original.state_hash, decoded.state_hash);
         assert_eq!(original.term, decoded.term);
@@ -74,8 +73,9 @@ mod tests {
             generation: 7,
             timestamp: 1_700_000_000,
         };
-        let bytes = bincode::serialize(&original).unwrap();
-        let decoded: GatewayResourceNotify = bincode::deserialize(&bytes).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
+        let decoded: GatewayResourceNotify =
+            rkyv::from_bytes::<GatewayResourceNotify, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original.kind, decoded.kind);
         assert_eq!(original.namespace, decoded.namespace);
         assert_eq!(original.name, decoded.name);

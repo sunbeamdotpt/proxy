@@ -1,13 +1,11 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use serde::{Deserialize, Serialize};
-
 use crate::cluster::gateway_topics::{GatewayResourceNotify, GatewayStateDigest};
 
 /// Envelope for all cluster gossip messages.
-/// Serialized with bincode before broadcast.
-#[derive(Debug, Serialize, Deserialize)]
+/// Serialized with rkyv before broadcast.
+#[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ClusterMessage {
     /// Version.
     pub version: u8,
@@ -17,7 +15,7 @@ pub struct ClusterMessage {
     pub payload: Payload,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 /// Payload.
 pub enum Payload {
     /// Bandwidthreport.
@@ -53,12 +51,12 @@ pub enum Payload {
 }
 
 impl ClusterMessage {
-    pub fn encode(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    pub fn encode(&self) -> Result<Vec<u8>, rkyv::rancor::Error> {
+        Ok(rkyv::to_bytes::<rkyv::rancor::Error>(self)?.to_vec())
     }
 
-    pub fn decode(data: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(data)
+    pub fn decode(data: &[u8]) -> Result<Self, rkyv::rancor::Error> {
+        rkyv::from_bytes::<ClusterMessage, rkyv::rancor::Error>(data)
     }
 }
 

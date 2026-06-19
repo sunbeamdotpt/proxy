@@ -1,14 +1,26 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
 /// Provenance of a training sample.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
+#[rkyv(derive(Hash, PartialEq, Eq))]
 pub enum DataSource {
     /// Productionlogs.
     ProductionLogs,
@@ -36,7 +48,15 @@ impl std::fmt::Display for DataSource {
 
 /// A single labeled training sample with its feature vector, label, provenance,
 /// and weight (used during training to down-weight synthetic/external data).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub struct TrainingSample {
     /// Features.
     pub features: Vec<f32>,
@@ -49,7 +69,15 @@ pub struct TrainingSample {
 }
 
 /// Aggregate statistics about a prepared dataset.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub struct DatasetStats {
     /// Total samples.
     pub total_samples: usize,
@@ -66,7 +94,15 @@ pub struct DatasetStats {
 }
 
 /// The full serializable dataset: scanner samples, DDoS samples, and stats.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub struct DatasetManifest {
     /// Scanner samples.
     pub scanner_samples: Vec<TrainingSample>,
@@ -76,20 +112,22 @@ pub struct DatasetManifest {
     pub stats: DatasetStats,
 }
 
-/// Serialize a `DatasetManifest` to a bincode file.
+/// Serialize a `DatasetManifest` to an rkyv file.
 pub fn save_dataset(manifest: &DatasetManifest, path: &Path) -> Result<()> {
-    let encoded = bincode::serialize(manifest).context("serializing dataset manifest")?;
-    std::fs::write(path, &encoded)
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(manifest)
+        .context("serializing dataset manifest")?;
+    std::fs::write(path, encoded.as_slice())
         .with_context(|| format!("writing dataset to {}", path.display()))?;
     Ok(())
 }
 
-/// Deserialize a `DatasetManifest` from a bincode file.
+/// Deserialize a `DatasetManifest` from an rkyv file.
 pub fn load_dataset(path: &Path) -> Result<DatasetManifest> {
     let data =
         std::fs::read(path).with_context(|| format!("reading dataset from {}", path.display()))?;
     let manifest: DatasetManifest =
-        bincode::deserialize(&data).context("deserializing dataset manifest")?;
+        rkyv::from_bytes::<DatasetManifest, rkyv::rancor::Error>(&data)
+            .context("deserializing dataset manifest")?;
     Ok(manifest)
 }
 
@@ -112,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bincode_roundtrip() {
+    fn test_rkyv_roundtrip() {
         let manifest = DatasetManifest {
             scanner_samples: vec![
                 make_sample(vec![0.1, 0.2, 0.3], 0.0, DataSource::ProductionLogs, 1.0),
@@ -138,8 +176,9 @@ mod tests {
             },
         };
 
-        let encoded = bincode::serialize(&manifest).unwrap();
-        let decoded: DatasetManifest = bincode::deserialize(&encoded).unwrap();
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&manifest).unwrap();
+        let decoded: DatasetManifest =
+            rkyv::from_bytes::<DatasetManifest, rkyv::rancor::Error>(&encoded).unwrap();
 
         assert_eq!(decoded.scanner_samples.len(), 2);
         assert_eq!(decoded.ddos_samples.len(), 2);

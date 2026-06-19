@@ -775,7 +775,7 @@ mod tests {
         let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let secret = iroh::SecretKey::generate();
         let cluster_handle = Arc::new(ClusterHandle {
             bandwidth: Arc::new(BandwidthTracker::new()),
             cluster_bandwidth: Arc::new(ClusterBandwidthState::new(30)),

@@ -33,9 +33,9 @@ pub struct ClusterHandle {
     pub limiter: Arc<BandwidthLimiter>,
     /// Endpoint id.
     pub endpoint_id: iroh::PublicKey,
-    /// Sender for `gateway_state` gossip broadcasts (bytes are bincode-encoded [`ClusterMessage`]).
+    /// Sender for `gateway_state` gossip broadcasts (bytes are rkyv-encoded [`ClusterMessage`]).
     pub gateway_state_tx: Option<mpsc::Sender<Vec<u8>>>,
-    /// Sender for `gateway_notify` gossip broadcasts (bytes are bincode-encoded [`ClusterMessage`]).
+    /// Sender for `gateway_notify` gossip broadcasts (bytes are rkyv-encoded [`ClusterMessage`]).
     pub gateway_notify_tx: Option<mpsc::Sender<Vec<u8>>>,
     pub(crate) shutdown_tx: watch::Sender<bool>,
 }
@@ -135,7 +135,7 @@ mod tests {
 
     fn dummy_handle() -> (ClusterHandle, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let secret = iroh::SecretKey::generate();
         let handle = ClusterHandle {
             bandwidth: Arc::new(BandwidthTracker::new()),
             cluster_bandwidth: Arc::new(ClusterBandwidthState::new(30)),
@@ -222,7 +222,7 @@ mod tests {
         let rt = test_runtime();
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("node.key");
-        let secret = iroh::SecretKey::generate(&mut rand::rng());
+        let secret = iroh::SecretKey::generate();
         let mut cfg = test_cfg(&key_path);
         cfg.discovery.method = "bootstrap".to_string();
         // Valid format, but 127.0.0.1:1 has no listener so the pre-connect will fail.

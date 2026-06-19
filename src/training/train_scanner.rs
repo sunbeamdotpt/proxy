@@ -33,7 +33,7 @@ type TrainBackend = Autodiff<Wgpu<f32, i32>>;
 
 /// Arguments for the scanner MLP training command.
 pub struct TrainScannerMlpArgs {
-    /// Path to a bincode `DatasetManifest` file.
+    /// Path to an rkyv `DatasetManifest` file.
     pub dataset_path: String,
     /// Directory to write output files (Rust source, model record).
     pub output_dir: String,

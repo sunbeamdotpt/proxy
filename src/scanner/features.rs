@@ -223,7 +223,7 @@ pub fn fx_hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 /// Scannernormparams.
 pub struct ScannerNormParams {
     /// Mins.
