@@ -5,7 +5,7 @@ use crate::gateway::api::{TCPRoute, TLSRoute, UDPRoute};
 use crate::gateway::model::{HostnameMatch, TCPRouteState, TLSRouteState, UDPRouteState};
 use crate::gateway::reconcile::l4route::model::L4RouteKind;
 use crate::gateway::reconcile::l4route::model::{
-    into_parsed_backend, ParsedBackendRef, ParsedL4Route,
+    ParsedBackendRef, ParsedL4Route, into_parsed_backend,
 };
 use gateway_api::experimental::tcproutes::{
     TcpRouteParentRefs, TcpRouteRules, TcpRouteRulesBackendRefs,

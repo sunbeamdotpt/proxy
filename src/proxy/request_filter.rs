@@ -60,24 +60,25 @@ impl SunbeamProxy {
         // HTTPS listener misdirected request detection: if the SNI selected a
         // different listener than the request Host/Authority, return 421.
         if ctx.downstream_scheme == "https"
-            && let Some(sni) = self.sni_for_session(session) {
-                let host = extract_host(session);
-                let port = ctx.downstream_port;
-                let l4 = self.l4_config.load();
-                let sni_listener = l4.listener_hostname_for(&sni, port);
-                let host_listener = l4.listener_hostname_for(&host, port);
-                let mismatched = match (&sni_listener, &host_listener) {
-                    (Some(s), Some(h)) => s != h,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                if mismatched {
-                    let mut resp = ResponseHeader::build(421, None)?;
-                    resp.insert_header("Content-Length", "0")?;
-                    session.write_response_header(Box::new(resp), true).await?;
-                    return Ok(true);
-                }
+            && let Some(sni) = self.sni_for_session(session)
+        {
+            let host = extract_host(session);
+            let port = ctx.downstream_port;
+            let l4 = self.l4_config.load();
+            let sni_listener = l4.listener_hostname_for(&sni, port);
+            let host_listener = l4.listener_hostname_for(&host, port);
+            let mismatched = match (&sni_listener, &host_listener) {
+                (Some(s), Some(h)) => s != h,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if mismatched {
+                let mut resp = ResponseHeader::build(421, None)?;
+                resp.insert_header("Content-Length", "0")?;
+                session.write_response_header(Box::new(resp), true).await?;
+                return Ok(true);
             }
+        }
 
         if is_plain_http(session) {
             // cert-manager HTTP-01 challenge: look up the token path in the
@@ -126,24 +127,25 @@ impl SunbeamProxy {
                 // CORS headers when the Origin is allowed.
                 if let Some(plan) = ctx.plan.as_ref()
                     && session.req_header().method == http::Method::OPTIONS
-                        && let Some(cors) = plan.response_mutations.iter().find_map(|m| match m {
-                            crate::ir::compile::ResponseMutation::Cors(c) => Some(c),
-                            _ => None,
-                        }) {
-                            let headers = &session.req_header().headers;
-                            if headers.get("origin").is_some()
-                                && headers.get("access-control-request-method").is_some()
-                            {
-                                let mut resp = ResponseHeader::build(204, None)?;
-                                super::filters::apply_response_mutation(
-                                    session,
-                                    &mut resp,
-                                    &crate::ir::compile::ResponseMutation::Cors(cors.clone()),
-                                )?;
-                                session.write_response_header(Box::new(resp), true).await?;
-                                return Ok(true);
-                            }
-                        }
+                    && let Some(cors) = plan.response_mutations.iter().find_map(|m| match m {
+                        crate::ir::compile::ResponseMutation::Cors(c) => Some(c),
+                        _ => None,
+                    })
+                {
+                    let headers = &session.req_header().headers;
+                    if headers.get("origin").is_some()
+                        && headers.get("access-control-request-method").is_some()
+                    {
+                        let mut resp = ResponseHeader::build(204, None)?;
+                        super::filters::apply_response_mutation(
+                            session,
+                            &mut resp,
+                            &crate::ir::compile::ResponseMutation::Cors(cors.clone()),
+                        )?;
+                        session.write_response_header(Box::new(resp), true).await?;
+                        return Ok(true);
+                    }
+                }
 
                 if let Some(plan) = ctx.plan.as_ref() {
                     for stage in &plan.request_stages {
@@ -204,80 +206,81 @@ impl SunbeamProxy {
         } else {
             // DDoS detection: check the client IP against the KNN model.
             if let Some(detector) = &self.ddos_detector
-                && let Some(ip) = self.extract_client_ip(session) {
-                    let method = session.req_header().method.as_str();
-                    let path = session.req_header().uri.path();
-                    let host = extract_host(session);
-                    let user_agent = session
-                        .req_header()
-                        .headers
-                        .get("user-agent")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("-");
-                    let content_length: u64 = session
-                        .req_header()
-                        .headers
-                        .get("content-length")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let has_cookies = session.req_header().headers.get("cookie").is_some();
-                    let has_referer = session.req_header().headers.get("referer").is_some();
-                    let has_accept_language = session
-                        .req_header()
-                        .headers
-                        .get("accept-language")
-                        .is_some();
-                    let accept = session
-                        .req_header()
-                        .headers
-                        .get("accept")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("-");
-                    let ddos_action = detector.check(
-                        ip,
-                        method,
-                        path,
-                        &host,
-                        user_agent,
-                        content_length,
-                        has_cookies,
-                        has_referer,
-                        has_accept_language,
-                    );
-                    let decision = if matches!(ddos_action, DDoSAction::Block) {
-                        "block"
-                    } else {
-                        "allow"
-                    };
+                && let Some(ip) = self.extract_client_ip(session)
+            {
+                let method = session.req_header().method.as_str();
+                let path = session.req_header().uri.path();
+                let host = extract_host(session);
+                let user_agent = session
+                    .req_header()
+                    .headers
+                    .get("user-agent")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+                let content_length: u64 = session
+                    .req_header()
+                    .headers
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let has_cookies = session.req_header().headers.get("cookie").is_some();
+                let has_referer = session.req_header().headers.get("referer").is_some();
+                let has_accept_language = session
+                    .req_header()
+                    .headers
+                    .get("accept-language")
+                    .is_some();
+                let accept = session
+                    .req_header()
+                    .headers
+                    .get("accept")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+                let ddos_action = detector.check(
+                    ip,
+                    method,
+                    path,
+                    &host,
+                    user_agent,
+                    content_length,
+                    has_cookies,
+                    has_referer,
+                    has_accept_language,
+                );
+                let decision = if matches!(ddos_action, DDoSAction::Block) {
+                    "block"
+                } else {
+                    "allow"
+                };
 
-                    tracing::info!(
-                        target = "pipeline",
-                        layer       = "ddos",
-                        decision,
-                        method,
-                        host        = %host,
-                        path,
-                        client_ip   = %ip,
-                        user_agent,
-                        content_length,
-                        has_cookies,
-                        has_referer,
-                        has_accept_language,
-                        accept,
-                        "pipeline"
-                    );
+                tracing::info!(
+                    target = "pipeline",
+                    layer       = "ddos",
+                    decision,
+                    method,
+                    host        = %host,
+                    path,
+                    client_ip   = %ip,
+                    user_agent,
+                    content_length,
+                    has_cookies,
+                    has_referer,
+                    has_accept_language,
+                    accept,
+                    "pipeline"
+                );
 
-                    metrics::DDOS_DECISIONS.with_label_values(&[decision]).inc();
+                metrics::DDOS_DECISIONS.with_label_values(&[decision]).inc();
 
-                    if matches!(ddos_action, DDoSAction::Block) && !self.ddos_observe_only {
-                        let mut resp = ResponseHeader::build(429, None)?;
-                        resp.insert_header("Retry-After", "60")?;
-                        resp.insert_header("Content-Length", "0")?;
-                        session.write_response_header(Box::new(resp), true).await?;
-                        return Ok(true);
-                    }
+                if matches!(ddos_action, DDoSAction::Block) && !self.ddos_observe_only {
+                    let mut resp = ResponseHeader::build(429, None)?;
+                    resp.insert_header("Retry-After", "60")?;
+                    resp.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
                 }
+            }
 
             // Scanner detection: per-request classification of scanner/bot probes.
             if let Some(scanner_swap) = &self.scanner_detector {
@@ -377,54 +380,55 @@ impl SunbeamProxy {
 
             // Rate limiting: per-identity throttling.
             if let Some(limiter) = &self.rate_limiter
-                && let Some(ip) = self.extract_client_ip(session) {
-                    let cookie = session
-                        .req_header()
-                        .headers
-                        .get("cookie")
-                        .and_then(|v| v.to_str().ok());
-                    let auth = session
-                        .req_header()
-                        .headers
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok());
-                    let rl_key = key::extract_key(cookie, auth, ip);
-                    let rl_result = limiter.check(ip, rl_key);
-                    let decision = if matches!(rl_result, RateLimitResult::Reject { .. }) {
-                        "block"
-                    } else {
-                        "allow"
-                    };
+                && let Some(ip) = self.extract_client_ip(session)
+            {
+                let cookie = session
+                    .req_header()
+                    .headers
+                    .get("cookie")
+                    .and_then(|v| v.to_str().ok());
+                let auth = session
+                    .req_header()
+                    .headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok());
+                let rl_key = key::extract_key(cookie, auth, ip);
+                let rl_result = limiter.check(ip, rl_key);
+                let decision = if matches!(rl_result, RateLimitResult::Reject { .. }) {
+                    "block"
+                } else {
+                    "allow"
+                };
 
-                    tracing::info!(
-                        target = "pipeline",
-                        layer       = "rate_limit",
-                        decision,
-                        method      = %session.req_header().method,
-                        host        = %extract_host(session),
-                        path        = %session.req_header().uri.path(),
-                        client_ip   = %ip,
-                        user_agent  = session.req_header().headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("-"),
-                        content_length = session.req_header().headers.get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0"),
-                        has_cookies = cookie.is_some(),
-                        has_referer = session.req_header().headers.get("referer").is_some(),
-                        has_accept_language = session.req_header().headers.get("accept-language").is_some(),
-                        accept      = session.req_header().headers.get("accept").and_then(|v| v.to_str().ok()).unwrap_or("-"),
-                        "pipeline"
-                    );
+                tracing::info!(
+                    target = "pipeline",
+                    layer       = "rate_limit",
+                    decision,
+                    method      = %session.req_header().method,
+                    host        = %extract_host(session),
+                    path        = %session.req_header().uri.path(),
+                    client_ip   = %ip,
+                    user_agent  = session.req_header().headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("-"),
+                    content_length = session.req_header().headers.get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0"),
+                    has_cookies = cookie.is_some(),
+                    has_referer = session.req_header().headers.get("referer").is_some(),
+                    has_accept_language = session.req_header().headers.get("accept-language").is_some(),
+                    accept      = session.req_header().headers.get("accept").and_then(|v| v.to_str().ok()).unwrap_or("-"),
+                    "pipeline"
+                );
 
-                    metrics::RATE_LIMIT_DECISIONS
-                        .with_label_values(&[decision])
-                        .inc();
+                metrics::RATE_LIMIT_DECISIONS
+                    .with_label_values(&[decision])
+                    .inc();
 
-                    if let RateLimitResult::Reject { retry_after } = rl_result {
-                        let mut resp = ResponseHeader::build(429, None)?;
-                        resp.insert_header("Retry-After", retry_after.to_string())?;
-                        resp.insert_header("Content-Length", "0")?;
-                        session.write_response_header(Box::new(resp), true).await?;
-                        return Ok(true);
-                    }
+                if let RateLimitResult::Reject { retry_after } = rl_result {
+                    let mut resp = ResponseHeader::build(429, None)?;
+                    resp.insert_header("Retry-After", retry_after.to_string())?;
+                    resp.insert_header("Content-Length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
                 }
+            }
 
             // Cluster-wide bandwidth cap enforcement.
             if let Some(c) = &self.cluster {
@@ -571,9 +575,10 @@ impl SunbeamProxy {
                 );
                 for hdr_name in &auth.capture_headers {
                     if let Some(val) = resp.headers().get(hdr_name.as_ref())
-                        && let Ok(v) = val.to_str() {
-                            ctx.auth_headers.push((hdr_name.to_string(), v.to_string()));
-                        }
+                        && let Ok(v) = val.to_str()
+                    {
+                        ctx.auth_headers.push((hdr_name.to_string(), v.to_string()));
+                    }
                 }
                 Ok(false) // continue to next stage
             }
@@ -625,13 +630,14 @@ impl SunbeamProxy {
         if req_method.eq_ignore_ascii_case("OPTIONS") && requested_method.is_some() {
             let mut resp = ResponseHeader::build(204, None)?;
             if let Some(origin) = origin
-                && cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials) {
-                    resp.insert_header("Access-Control-Allow-Origin", origin)?;
-                    resp.insert_header("Vary", "Origin")?;
-                    if cors.allow_credentials {
-                        resp.insert_header("Access-Control-Allow-Credentials", "true")?;
-                    }
+                && cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials)
+            {
+                resp.insert_header("Access-Control-Allow-Origin", origin)?;
+                resp.insert_header("Vary", "Origin")?;
+                if cors.allow_credentials {
+                    resp.insert_header("Access-Control-Allow-Credentials", "true")?;
                 }
+            }
             if !cors.allow_methods.is_empty() {
                 let allowed_methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
                     if cors.allow_credentials {
@@ -876,8 +882,8 @@ mod tests {
     }
 
     fn set_peer_addr(session: &mut Session, addr: std::net::SocketAddr) {
-        use pingora_core::protocols::l4::socket::SocketAddr as PSocketAddr;
         use pingora_core::protocols::SocketDigest;
+        use pingora_core::protocols::l4::socket::SocketAddr as PSocketAddr;
         let digest = session.as_downstream_mut().digest_mut().unwrap();
         let socket_digest = SocketDigest::from_raw_fd(-1);
         socket_digest

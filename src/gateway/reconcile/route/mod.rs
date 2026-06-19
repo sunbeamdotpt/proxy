@@ -12,20 +12,20 @@ use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerSetState, ParentRef, RouteState,
 };
 use crate::gateway::reconcile::backend::{
-    build_backend_resolution_conditions, resolve_backend_refs, BackendResolution,
-    BackendResolutionStatus, RouteLike,
+    BackendResolution, BackendResolutionStatus, RouteLike, build_backend_resolution_conditions,
+    resolve_backend_refs,
 };
-use crate::gateway::reconcile::context::{run_controller, ReconcilerContext};
-use crate::gateway::reconcile::parent::{resolve_listener_parent, ParsedParentRef};
+use crate::gateway::reconcile::context::{ReconcilerContext, run_controller};
+use crate::gateway::reconcile::parent::{ParsedParentRef, resolve_listener_parent};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::builder::ParentStatusLike;
-use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
+use crate::gateway::status::{ConditionStatus, StatusCondition, conditions};
+use kube::Client;
 use kube::api::Api;
 use kube::runtime::controller::Action;
-use kube::Client;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Status conditions for a single parentRef entry.

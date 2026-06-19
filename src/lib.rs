@@ -16,6 +16,8 @@ pub mod audit;
 pub mod autotune;
 /// Cache.
 pub mod cache;
+/// Caddyfile configuration source.
+pub mod caddyfile;
 /// Cert.
 pub mod cert;
 /// Cluster.

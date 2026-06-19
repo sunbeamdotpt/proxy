@@ -4,7 +4,7 @@
 //! Shared parentRef parsing and resolution for Gateway API routes.
 
 use crate::gateway::model::{AllowedRoutes, NamespaceFrom, ParentRef, RouteNamespaces};
-use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
+use crate::gateway::status::{ConditionStatus, StatusCondition, conditions};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -159,20 +159,21 @@ pub fn resolve_listener_parent(
     }
 
     if let Some(port) = parsed.port
-        && matching_listeners.is_empty() {
-            return (
-                None,
-                vec![conditions::accepted_condition(
-                    ConditionStatus::False,
-                    "NoMatchingParent",
-                    &format!(
-                        "no listener matching port {} on {} {}/{}",
-                        port, owner_kind, target_ns, owner_name
-                    ),
-                    observed_generation,
-                )],
-            );
-        }
+        && matching_listeners.is_empty()
+    {
+        return (
+            None,
+            vec![conditions::accepted_condition(
+                ConditionStatus::False,
+                "NoMatchingParent",
+                &format!(
+                    "no listener matching port {} on {} {}/{}",
+                    port, owner_kind, target_ns, owner_name
+                ),
+                observed_generation,
+            )],
+        );
+    }
 
     let mut kind_allowed = false;
     let mut protocol_allowed = expected_protocols.is_none();

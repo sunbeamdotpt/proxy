@@ -1,11 +1,11 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use super::HTTPRouteState;
 use super::common::{
     encode_i64, encode_option_i32, encode_option_str, encode_option_u16, encode_parent_ref,
     encode_str, encode_u16, encode_u32, encode_weighted_backend,
 };
-use super::HTTPRouteState;
 
 pub(crate) fn encode_http_route(buf: &mut Vec<u8>, r: &HTTPRouteState) {
     encode_str(buf, &r.namespace);

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::sync::{RwLock, mpsc};
+use tokio::time::{MissedTickBehavior, interval};
 use tracing::debug;
 
 use crate::cluster::gateway_topics::GatewayResourceNotify;

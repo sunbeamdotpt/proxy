@@ -7,15 +7,15 @@
 //! `Accepted` status condition.  Status writeback is gated on leadership.
 
 use crate::gateway::api::gatewayclass::GatewayClass;
-use crate::gateway::reconcile::context::{run_controller, ReconcilerContext};
+use crate::gateway::reconcile::context::{ReconcilerContext, run_controller};
 use crate::gateway::status::patch::patch_status_if_changed;
-use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
+use crate::gateway::status::{ConditionStatus, StatusCondition, conditions};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::Client;
 use kube::api::Api;
 use kube::runtime::controller::Action;
-use kube::Client;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Name of the controller as advertised in GatewayClass `controllerName`.

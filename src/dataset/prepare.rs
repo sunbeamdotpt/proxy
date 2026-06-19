@@ -9,7 +9,7 @@
 
 use crate::dataset::sample::{DataSource, DatasetManifest, DatasetStats, TrainingSample};
 use crate::ddos::audit_log::{AuditFields, AuditLog};
-use crate::ddos::features::{method_to_u8, LogIpState};
+use crate::ddos::features::{LogIpState, method_to_u8};
 use crate::ddos::train::HeuristicThresholds;
 use crate::scanner::features::{self, fx_hash_bytes};
 
@@ -114,22 +114,22 @@ pub fn run(args: PrepareDatasetArgs) -> Result<()> {
 
     // --- 3. Legacy OWASP path (kept for backwards compat) ---
     if let Some(owasp_path) = &args.owasp
-        && args.inject_modsec.as_deref() != Some(owasp_path.as_str()) {
-            eprintln!("parsing OWASP ModSec audit log from {owasp_path}...");
-            let modsec_entries =
-                crate::dataset::modsec::parse_modsec_audit_log(Path::new(owasp_path))?;
-            let entries_with_host: Vec<(AuditFields, String)> = modsec_entries
-                .into_iter()
-                .map(|(fields, _label)| {
-                    let host_prefix = fields.host.split('.').next().unwrap_or("").to_string();
-                    (fields, host_prefix)
-                })
-                .collect();
-            let modsec_samples =
-                entries_to_scanner_samples(&entries_with_host, DataSource::OwaspModSec, 0.8)?;
-            eprintln!("  OWASP: {} scanner samples", modsec_samples.len());
-            scanner_samples.extend(modsec_samples);
-        }
+        && args.inject_modsec.as_deref() != Some(owasp_path.as_str())
+    {
+        eprintln!("parsing OWASP ModSec audit log from {owasp_path}...");
+        let modsec_entries = crate::dataset::modsec::parse_modsec_audit_log(Path::new(owasp_path))?;
+        let entries_with_host: Vec<(AuditFields, String)> = modsec_entries
+            .into_iter()
+            .map(|(fields, _label)| {
+                let host_prefix = fields.host.split('.').next().unwrap_or("").to_string();
+                (fields, host_prefix)
+            })
+            .collect();
+        let modsec_samples =
+            entries_to_scanner_samples(&entries_with_host, DataSource::OwaspModSec, 0.8)?;
+        eprintln!("  OWASP: {} scanner samples", modsec_samples.len());
+        scanner_samples.extend(modsec_samples);
+    }
 
     // --- 4. CIC-IDS2017 (direct DDoS samples + timing profiles for synthetic) ---
     let cicids_profiles = if let Some(cached_path) = crate::dataset::download::cicids_cached_path()
@@ -447,11 +447,7 @@ fn extract_ddos_samples_from_entries(
                     || fv[13] > heuristics.suspicious_path_ratio
                     || (fv[10] < heuristics.no_cookies_threshold
                         && fv[1] > heuristics.no_cookies_path_count);
-                if is_attack {
-                    1.0f32
-                } else {
-                    0.0f32
-                }
+                if is_attack { 1.0f32 } else { 0.0f32 }
             });
 
             samples.push(TrainingSample {

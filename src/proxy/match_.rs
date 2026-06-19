@@ -9,9 +9,9 @@ use crate::config::PathRoute;
 use crate::ir::compile::{ir_hostname_matches, ir_listener_specificity_score};
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Return true if `prefix` is a Gateway API path-segment prefix of `req_path`.
 /// A PathPrefix `/foo` matches `/foo`, `/foo/`, and `/foo/bar`, but not
@@ -55,13 +55,13 @@ pub fn cors_allow_origin(
         // matches "foo.example.com" or "https://foo.example.com" respectively.
         if let Some((prefix, suffix)) = allowed.split_once("*.")
             && let Some(rest) = origin.strip_prefix(prefix)
-                && rest
-                    .strip_suffix(suffix)
-                    .and_then(|rest| rest.strip_suffix('.'))
-                    .is_some_and(|rest| !rest.is_empty())
-                {
-                    return true;
-                }
+            && rest
+                .strip_suffix(suffix)
+                .and_then(|rest| rest.strip_suffix('.'))
+                .is_some_and(|rest| !rest.is_empty())
+        {
+            return true;
+        }
     }
     false
 }

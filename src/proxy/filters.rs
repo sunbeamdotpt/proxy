@@ -66,11 +66,12 @@ impl SunbeamProxy {
 
             // Apply the selected backend's request mutations, if any.
             if let (Some(idx), Some(upstream)) = (ctx.backend_index, plan.upstream.as_ref())
-                && let Some(mutations) = upstream.backend_request_mutations.get(idx) {
-                    for mutation in mutations {
-                        apply_upstream_request_mutation(upstream_req, mutation)?;
-                    }
+                && let Some(mutations) = upstream.backend_request_mutations.get(idx)
+            {
+                for mutation in mutations {
+                    apply_upstream_request_mutation(upstream_req, mutation)?;
                 }
+            }
         }
 
         // Strip Expect: 100-continue.
@@ -417,63 +418,62 @@ pub(crate) fn apply_response_mutation(
             let allowed = origin.is_some_and(|origin| {
                 cors_allow_origin(origin, &cors.allow_origins, cors.allow_credentials)
             });
-            if allowed
-                && let Some(origin) = origin {
-                    let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
-                    let _ = upstream_response.insert_header("Vary", "Origin");
-                    if cors.allow_credentials {
-                        let _ = upstream_response
-                            .insert_header("Access-Control-Allow-Credentials", "true");
-                    }
-                    if !cors.allow_methods.is_empty() {
-                        let methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
-                            if cors.allow_credentials {
-                                requested_method.unwrap_or("*").to_string()
-                            } else {
-                                "*".to_string()
-                            }
+            if allowed && let Some(origin) = origin {
+                let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
+                let _ = upstream_response.insert_header("Vary", "Origin");
+                if cors.allow_credentials {
+                    let _ =
+                        upstream_response.insert_header("Access-Control-Allow-Credentials", "true");
+                }
+                if !cors.allow_methods.is_empty() {
+                    let methods = if cors.allow_methods.iter().any(|m| m.as_ref() == "*") {
+                        if cors.allow_credentials {
+                            requested_method.unwrap_or("*").to_string()
                         } else {
-                            cors.allow_methods
-                                .iter()
-                                .map(|s| s.as_ref())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        };
-                        let _ = upstream_response
-                            .insert_header("Access-Control-Allow-Methods", methods);
-                    }
-                    if !cors.allow_headers.is_empty() {
-                        let headers = if cors.allow_headers.iter().any(|h| h.as_ref() == "*") {
-                            if cors.allow_credentials {
-                                requested_headers.unwrap_or("*").to_string()
-                            } else {
-                                "*".to_string()
-                            }
-                        } else {
-                            cors.allow_headers
-                                .iter()
-                                .map(|s| s.as_ref())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        };
-                        let _ = upstream_response
-                            .insert_header("Access-Control-Allow-Headers", headers);
-                    }
-                    if !cors.expose_headers.is_empty() {
-                        let headers: String = cors
-                            .expose_headers
+                            "*".to_string()
+                        }
+                    } else {
+                        cors.allow_methods
                             .iter()
                             .map(|s| s.as_ref())
                             .collect::<Vec<_>>()
-                            .join(", ");
-                        let _ = upstream_response
-                            .insert_header("Access-Control-Expose-Headers", headers);
-                    }
-                    if let Some(max_age) = cors.max_age {
-                        let _ = upstream_response
-                            .insert_header("Access-Control-Max-Age", max_age.to_string());
-                    }
+                            .join(", ")
+                    };
+                    let _ =
+                        upstream_response.insert_header("Access-Control-Allow-Methods", methods);
                 }
+                if !cors.allow_headers.is_empty() {
+                    let headers = if cors.allow_headers.iter().any(|h| h.as_ref() == "*") {
+                        if cors.allow_credentials {
+                            requested_headers.unwrap_or("*").to_string()
+                        } else {
+                            "*".to_string()
+                        }
+                    } else {
+                        cors.allow_headers
+                            .iter()
+                            .map(|s| s.as_ref())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let _ =
+                        upstream_response.insert_header("Access-Control-Allow-Headers", headers);
+                }
+                if !cors.expose_headers.is_empty() {
+                    let headers: String = cors
+                        .expose_headers
+                        .iter()
+                        .map(|s| s.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ =
+                        upstream_response.insert_header("Access-Control-Expose-Headers", headers);
+                }
+                if let Some(max_age) = cors.max_age {
+                    let _ = upstream_response
+                        .insert_header("Access-Control-Max-Age", max_age.to_string());
+                }
+            }
         }
     }
 
@@ -484,8 +484,8 @@ pub(crate) fn apply_response_mutation(
 mod tests {
     use super::*;
     use crate::ir::{
-        compile::{ResponseMutation, UpstreamRequestMutation},
         BodyRewrite, CorsConfig, PathRewrite,
+        compile::{ResponseMutation, UpstreamRequestMutation},
     };
     use pingora_core::protocols::l4::stream::Stream;
     use pingora_http::{RequestHeader, ResponseHeader};

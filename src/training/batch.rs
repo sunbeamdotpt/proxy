@@ -6,8 +6,8 @@
 
 use crate::dataset::sample::TrainingSample;
 
-use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::Dataset;
+use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
 
 /// A single normalized training item ready for batching.

@@ -455,12 +455,16 @@ fn translate_view_to_ir_any_hostname_for_empty_listener_and_route() {
     );
     let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
     let headers = http::header::HeaderMap::new();
-    assert!(compiled
-        .lookup("", 80, "/", "GET", &headers, None)
-        .is_some());
-    assert!(compiled
-        .lookup("example.com", 80, "/", "GET", &headers, None)
-        .is_some());
+    assert!(
+        compiled
+            .lookup("", 80, "/", "GET", &headers, None)
+            .is_some()
+    );
+    assert!(
+        compiled
+            .lookup("example.com", 80, "/", "GET", &headers, None)
+            .is_some()
+    );
 }
 #[test]
 fn translate_view_to_ir_route_hostnames_with_empty_listener() {
@@ -530,15 +534,21 @@ fn translate_view_to_ir_route_hostnames_with_empty_listener() {
     assert_eq!(table.hosts.len(), 4);
     let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
     let headers = http::header::HeaderMap::new();
-    assert!(compiled
-        .lookup("first.com", 80, "/", "GET", &headers, None)
-        .is_some());
-    assert!(compiled
-        .lookup("third.com", 80, "/", "GET", &headers, None)
-        .is_none());
-    assert!(compiled
-        .lookup("sub.third.com", 80, "/", "GET", &headers, None)
-        .is_none());
+    assert!(
+        compiled
+            .lookup("first.com", 80, "/", "GET", &headers, None)
+            .is_some()
+    );
+    assert!(
+        compiled
+            .lookup("third.com", 80, "/", "GET", &headers, None)
+            .is_none()
+    );
+    assert!(
+        compiled
+            .lookup("sub.third.com", 80, "/", "GET", &headers, None)
+            .is_none()
+    );
 }
 #[test]
 fn translate_view_to_ir_unprogrammed_route_returns_500() {
@@ -945,40 +955,48 @@ fn listener_isolation_empty_listener_loses_to_wildcard_listener() {
     let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
     let headers = http::header::HeaderMap::new();
     // Empty-listener route is used when no more specific listener matches.
-    assert!(compiled
-        .lookup("bar.com", 80, "/empty-hostname", "GET", &headers, None)
-        .is_some());
-    assert!(compiled
-        .lookup(
-            "bar.example.com",
-            80,
-            "/empty-hostname",
-            "GET",
-            &headers,
-            None
-        )
-        .is_none());
+    assert!(
+        compiled
+            .lookup("bar.com", 80, "/empty-hostname", "GET", &headers, None)
+            .is_some()
+    );
+    assert!(
+        compiled
+            .lookup(
+                "bar.example.com",
+                80,
+                "/empty-hostname",
+                "GET",
+                &headers,
+                None
+            )
+            .is_none()
+    );
     // Wildcard-listener route is used for matching hosts.
-    assert!(compiled
-        .lookup(
-            "bar.example.com",
-            80,
-            "/wildcard-example-com",
-            "GET",
-            &headers,
-            None
-        )
-        .is_some());
-    assert!(compiled
-        .lookup(
-            "bar.com",
-            80,
-            "/wildcard-example-com",
-            "GET",
-            &headers,
-            None
-        )
-        .is_none());
+    assert!(
+        compiled
+            .lookup(
+                "bar.example.com",
+                80,
+                "/wildcard-example-com",
+                "GET",
+                &headers,
+                None
+            )
+            .is_some()
+    );
+    assert!(
+        compiled
+            .lookup(
+                "bar.com",
+                80,
+                "/wildcard-example-com",
+                "GET",
+                &headers,
+                None
+            )
+            .is_none()
+    );
 }
 #[test]
 fn debug_wildcard_route_has_upstream() {
@@ -1130,16 +1148,18 @@ fn listener_isolation_wildcard_listener_matches_subdomain() {
     let table = translate_view_to_ir(&view);
     let compiled = crate::ir::compile::CompiledRouteTable::compile(table).unwrap();
     let headers = http::header::HeaderMap::new();
-    assert!(compiled
-        .lookup(
-            "bar.example.com",
-            80,
-            "/wildcard-example-com",
-            "GET",
-            &headers,
-            None
-        )
-        .is_some());
+    assert!(
+        compiled
+            .lookup(
+                "bar.example.com",
+                80,
+                "/wildcard-example-com",
+                "GET",
+                &headers,
+                None
+            )
+            .is_some()
+    );
 }
 #[test]
 fn translate_unprogrammed_route_keeps_path_and_marks_unprogrammed() {

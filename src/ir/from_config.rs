@@ -665,18 +665,24 @@ mod tests {
             Action::Route(r) => r,
             other => panic!("expected Route action, got {other:?}"),
         };
-        assert!(action
-            .request_filters
-            .contains(&RequestFilter::StripPrefix("/app".into())));
-        assert!(action
-            .request_filters
-            .contains(&RequestFilter::PrependPath("/api".into())));
+        assert!(
+            action
+                .request_filters
+                .contains(&RequestFilter::StripPrefix("/app".into()))
+        );
+        assert!(
+            action
+                .request_filters
+                .contains(&RequestFilter::PrependPath("/api".into()))
+        );
         assert!(action.request_filters.contains(&RequestFilter::RewritePath(
             PathRewrite::FullReplace("/x".into())
         )));
-        assert!(action
-            .request_filters
-            .contains(&RequestFilter::RewriteHostname("upstream".into())));
+        assert!(
+            action
+                .request_filters
+                .contains(&RequestFilter::RewriteHostname("upstream".into()))
+        );
     }
 
     #[test]
@@ -720,24 +726,32 @@ mod tests {
             name: "X-Add".into(),
             value: "b".into()
         }));
-        assert!(action
-            .request_filters
-            .contains(&RequestFilter::RemoveHeader("X-Del".into())));
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::SetHeader {
-                name: "Y-Set".into(),
-                value: "c".into()
-            }));
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::AddHeader {
-                name: "Y-Add".into(),
-                value: "d".into()
-            }));
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::RemoveHeader("Y-Del".into())));
+        assert!(
+            action
+                .request_filters
+                .contains(&RequestFilter::RemoveHeader("X-Del".into()))
+        );
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::SetHeader {
+                    name: "Y-Set".into(),
+                    value: "c".into()
+                })
+        );
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::AddHeader {
+                    name: "Y-Add".into(),
+                    value: "d".into()
+                })
+        );
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::RemoveHeader("Y-Del".into()))
+        );
     }
 
     #[test]
@@ -990,21 +1004,27 @@ mod tests {
             other => panic!("expected Route action, got {other:?}"),
         };
         assert!(action.request_filters.is_empty());
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::SetHeader {
-                name: "Y-Set".into(),
-                value: "c".into()
-            }));
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::AddHeader {
-                name: "Y-Add".into(),
-                value: "d".into()
-            }));
-        assert!(action
-            .response_filters
-            .contains(&ResponseFilter::RemoveHeader("Y-Del".into())));
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::SetHeader {
+                    name: "Y-Set".into(),
+                    value: "c".into()
+                })
+        );
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::AddHeader {
+                    name: "Y-Add".into(),
+                    value: "d".into()
+                })
+        );
+        assert!(
+            action
+                .response_filters
+                .contains(&ResponseFilter::RemoveHeader("Y-Del".into()))
+        );
         assert_eq!(action.cache.as_ref().unwrap().enabled, false);
         assert_eq!(action.body_rewrites.len(), 1);
     }

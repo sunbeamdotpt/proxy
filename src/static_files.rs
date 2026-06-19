@@ -156,9 +156,10 @@ pub async fn try_serve(
 
     // Try fallback if no candidate matched.
     if file.is_none()
-        && let Some(fb) = fallback {
-            file = read_static_file(&root, &root.join(fb)).await;
-        }
+        && let Some(fb) = fallback
+    {
+        file = read_static_file(&root, &root.join(fb)).await;
+    }
 
     let file = match file {
         Some(f) => f,

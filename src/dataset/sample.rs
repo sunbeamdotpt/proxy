@@ -114,8 +114,8 @@ pub struct DatasetManifest {
 
 /// Serialize a `DatasetManifest` to an rkyv file.
 pub fn save_dataset(manifest: &DatasetManifest, path: &Path) -> Result<()> {
-    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(manifest)
-        .context("serializing dataset manifest")?;
+    let encoded =
+        rkyv::to_bytes::<rkyv::rancor::Error>(manifest).context("serializing dataset manifest")?;
     std::fs::write(path, encoded.as_slice())
         .with_context(|| format!("writing dataset to {}", path.display()))?;
     Ok(())
@@ -125,9 +125,8 @@ pub fn save_dataset(manifest: &DatasetManifest, path: &Path) -> Result<()> {
 pub fn load_dataset(path: &Path) -> Result<DatasetManifest> {
     let data =
         std::fs::read(path).with_context(|| format!("reading dataset from {}", path.display()))?;
-    let manifest: DatasetManifest =
-        rkyv::from_bytes::<DatasetManifest, rkyv::rancor::Error>(&data)
-            .context("deserializing dataset manifest")?;
+    let manifest: DatasetManifest = rkyv::from_bytes::<DatasetManifest, rkyv::rancor::Error>(&data)
+        .context("deserializing dataset manifest")?;
     Ok(manifest)
 }
 

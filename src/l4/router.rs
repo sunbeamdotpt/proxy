@@ -7,18 +7,18 @@
 //! relays traffic to weighted backends.
 
 use crate::ir::compile::{
-    ir_hostname_matches, ir_listener_specificity_score, CompiledL4Config, CompiledL4Route,
-    CompiledListener,
+    CompiledL4Config, CompiledL4Route, CompiledListener, ir_hostname_matches,
+    ir_listener_specificity_score,
 };
 use crate::ir::{L4Action, L4Match, Protocol, WeightedBackend};
+use crate::l4::L4Router;
 use crate::l4::context::L4Context;
 use crate::l4::udp::DualStackUdpSocket;
-use crate::l4::L4Router;
 use crate::tls::TlsRegistry;
 use async_trait::async_trait;
 use bytes::Bytes;
-use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
+use rand::distr::weighted::WeightedIndex;
 use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -26,7 +26,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Maximum bytes to peek from a TCP stream for SNI extraction.
 const PEEK_BUF_SIZE: usize = 1536;

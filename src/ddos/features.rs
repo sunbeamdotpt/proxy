@@ -266,7 +266,9 @@ pub fn method_to_u8(method: &str) -> u8 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 /// Normparams.
 pub struct NormParams {
     /// Mins.

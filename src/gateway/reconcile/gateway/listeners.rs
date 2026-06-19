@@ -6,9 +6,9 @@
 use crate::gateway::api::gateway::Gateway;
 use crate::gateway::api::gatewayclass::GatewayClass;
 use crate::gateway::model::{AllowedRoutes, ListenerState, TlsMode};
-use crate::gateway::reconcile::gateway::certificates::{is_frontend_ca_error, CertValidation};
+use crate::gateway::reconcile::gateway::certificates::{CertValidation, is_frontend_ca_error};
 use crate::gateway::reconcile::gateway::frontend_validation::{
-    parse_frontend_validation_obj, FrontendValidationSpec,
+    FrontendValidationSpec, parse_frontend_validation_obj,
 };
 use crate::gateway::reconcile::listener_common::{
     build_listener_allowed_map_key, build_listener_state_from_obj, listener_status_json,
@@ -161,15 +161,16 @@ pub fn build_listener_status(
             supported_kinds = Vec::new();
         }
         if accepted_status == "True"
-            && let Some(err) = cert_errors.get(idx).copied().flatten() {
-                accepted_status = "False";
-                accepted_reason = if is_frontend_ca_error(err.reason) {
-                    "NoValidCACertificate"
-                } else {
-                    err.reason
-                };
-                accepted_message = err.message;
-            }
+            && let Some(err) = cert_errors.get(idx).copied().flatten()
+        {
+            accepted_status = "False";
+            accepted_reason = if is_frontend_ca_error(err.reason) {
+                "NoValidCACertificate"
+            } else {
+                err.reason
+            };
+            accepted_message = err.message;
+        }
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let conditions = standard_listener_conditions(

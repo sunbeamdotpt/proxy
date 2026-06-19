@@ -12,8 +12,8 @@
 
 use k8s_openapi::api::coordination::v1::Lease;
 use kube::api::{Api, Patch, PatchParams};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::watch;
 

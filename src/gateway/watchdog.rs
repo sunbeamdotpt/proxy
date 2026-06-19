@@ -93,9 +93,10 @@ impl Watchdog {
         let abort = inner.abort_handle();
         self.runtime.spawn(async move {
             if let Err(e) = inner.await
-                && e.is_panic() {
-                    let _ = panic_tx.send(k);
-                }
+                && e.is_panic()
+            {
+                let _ = panic_tx.send(k);
+            }
         });
         self.tasks.insert(key, TaskState { abort, factory });
     }
@@ -156,8 +157,8 @@ impl Drop for Watchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Runtime::new().expect("test runtime")

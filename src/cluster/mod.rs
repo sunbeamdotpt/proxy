@@ -17,8 +17,8 @@ use tokio::sync::{mpsc, watch};
 use crate::cluster::node::ClusterReady;
 use crate::config::ClusterConfig;
 use bandwidth::{
-    gbps_to_bytes_per_sec, BandwidthLimiter, BandwidthMeter, BandwidthTracker,
-    ClusterBandwidthState,
+    BandwidthLimiter, BandwidthMeter, BandwidthTracker, ClusterBandwidthState,
+    gbps_to_bytes_per_sec,
 };
 
 /// Clusterhandle.

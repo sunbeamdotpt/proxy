@@ -6,8 +6,8 @@
 //! Owns the public TCP/UDP listeners and dispatches accepted connections and
 //! UDP packets to a router. Runs as a task on the shared Tokio runtime.
 
-use crate::ir::compile::{CompiledL4Config, CompiledListener};
 use crate::ir::Protocol;
+use crate::ir::compile::{CompiledL4Config, CompiledListener};
 use crate::l4::context::L4Context;
 use crate::l4::udp::DualStackUdpSocket;
 use crate::l4::{L4Router, SharedState};
@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Handle to an L4 socket manager running as a task on the shared runtime.
 #[derive(Clone, Debug)]
@@ -351,8 +351,8 @@ pub fn compute_diff<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::compile::CompiledListener;
     use crate::ir::Protocol;
+    use crate::ir::compile::CompiledListener;
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpStream, UdpSocket};
@@ -473,15 +473,19 @@ mod tests {
             ..Default::default()
         }));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_ok()
+        );
 
         mgr.apply(Arc::new(CompiledL4Config::default()));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_err());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -497,9 +501,11 @@ mod tests {
             ..Default::default()
         }));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_ok()
+        );
 
         // Apply a new config with the same listener id/bind/protocol but a
         // different per-listener setting. The existing socket should be kept.
@@ -515,16 +521,20 @@ mod tests {
             ..Default::default()
         }));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_ok()
+        );
 
         // Removing the listener should still release the socket.
         mgr.apply(Arc::new(CompiledL4Config::default()));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_err());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -556,13 +566,17 @@ mod tests {
 
         // Plain HTTP listeners are now bound by the L4 manager and relayed to
         // the internal Pingora plaintext service.
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", http_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", http_port))
+                .await
+                .is_ok()
+        );
         // HTTPS listeners are bound by the L4 manager for TLS termination.
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", https_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", https_port))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -611,16 +625,20 @@ mod tests {
         });
         mgr.apply(Arc::clone(&config));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_ok()
+        );
 
         // Applying the exact same snapshot should short-circuit and leave the
         // listener bound.
         mgr.apply(config);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
-            .await
-            .is_ok());
+        assert!(
+            TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+                .await
+                .is_ok()
+        );
     }
 }

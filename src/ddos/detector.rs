@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use crate::config::DDoSConfig;
-use crate::ddos::features::{method_to_u8, IpState, RequestEvent};
+use crate::ddos::features::{IpState, RequestEvent, method_to_u8};
 use crate::ddos::model::DDoSAction;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};

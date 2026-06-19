@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use kube::runtime::controller::Action;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use sunbeam_proxy::gateway::api::HTTPRoute;
 use sunbeam_proxy::gateway::reconcile::context::ReconcilerContext;

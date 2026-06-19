@@ -1,11 +1,11 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sunbeam_proxy::ensemble::ddos::ddos_ensemble_predict;
-use sunbeam_proxy::ensemble::weights::ddos_weights;
 use sunbeam_proxy::ensemble::mlp::mlp_predict_32;
 use sunbeam_proxy::ensemble::tree::tree_predict;
+use sunbeam_proxy::ensemble::weights::ddos_weights;
 
 fn bench_ensemble_ddos_full(c: &mut Criterion) {
     let raw: [f32; 14] = [

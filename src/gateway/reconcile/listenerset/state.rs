@@ -1,9 +1,9 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use crate::gateway::api::listenerset::{ListenerSet, ListenerSetListeners};
 use crate::gateway::api::Gateway;
 use crate::gateway::api::HTTPRoute;
+use crate::gateway::api::listenerset::{ListenerSet, ListenerSetListeners};
 use crate::gateway::model::{
     AllowedRoutes, GatewayState, HostnameMatch, ListenerSetState, ListenerState, NamespaceFrom,
     ParentRef, RouteNamespaces,
@@ -76,11 +76,7 @@ pub fn parse_allowed_listeners(gw: &Gateway) -> RouteNamespaces {
                 .iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect();
-            if map.is_empty() {
-                None
-            } else {
-                Some(map)
-            }
+            if map.is_empty() { None } else { Some(map) }
         });
 
     RouteNamespaces { from, selector }

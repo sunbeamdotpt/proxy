@@ -1306,17 +1306,19 @@ fn resolve_node_plans(
             }
             DiscriminatorKind::ByHeader { name, exact, any } => {
                 if let Some(val) = _headers.get(name.as_ref()).and_then(|v| v.to_str().ok())
-                    && let Some(bucket) = exact.get(val) {
-                        result.extend(bucket.iter().cloned());
-                    }
+                    && let Some(bucket) = exact.get(val)
+                {
+                    result.extend(bucket.iter().cloned());
+                }
                 result.extend(any.iter().cloned());
             }
             DiscriminatorKind::ByQuery { name, exact, any } => {
                 if let Some(q) = _query
                     && let Some(val) = extract_query_param(q, name.as_ref())
-                        && let Some(bucket) = exact.get(val) {
-                            result.extend(bucket.iter().cloned());
-                        }
+                    && let Some(bucket) = exact.get(val)
+                {
+                    result.extend(bucket.iter().cloned());
+                }
                 result.extend(any.iter().cloned());
             }
         }
@@ -1351,9 +1353,10 @@ fn plan_matches(
 
     // Method.
     if let Some(ref expected) = m.method
-        && !expected.as_ref().eq_ignore_ascii_case(method) {
-            return false;
-        }
+        && !expected.as_ref().eq_ignore_ascii_case(method)
+    {
+        return false;
+    }
 
     // Headers.
     for hm in &m.headers {
@@ -1640,19 +1643,23 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup(
-                "example.com",
-                0,
-                "/api/v1",
-                "GET",
-                &Default::default(),
-                None
-            )
-            .is_some());
-        assert!(compiled
-            .lookup("example.com", 0, "/other", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup(
+                    "example.com",
+                    0,
+                    "/api/v1",
+                    "GET",
+                    &Default::default(),
+                    None
+                )
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("example.com", 0, "/other", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1686,16 +1693,18 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         for i in 0..10 {
-            assert!(compiled
-                .lookup(
-                    "example.com",
-                    0,
-                    "/api",
-                    &format!("METH{}", i),
-                    &Default::default(),
-                    None
-                )
-                .is_some());
+            assert!(
+                compiled
+                    .lookup(
+                        "example.com",
+                        0,
+                        "/api",
+                        &format!("METH{}", i),
+                        &Default::default(),
+                        None
+                    )
+                    .is_some()
+            );
         }
     }
 
@@ -1737,9 +1746,11 @@ mod tests {
         for i in 0..10 {
             let mut headers = http::header::HeaderMap::new();
             headers.insert("X-Version", format!("v{}", i).parse().unwrap());
-            assert!(compiled
-                .lookup("example.com", 0, "/api", "GET", &headers, None)
-                .is_some());
+            assert!(
+                compiled
+                    .lookup("example.com", 0, "/api", "GET", &headers, None)
+                    .is_some()
+            );
         }
     }
 
@@ -1779,16 +1790,18 @@ mod tests {
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
         for i in 0..10 {
-            assert!(compiled
-                .lookup(
-                    "example.com",
-                    0,
-                    "/api",
-                    "GET",
-                    &Default::default(),
-                    Some(&format!("v={}", i))
-                )
-                .is_some());
+            assert!(
+                compiled
+                    .lookup(
+                        "example.com",
+                        0,
+                        "/api",
+                        "GET",
+                        &Default::default(),
+                        Some(&format!("v={}", i))
+                    )
+                    .is_some()
+            );
         }
     }
 
@@ -1849,12 +1862,16 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("other.com", 0, "/", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup("example.com", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("other.com", 0, "/", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1880,12 +1897,16 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup("sub.example.com", 0, "/", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup("sub.example.com", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("example.com", 0, "/", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1911,22 +1932,28 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup(
-                "multiple.prefixes.bar.com",
-                0,
-                "/",
-                "GET",
-                &Default::default(),
-                None
-            )
-            .is_some());
-        assert!(compiled
-            .lookup("foo.bar.com", 0, "/", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("bar.com", 0, "/", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup(
+                    "multiple.prefixes.bar.com",
+                    0,
+                    "/",
+                    "GET",
+                    &Default::default(),
+                    None
+                )
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("foo.bar.com", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("bar.com", 0, "/", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1952,9 +1979,11 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup("anything.com", 0, "/", "GET", &Default::default(), None)
-            .is_some());
+        assert!(
+            compiled
+                .lookup("anything.com", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
     }
 
     // ── Path trie lookup ────────────────────────────────────────────────
@@ -1985,18 +2014,26 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup("h", 0, "/api", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("h", 0, "/api/v1", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("h", 0, "/api/", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("h", 0, "/other", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup("h", 0, "/api", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("h", 0, "/api/v1", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("h", 0, "/api/", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("h", 0, "/other", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2025,15 +2062,21 @@ mod tests {
             tls_certs: vec![],
         };
         let compiled = CompiledRouteTable::compile(rt).unwrap();
-        assert!(compiled
-            .lookup("h", 0, "/health", "GET", &Default::default(), None)
-            .is_some());
-        assert!(compiled
-            .lookup("h", 0, "/health/", "GET", &Default::default(), None)
-            .is_none());
-        assert!(compiled
-            .lookup("h", 0, "/healthz", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup("h", 0, "/health", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            compiled
+                .lookup("h", 0, "/health/", "GET", &Default::default(), None)
+                .is_none()
+        );
+        assert!(
+            compiled
+                .lookup("h", 0, "/healthz", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2301,9 +2344,11 @@ mod tests {
         );
 
         // No header — should not match (gateway_api = true, so no fallback).
-        assert!(compiled
-            .lookup("h", 0, "/", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            compiled
+                .lookup("h", 0, "/", "GET", &Default::default(), None)
+                .is_none()
+        );
     }
 
     // ── Body rewrite compilation ────────────────────────────────────────
@@ -2775,10 +2820,11 @@ mod tests {
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.listeners[0].bind_addr.as_ref(), "0.0.0.0:9443");
         assert_eq!(cfg.tls_routes.len(), 2);
-        assert!(cfg
-            .tls_routes
-            .iter()
-            .all(|r| r.listener_id.as_ref() == cfg.listeners[0].id.as_ref()));
+        assert!(
+            cfg.tls_routes
+                .iter()
+                .all(|r| r.listener_id.as_ref() == cfg.listeners[0].id.as_ref())
+        );
     }
 
     #[test]

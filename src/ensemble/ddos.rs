@@ -1,9 +1,9 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use super::weights::ddos_weights;
 use super::mlp::mlp_predict_32;
-use super::tree::{tree_predict, TreeDecision};
+use super::tree::{TreeDecision, tree_predict};
+use super::weights::ddos_weights;
 use crate::ddos::model::DDoSAction;
 
 /// Which path the DDoS ensemble took to reach its verdict.

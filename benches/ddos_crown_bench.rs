@@ -7,7 +7,7 @@
 //! underlying outward-rounded IBP kernel is shared with scanner; only the
 //! input dimension and weight constants differ.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sunbeam_proxy::ensemble::crown::{certified_radius, ibp_mlp_pre_sigmoid};
 use sunbeam_proxy::ensemble::weights::ddos_weights;
 

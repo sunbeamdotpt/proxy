@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use pingora::server::{configuration::Opt, Server};
+use pingora::server::{Server, configuration::Opt};
 use pingora_proxy::http_proxy_service;
 use sunbeam_proxy::{acme::AcmeRoutes, config::RouteConfig, proxy::SunbeamProxy};
 

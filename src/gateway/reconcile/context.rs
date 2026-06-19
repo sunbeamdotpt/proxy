@@ -4,12 +4,12 @@
 //! Shared reconciler context and generic controller runner.
 
 use futures::StreamExt;
+use kube::Client;
 use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
-use kube::Client;
 use std::future::Future;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Context shared across all resource reconcilers.
 #[derive(Clone)]

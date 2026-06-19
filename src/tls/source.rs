@@ -9,7 +9,7 @@
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::tls::registry::{
-    cert_key_from_secret, certified_key_from_pem, CertStore, WildcardPattern,
+    CertStore, WildcardPattern, cert_key_from_secret, certified_key_from_pem,
 };
 use arc_swap::ArcSwap;
 use k8s_openapi::api::core::v1::Secret;
@@ -423,9 +423,11 @@ NUEy5fzO54cks0X7K9JIWJLigltzP4Jh5OwYUSD0UrKXSukj/LRKkL5E
 
         let store = build_gateway_cert_store(&client, &view).await.unwrap();
         assert!(store.exact.contains_key("example.com"));
-        assert!(store
-            .client_certs
-            .contains_key("gateway/default/backend-cert"));
+        assert!(
+            store
+                .client_certs
+                .contains_key("gateway/default/backend-cert")
+        );
     }
 
     fn fake_client_with_responses(responses: std::collections::HashMap<String, String>) -> Client {

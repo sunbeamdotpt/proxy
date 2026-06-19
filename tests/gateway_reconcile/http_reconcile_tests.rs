@@ -8,7 +8,7 @@ use sunbeam_proxy::gateway::model::{
     AllowedRoutes, GatewayState, ListenerSetState, NamespaceFrom, ReferenceGrantState,
     RouteNamespaces,
 };
-use sunbeam_proxy::gateway::reconcile::backend::{resolve_backend_refs, BackendResolutionStatus};
+use sunbeam_proxy::gateway::reconcile::backend::{BackendResolutionStatus, resolve_backend_refs};
 use sunbeam_proxy::gateway::reconcile::refgrant::GrantIndex;
 use sunbeam_proxy::gateway::reconcile::route::{
     reconcile_httproutes, reconcile_httproutes_with_context,

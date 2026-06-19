@@ -3,8 +3,8 @@
 
 use kube::runtime::controller::Action;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use sunbeam_proxy::gateway::api::{Gateway, TCPRoute, TLSRoute, UDPRoute};
 use sunbeam_proxy::gateway::model::{
@@ -12,17 +12,16 @@ use sunbeam_proxy::gateway::model::{
 };
 use sunbeam_proxy::gateway::reconcile::context::ReconcilerContext;
 use sunbeam_proxy::gateway::reconcile::l4route::{
-    error_policy_l4, l4_crd_available, maybe_run_tcproute_controller,
-    maybe_run_tlsroute_controller, maybe_run_udproute_controller, parse_tcproute,
-    parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
+    L4ParentStatus, ParsedBackendRef, ParsedParentRef, error_policy_l4, l4_crd_available,
+    maybe_run_tcproute_controller, maybe_run_tlsroute_controller, maybe_run_udproute_controller,
+    parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
     parse_udproute_state, patch_l4_status, reconcile_tcproute, reconcile_tcproutes,
     reconcile_tlsroute, reconcile_tlsroutes, reconcile_udproute, resolve_l4_backends,
     resolve_l4_backends_async, resolve_l4_parent_ref, run_tcproute_controller,
-    run_tlsroute_controller, run_udproute_controller, L4ParentStatus, ParsedBackendRef,
-    ParsedParentRef,
+    run_tlsroute_controller, run_udproute_controller,
 };
 use sunbeam_proxy::gateway::reconcile::refgrant::GrantIndex;
-use sunbeam_proxy::gateway::status::{conditions, ConditionStatus, ConditionType};
+use sunbeam_proxy::gateway::status::{ConditionStatus, ConditionType, conditions};
 
 fn gw_with_tcp_listener(ns: &str, name: &str, listener: &str, port: u16) -> GatewayState {
     GatewayState {
@@ -225,11 +224,13 @@ fn tcproute_rejected_on_http_listener() {
     );
     assert!(reconciled[0].route_state.parent_refs.is_empty());
     assert!(!reconciled[0].programmed);
-    assert!(reconciled[0].parent_statuses[0]
-        .conditions
-        .iter()
-        .any(|c| matches!(c.condition_type, ConditionType::Programmed)
-            && c.status == ConditionStatus::False));
+    assert!(
+        reconciled[0].parent_statuses[0]
+            .conditions
+            .iter()
+            .any(|c| matches!(c.condition_type, ConditionType::Programmed)
+                && c.status == ConditionStatus::False)
+    );
 }
 
 #[test]
@@ -781,12 +782,14 @@ fn build_status_parents_false_condition() {
         conditions[0].get("status").and_then(|v| v.as_str()),
         Some("False")
     );
-    assert!(!parents[0]
-        .get("parentRef")
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("sectionName"));
+    assert!(
+        !parents[0]
+            .get("parentRef")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("sectionName")
+    );
 }
 
 #[tokio::test]
@@ -1405,27 +1408,33 @@ async fn maybe_run_tcproute_controller_returns_handle_when_crd_installed() {
 async fn maybe_run_tcproute_controller_returns_none_when_crd_missing() {
     let client = l4_crd_available_client(404);
     let is_leader = Arc::new(AtomicBool::new(false));
-    assert!(maybe_run_tcproute_controller(client, is_leader)
-        .await
-        .is_none());
+    assert!(
+        maybe_run_tcproute_controller(client, is_leader)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn maybe_run_udproute_controller_returns_none_when_crd_missing() {
     let client = l4_crd_available_client(404);
     let is_leader = Arc::new(AtomicBool::new(false));
-    assert!(maybe_run_udproute_controller(client, is_leader)
-        .await
-        .is_none());
+    assert!(
+        maybe_run_udproute_controller(client, is_leader)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn maybe_run_tlsroute_controller_returns_none_when_crd_missing() {
     let client = l4_crd_available_client(404);
     let is_leader = Arc::new(AtomicBool::new(false));
-    assert!(maybe_run_tlsroute_controller(client, is_leader)
-        .await
-        .is_none());
+    assert!(
+        maybe_run_tlsroute_controller(client, is_leader)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

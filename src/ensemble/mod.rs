@@ -7,8 +7,6 @@ pub mod crown;
 pub mod ddos;
 /// DDoS crown certified radius.
 pub mod ddos_crown;
-/// Trained ensemble weights.
-pub mod weights;
 /// Mlp.
 pub mod mlp;
 /// Replay.
@@ -17,3 +15,5 @@ pub mod replay;
 pub mod scanner;
 /// Tree.
 pub mod tree;
+/// Trained ensemble weights.
+pub mod weights;

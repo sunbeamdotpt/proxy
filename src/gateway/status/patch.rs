@@ -102,14 +102,18 @@ mod tests {
         let stripped = strip_last_transition_time(&value);
         let conditions = stripped["conditions"].as_array().unwrap();
         assert_eq!(conditions.len(), 1);
-        assert!(!conditions[0]
-            .as_object()
-            .unwrap()
-            .contains_key("lastTransitionTime"));
-        assert!(!stripped["nested"]
-            .as_object()
-            .unwrap()
-            .contains_key("lastTransitionTime"));
+        assert!(
+            !conditions[0]
+                .as_object()
+                .unwrap()
+                .contains_key("lastTransitionTime")
+        );
+        assert!(
+            !stripped["nested"]
+                .as_object()
+                .unwrap()
+                .contains_key("lastTransitionTime")
+        );
         assert_eq!(stripped["nested"]["value"], 1);
     }
 }

@@ -8,8 +8,9 @@
 
 pub use crate::gateway::reconcile::route::http_parse::parse_httproute_state;
 pub use crate::gateway::reconcile::route::{
-    reconcile_httproute, reconcile_httproutes, reconcile_httproutes_with_context, reconcile_single,
-    run_httproute_controller, HTTPRouteContext, HTTPRouteParentStatus, ReconciledHTTPRoute,
+    HTTPRouteContext, HTTPRouteParentStatus, ReconciledHTTPRoute, reconcile_httproute,
+    reconcile_httproutes, reconcile_httproutes_with_context, reconcile_single,
+    run_httproute_controller,
 };
 
 /// Parse hostnames from an HTTPRoute spec.

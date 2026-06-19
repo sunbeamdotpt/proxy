@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use sunbeam_proxy::config::TlsPassthroughRoute;
 use sunbeam_proxy::sni;

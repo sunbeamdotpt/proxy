@@ -11,7 +11,7 @@ pub mod controller;
 pub mod state;
 
 pub(crate) use controller::patch_listener_set_statuses;
-pub use controller::{reconcile_listenerset, run_listenerset_controller, ListenerSetContext};
+pub use controller::{ListenerSetContext, reconcile_listenerset, run_listenerset_controller};
 pub use state::{
     build_listener_set_allowed_map, build_listener_set_state, build_listener_set_status,
     build_listener_state, count_attached_listener_sets, find_parent_gateway, listener_set_allowed,

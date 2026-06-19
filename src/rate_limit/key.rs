@@ -32,18 +32,20 @@ pub fn extract_key(
 ) -> RateLimitKey {
     // 1. Check for Kratos session cookie
     if let Some(cookies) = cookie_header
-        && let Some(value) = extract_cookie_value(cookies, "ory_kratos_session") {
-            return RateLimitKey::Identity(fx_hash(value));
-        }
+        && let Some(value) = extract_cookie_value(cookies, "ory_kratos_session")
+    {
+        return RateLimitKey::Identity(fx_hash(value));
+    }
 
     // 2. Check for Bearer token
     if let Some(auth) = auth_header
-        && let Some(token) = auth.strip_prefix("Bearer ") {
-            let token = token.trim();
-            if !token.is_empty() {
-                return RateLimitKey::Identity(fx_hash(token));
-            }
+        && let Some(token) = auth.strip_prefix("Bearer ")
+    {
+        let token = token.trim();
+        if !token.is_empty() {
+            return RateLimitKey::Identity(fx_hash(token));
         }
+    }
 
     // 3. Fall back to IP
     RateLimitKey::Ip(client_ip)
@@ -53,9 +55,10 @@ fn extract_cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
     for pair in cookies.split(';') {
         let pair = pair.trim();
         if let Some((k, v)) = pair.split_once('=')
-            && k.trim() == name {
-                return Some(v.trim());
-            }
+            && k.trim() == name
+        {
+            return Some(v.trim());
+        }
     }
     None
 }

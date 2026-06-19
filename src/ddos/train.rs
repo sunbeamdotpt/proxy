@@ -3,8 +3,8 @@
 
 use crate::ddos::audit_log;
 use crate::ddos::audit_log::AuditLog;
-use crate::ddos::features::{method_to_u8, FeatureVector, LogIpState, NormParams, NUM_FEATURES};
-use anyhow::{bail, Context, Result};
+use crate::ddos::features::{FeatureVector, LogIpState, NUM_FEATURES, NormParams, method_to_u8};
+use anyhow::{Context, Result, bail};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::hash::{Hash, Hasher};
@@ -458,8 +458,8 @@ pub fn run(args: TrainArgs) -> Result<()> {
         result.normal_count
     );
 
-    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&result.model)
-        .context("serializing model")?;
+    let encoded =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&result.model).context("serializing model")?;
     std::fs::write(&args.output, encoded.as_slice())
         .with_context(|| format!("writing model to {}", args.output))?;
 

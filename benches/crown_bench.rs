@@ -11,7 +11,7 @@
 //!    iterations.
 //! 3. `certified_radius @ 1e-5` — high-precision tolerance, ~17 iterations.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sunbeam_proxy::ensemble::crown::{certified_radius, ibp_mlp_pre_sigmoid};
 use sunbeam_proxy::ensemble::weights::scanner_weights;
 

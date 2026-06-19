@@ -4,22 +4,22 @@
 use crate::gateway::api::listenerset::ListenerSet;
 use crate::gateway::api::{Gateway, HTTPRoute, ReferenceGrant};
 use crate::gateway::model::ListenerSetState;
-use crate::gateway::reconcile::context::{run_controller, ReconcilerContext};
+use crate::gateway::reconcile::context::{ReconcilerContext, run_controller};
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::gatewayclass::supported_features;
 use crate::gateway::reconcile::listenerset::state::{
     attached_routes_per_listener, build_listener_set_allowed_map, build_listener_set_state,
     build_listener_set_status, resolve_listener_set_conflicts,
 };
-use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::reconcile::refgrant::{GrantIndex, reconcile_reference_grants};
 use crate::gateway::reconcile::trigger::trigger;
 use crate::gateway::status::patch::patch_status_if_changed;
+use kube::Client;
 use kube::api::Api;
 use kube::runtime::controller::Action;
-use kube::Client;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Context shared across ListenerSet reconcile invocations.

@@ -8,7 +8,7 @@ pub mod registry;
 pub mod source;
 
 pub use ca_bundle::UpstreamCaBundle;
-pub use registry::{certified_key_from_pem, CertStore, TlsRegistry, WildcardPattern};
+pub use registry::{CertStore, TlsRegistry, WildcardPattern, certified_key_from_pem};
 pub use source::{
-    merge_cert_store, CertSource, CompositeCertSource, DiskCertSource, GatewayCertSource,
+    CertSource, CompositeCertSource, DiskCertSource, GatewayCertSource, merge_cert_store,
 };

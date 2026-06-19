@@ -116,11 +116,7 @@ pub fn parse_allowed_routes(
                         .iter()
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect();
-                    if map.is_empty() {
-                        None
-                    } else {
-                        Some(map)
-                    }
+                    if map.is_empty() { None } else { Some(map) }
                 });
 
             RouteNamespaces { from, selector }
@@ -229,7 +225,7 @@ pub fn validate_listener_kinds(
                 "True",
                 "ResolvedRefs",
                 "All references resolved",
-            )
+            );
         }
     };
 

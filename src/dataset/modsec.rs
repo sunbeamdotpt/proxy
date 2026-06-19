@@ -70,9 +70,10 @@ fn parse_modsec_content(content: &str) -> Result<Vec<(AuditFields, String)>> {
     // Convert each transaction into AuditFields.
     for id in &id_order {
         if let Some(secs) = sections.get(id)
-            && let Some(fields) = transaction_to_audit_fields(secs) {
-                results.push(fields);
-            }
+            && let Some(fields) = transaction_to_audit_fields(secs)
+        {
+            results.push(fields);
+        }
     }
 
     Ok(results)

@@ -16,9 +16,9 @@ pub mod frontend_validation;
 pub mod listeners;
 
 pub use backend_tls::validate_gateway_backend_tls;
-pub use certificates::{validate_listener_certificates, CertValidation};
+pub use certificates::{CertValidation, validate_listener_certificates};
 pub use controller::{
-    build_gateway_state, reconcile_gateway, run_gateway_controller, GatewayContext,
+    GatewayContext, build_gateway_state, reconcile_gateway, run_gateway_controller,
 };
 pub use frontend_validation::{
     load_gateway_frontend_validations, validate_listener_frontend_validation,

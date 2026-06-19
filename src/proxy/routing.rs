@@ -101,9 +101,9 @@ impl SunbeamProxy {
             if !backend.is_empty()
                 && let Some(peer) =
                     make_peer(&backend, upstream.timeout, protocol, tls, client_cert).await
-                {
-                    return Ok(peer);
-                }
+            {
+                return Ok(peer);
+            }
             let mut resp = ResponseHeader::build(502, None)?;
             resp.insert_header("Content-Length", "0")?;
             session.write_response_header(Box::new(resp), true).await?;

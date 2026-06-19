@@ -3,7 +3,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
-use kube::{runtime::watcher, Api, Client};
+use kube::{Api, Client, runtime::watcher};
 use tokio::sync::mpsc;
 
 /// Watch the TLS Secret and config ConfigMap for changes.

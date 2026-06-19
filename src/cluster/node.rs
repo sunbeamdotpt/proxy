@@ -11,7 +11,7 @@ use futures::stream::{Stream, StreamExt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use iroh_gossip::net::Gossip;
-use iroh_gossip::{api::Event, proto::TopicId, ALPN};
+use iroh_gossip::{ALPN, api::Event, proto::TopicId};
 use tokio::sync::{mpsc, watch};
 
 use crate::cluster::bandwidth::{BandwidthMeter, BandwidthTracker, ClusterBandwidthState};
@@ -173,44 +173,56 @@ pub async fn run_cluster(
     );
 
     // 6. Subscribe to topics.
-    let bw_gossip_topic = try_init!(gossip
-        .subscribe(bandwidth_topic, peers.clone())
-        .await
-        .context("subscribing to bandwidth topic"));
+    let bw_gossip_topic = try_init!(
+        gossip
+            .subscribe(bandwidth_topic, peers.clone())
+            .await
+            .context("subscribing to bandwidth topic")
+    );
     let (bw_sender, bw_receiver) = bw_gossip_topic.split();
 
-    let models_gossip_topic = try_init!(gossip
-        .subscribe(models_topic, peers.clone())
-        .await
-        .context("subscribing to models topic"));
+    let models_gossip_topic = try_init!(
+        gossip
+            .subscribe(models_topic, peers.clone())
+            .await
+            .context("subscribing to models topic")
+    );
     let (_models_sender, models_receiver) = models_gossip_topic.split();
 
-    let leader_gossip_topic = try_init!(gossip
-        .subscribe(leader_topic, peers.clone())
-        .await
-        .context("subscribing to leader topic"));
+    let leader_gossip_topic = try_init!(
+        gossip
+            .subscribe(leader_topic, peers.clone())
+            .await
+            .context("subscribing to leader topic")
+    );
     let (_leader_sender, leader_receiver) = leader_gossip_topic.split();
 
-    let license_gossip_topic = try_init!(gossip
-        .subscribe(license_topic, peers.clone())
-        .await
-        .context("subscribing to license topic"));
+    let license_gossip_topic = try_init!(
+        gossip
+            .subscribe(license_topic, peers.clone())
+            .await
+            .context("subscribing to license topic")
+    );
     let (_license_sender, license_receiver) = license_gossip_topic.split();
 
     // Gateway API gossip topics.
     let gateway_state_topic = derive_topic(&cfg.tenant, "gateway_state");
     let gateway_notify_topic = derive_topic(&cfg.tenant, "gateway_notify");
 
-    let gs_gossip_topic = try_init!(gossip
-        .subscribe(gateway_state_topic, peers.clone())
-        .await
-        .context("subscribing to gateway_state topic"));
+    let gs_gossip_topic = try_init!(
+        gossip
+            .subscribe(gateway_state_topic, peers.clone())
+            .await
+            .context("subscribing to gateway_state topic")
+    );
     let (gs_sender, gs_receiver) = gs_gossip_topic.split();
 
-    let gn_gossip_topic = try_init!(gossip
-        .subscribe(gateway_notify_topic, peers)
-        .await
-        .context("subscribing to gateway_notify topic"));
+    let gn_gossip_topic = try_init!(
+        gossip
+            .subscribe(gateway_notify_topic, peers)
+            .await
+            .context("subscribing to gateway_notify topic")
+    );
     let (gn_sender, gn_receiver) = gn_gossip_topic.split();
 
     let (gateway_state_tx, mut gateway_state_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -514,9 +526,10 @@ where
 {
     while let Some(Ok(event)) = receiver.next().await {
         if let Event::Received(message) = event
-            && let Ok(msg) = ClusterMessage::decode(&message.content) {
-                apply_stub_message(&msg, channel);
-            }
+            && let Ok(msg) = ClusterMessage::decode(&message.content)
+        {
+            apply_stub_message(&msg, channel);
+        }
     }
 }
 

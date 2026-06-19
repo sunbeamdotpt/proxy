@@ -4,7 +4,7 @@
 //! Shared backend-ref resolution logic for Gateway API routes.
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
-use crate::gateway::status::{conditions, ConditionStatus, StatusCondition};
+use crate::gateway::status::{ConditionStatus, StatusCondition, conditions};
 
 /// Status of resolving backend references for a route.
 #[derive(Clone, Debug)]

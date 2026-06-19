@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use crate::config::RouteConfig;
-use crate::scanner::features::{self, fx_hash_bytes, SUSPICIOUS_EXTENSIONS_LIST};
+use crate::scanner::features::{self, SUSPICIOUS_EXTENSIONS_LIST, fx_hash_bytes};
 use crate::scanner::model::{ScannerAction, ScannerVerdict};
 use rustc_hash::FxHashSet;
 

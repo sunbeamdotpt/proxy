@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use sunbeam_proxy::config::{
     BodyRewrite, HeaderRule, PathRoute, RewriteRule, RouteConfig, TelemetryConfig,
 };
-use sunbeam_proxy::proxy::{backend_addr, SunbeamProxy};
+use sunbeam_proxy::proxy::{SunbeamProxy, backend_addr};
 use sunbeam_proxy::static_files::{cache_control_for, content_type_for};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -887,8 +887,8 @@ upstream_path_prefix = "{prefix}"
 // ─── Cluster bandwidth meter ────────────────────────────────────────────────
 
 use sunbeam_proxy::cluster::bandwidth::{
-    gbps_to_bytes_per_sec, BandwidthLimitResult, BandwidthLimiter, BandwidthMeter,
-    BandwidthTracker, ClusterBandwidthState,
+    BandwidthLimitResult, BandwidthLimiter, BandwidthMeter, BandwidthTracker,
+    ClusterBandwidthState, gbps_to_bytes_per_sec,
 };
 
 proptest! {

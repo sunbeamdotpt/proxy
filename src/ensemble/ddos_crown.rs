@@ -15,7 +15,7 @@
 //! and [`Sunbeam.DDoS.verdict_stable_allow_f32`] for the Lean specialization
 //! at `inputDim = 14`.
 
-use super::crown::{certified_radius, ibp_mlp_pre_sigmoid, PreSigmoidInterval};
+use super::crown::{PreSigmoidInterval, certified_radius, ibp_mlp_pre_sigmoid};
 use super::weights::ddos_weights;
 
 /// Pre-sigmoid output interval for the DDoS MLP over the L∞ ε-box around the

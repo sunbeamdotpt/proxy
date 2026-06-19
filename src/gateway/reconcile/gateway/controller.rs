@@ -3,20 +3,20 @@
 
 //! Gateway controller wiring: reconcile, context, and run loop.
 
-use crate::gateway::api::gateway::Gateway;
 use crate::gateway::api::ListenerSet;
+use crate::gateway::api::gateway::Gateway;
 use crate::gateway::model::GatewayState;
-use crate::gateway::reconcile::context::{run_controller, ReconcilerContext};
+use crate::gateway::reconcile::context::{ReconcilerContext, run_controller};
 use crate::gateway::reconcile::gateway::addresses::{
-    compute_gateway_conditions, gateway_status_addresses, implementation_address,
-    parse_gateway_addresses, validate_gateway_addresses, AddressValidation, GatewaySpecAddress,
+    AddressValidation, GatewaySpecAddress, compute_gateway_conditions, gateway_status_addresses,
+    implementation_address, parse_gateway_addresses, validate_gateway_addresses,
 };
 use crate::gateway::reconcile::gateway::attachment::count_attached_routes;
 use crate::gateway::reconcile::gateway::backend_tls::{
     gateway_backend_client_cert_ref, gateway_l4_ready, validate_gateway_backend_tls,
 };
 use crate::gateway::reconcile::gateway::certificates::{
-    validate_listener_certificates, CertValidation,
+    CertValidation, validate_listener_certificates,
 };
 use crate::gateway::reconcile::gateway::frontend_validation::{
     gateway_insecure_frontend_mode, validate_listener_frontend_validation,
@@ -25,17 +25,17 @@ use crate::gateway::reconcile::gateway::listeners::{
     build_listener_model, build_listener_status, listener_matches,
 };
 use crate::gateway::reconcile::gatewayclass::supported_features;
-use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::reconcile::refgrant::{GrantIndex, reconcile_reference_grants};
 use crate::gateway::status::patch::patch_status_if_changed;
 use crate::gateway::status::{ConditionStatus, ConditionType};
 use k8s_openapi::api::core::v1::ServiceAccount;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::Client;
 use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
-use kube::Client;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Reconcile a generated ServiceAccount that carries the Gateway's
@@ -247,13 +247,12 @@ pub async fn reconcile_gateway(
         );
 
     if ctx.is_leader.load(Ordering::Relaxed) {
-        if programmed_true
-            && let Some(l4_swap) = crate::l4::current::get() {
-                let l4_config = l4_swap.load();
-                if !gateway_l4_ready(&gw, &l4_config, &cert_errors) {
-                    return Ok(Action::requeue(Duration::from_millis(100)));
-                }
+        if programmed_true && let Some(l4_swap) = crate::l4::current::get() {
+            let l4_config = l4_swap.load();
+            if !gateway_l4_ready(&gw, &l4_config, &cert_errors) {
+                return Ok(Action::requeue(Duration::from_millis(100)));
             }
+        }
 
         let k8s_conditions: Vec<Condition> = conditions.iter().map(Condition::from).collect();
         let feature_set: std::collections::HashSet<String> =

@@ -68,9 +68,9 @@ pub fn write_from_secret(secret: &Secret, cert_path: &str, key_path: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::ByteString;
     use k8s_openapi::api::core::v1::Secret;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use k8s_openapi::ByteString;
     use std::collections::BTreeMap;
 
     fn secret_with_data(data: BTreeMap<String, ByteString>) -> Secret {

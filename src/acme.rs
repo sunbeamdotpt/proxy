@@ -3,7 +3,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::networking::v1::Ingress;
-use kube::{runtime::watcher, Api, Client};
+use kube::{Api, Client, runtime::watcher};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},

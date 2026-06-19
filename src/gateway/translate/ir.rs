@@ -50,9 +50,10 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
                 for filter in &rule.filters {
                     if let RouteFilter::UrlRewrite { hostname, path } = filter {
                         if let Some(path) = path
-                            && let Some(rw) = translate_rewrite(path) {
-                                rewrites.push(rw);
-                            }
+                            && let Some(rw) = translate_rewrite(path)
+                        {
+                            rewrites.push(rw);
+                        }
                         // hostname rewrite is handled per-path-route below
                         let _ = hostname;
                     }
@@ -61,39 +62,41 @@ pub fn translate_view(view: &GatewayView) -> Vec<RouteConfig> {
 
             // If no paths were produced, create a default catch-all path
             // using the first backend from the first rule (common case).
-            if paths.is_empty() && !http_route.rules.is_empty()
-                && let Some(first_backend) = http_route.rules[0].backends.first() {
-                    paths.push(PathRoute {
-                        prefix: "/".to_string(),
-                        backend: first_backend.backend.to_string(),
-                        strip_prefix: false,
-                        websocket: false,
-                        auth_request: None,
-                        auth_capture_headers: vec![],
-                        upstream_path_prefix: None,
-                        path_rewrite_full: None,
-                        hostname_rewrite: None,
-                        timeout_secs: None,
-                        timeout_ms: None,
-                        mirror_backends: vec![],
-                        deny: false,
-                        gateway_api_unprogrammed: unprogrammed,
-                        methods: vec![],
-                        weighted_backends: vec![],
-                        redirect: None,
-                        header_matches: vec![],
-                        query_param_matches: vec![],
-                        rule_order: 0,
-                        path_match_exact: false,
-                        request_headers: vec![],
-                        request_headers_add: vec![],
-                        request_headers_remove: vec![],
-                        response_headers: vec![],
-                        response_headers_add: vec![],
-                        response_headers_remove: vec![],
-                        cors: None,
-                    });
-                }
+            if paths.is_empty()
+                && !http_route.rules.is_empty()
+                && let Some(first_backend) = http_route.rules[0].backends.first()
+            {
+                paths.push(PathRoute {
+                    prefix: "/".to_string(),
+                    backend: first_backend.backend.to_string(),
+                    strip_prefix: false,
+                    websocket: false,
+                    auth_request: None,
+                    auth_capture_headers: vec![],
+                    upstream_path_prefix: None,
+                    path_rewrite_full: None,
+                    hostname_rewrite: None,
+                    timeout_secs: None,
+                    timeout_ms: None,
+                    mirror_backends: vec![],
+                    deny: false,
+                    gateway_api_unprogrammed: unprogrammed,
+                    methods: vec![],
+                    weighted_backends: vec![],
+                    redirect: None,
+                    header_matches: vec![],
+                    query_param_matches: vec![],
+                    rule_order: 0,
+                    path_match_exact: false,
+                    request_headers: vec![],
+                    request_headers_add: vec![],
+                    request_headers_remove: vec![],
+                    response_headers: vec![],
+                    response_headers_add: vec![],
+                    response_headers_remove: vec![],
+                    cors: None,
+                });
+            }
 
             let group = groups.entry(key).or_insert_with(|| RouteConfig {
                 host_prefix: host_prefix.clone(),

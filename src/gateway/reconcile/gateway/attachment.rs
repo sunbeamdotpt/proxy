@@ -10,8 +10,8 @@ use crate::gateway::reconcile::httproute::parse_route_hostnames;
 use crate::gateway::reconcile::parent::{
     listener_allows_kind, listener_hostname_intersects, namespace_allowed,
 };
-use kube::api::Api;
 use kube::Client;
+use kube::api::Api;
 use std::collections::HashMap;
 use std::sync::Arc;
 

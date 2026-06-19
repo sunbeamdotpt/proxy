@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sunbeam_proxy::config::DDoSConfig;
 use sunbeam_proxy::ddos::detector::DDoSDetector;
-use sunbeam_proxy::ddos::features::{NormParams, NUM_FEATURES};
+use sunbeam_proxy::ddos::features::{NUM_FEATURES, NormParams};
 use sunbeam_proxy::ddos::model::DDoSAction;
 
 // ---------------------------------------------------------------------------

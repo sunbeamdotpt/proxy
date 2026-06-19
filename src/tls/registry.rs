@@ -11,13 +11,13 @@ use arc_swap::ArcSwap;
 use pingora_core::utils::tls::CertKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{
-    danger::{ClientCertVerified, ClientCertVerifier},
     ClientHello, ResolvesServerCert, WebPkiClientVerifier,
+    danger::{ClientCertVerified, ClientCertVerifier},
 };
 use rustls::sign::CertifiedKey;
 use rustls::{
-    client::danger::HandshakeSignatureValid, DigitallySignedStruct, DistinguishedName,
-    RootCertStore, SignatureScheme,
+    DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -332,11 +332,12 @@ fn validate_cert_key_pair(
 
     // Reject certificates that explicitly forbid TLS server authentication.
     if let Ok(Some(eku)) = cert.extended_key_usage()
-        && !eku.value.server_auth {
-            return Err(anyhow::anyhow!(
-                "certificate lacks TLS server authentication extended key usage"
-            ));
-        }
+        && !eku.value.server_auth
+    {
+        return Err(anyhow::anyhow!(
+            "certificate lacks TLS server authentication extended key usage"
+        ));
+    }
 
     let signer = rustls::crypto::aws_lc_rs::sign::any_supported_type(key)
         .map_err(|e| anyhow::anyhow!("unsupported private key: {e}"))?;
@@ -711,9 +712,9 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn certified_key_from_secret_extracts_data() {
         ensure_provider();
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use k8s_openapi::ByteString;
         use std::collections::BTreeMap;
 
         let mut data = BTreeMap::new();
@@ -1086,9 +1087,9 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn cert_key_from_secret_errors_when_tls_crt_missing() {
         ensure_provider();
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use k8s_openapi::ByteString;
         use std::collections::BTreeMap;
 
         let mut data = BTreeMap::new();
@@ -1107,9 +1108,9 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn cert_key_from_secret_errors_when_tls_key_missing() {
         ensure_provider();
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use k8s_openapi::ByteString;
         use std::collections::BTreeMap;
 
         let mut data = BTreeMap::new();
@@ -1128,9 +1129,9 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn certified_key_from_secret_errors_when_tls_crt_missing() {
         ensure_provider();
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use k8s_openapi::ByteString;
         use std::collections::BTreeMap;
 
         let mut data = BTreeMap::new();
@@ -1149,9 +1150,9 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn certified_key_from_secret_errors_when_tls_key_missing() {
         ensure_provider();
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use k8s_openapi::ByteString;
         use std::collections::BTreeMap;
 
         let mut data = BTreeMap::new();

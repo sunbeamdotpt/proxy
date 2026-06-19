@@ -285,8 +285,8 @@ fn sigmoid_f32(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::mlp::mlp_predict_32;
-    use crate::ensemble::weights::scanner_weights;
     use super::*;
+    use crate::ensemble::weights::scanner_weights;
 
     /// Outward-rounded IBP bounds at ε = 0 sandwich the actual MLP output.
     #[test]

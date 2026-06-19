@@ -7,13 +7,13 @@ use crate::gateway::api::gateway::Gateway;
 use crate::gateway::model::view::FrontendValidation;
 use crate::gateway::model::{GatewayState, TlsMode};
 use crate::gateway::reconcile::gateway::certificates::{
-    validate_listener_certificates, CertValidation,
+    CertValidation, validate_listener_certificates,
 };
 use crate::gateway::reconcile::gateway::listeners::{listener_frontend_validation, parse_tls_mode};
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::Api;
 use kube::Client;
+use kube::api::Api;
 use std::sync::Arc;
 
 /// Raw CA certificate reference extracted from a listener validation block.
@@ -79,9 +79,10 @@ pub(crate) fn gateway_insecure_frontend_mode(gw: &Gateway) -> bool {
         }
         let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
         if let Some(spec) = listener_frontend_validation(gw_tls, port)
-            && spec.allow_insecure_fallback {
-                return true;
-            }
+            && spec.allow_insecure_fallback
+        {
+            return true;
+        }
     }
     false
 }
@@ -153,7 +154,7 @@ pub async fn validate_listener_frontend_validation(
                 return Some(CertValidation {
                     reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap not found",
-                })
+                });
             }
         };
         let data = match cm.data.as_ref() {
@@ -162,7 +163,7 @@ pub async fn validate_listener_frontend_validation(
                 return Some(CertValidation {
                     reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap has no data",
-                })
+                });
             }
         };
         let ca = match data.get("ca.crt") {
@@ -171,7 +172,7 @@ pub async fn validate_listener_frontend_validation(
                 return Some(CertValidation {
                     reason: "InvalidCACertificateRef",
                     message: "Frontend CA certificate ConfigMap missing ca.crt",
-                })
+                });
             }
         };
         if !ca_bundle_valid(ca) {
@@ -292,7 +293,7 @@ mod tests {
     use crate::gateway::reconcile::gateway::certificates::CertValidation;
     use crate::gateway::reconcile::gateway::listeners::build_listener_status;
     use crate::gateway::reconcile::gateway::test_helpers::{
-        cross_ns_grant, fake_kube_client, TEST_CERT_PEM,
+        TEST_CERT_PEM, cross_ns_grant, fake_kube_client,
     };
     use std::sync::Arc;
 
@@ -474,11 +475,10 @@ mod tests {
         assert!(
             listener_frontend_validation(Some(&serde_json::json!("not-object")), 443).is_none()
         );
-        assert!(listener_frontend_validation(
-            Some(&serde_json::json!({"frontend": "not-object"})),
-            443
-        )
-        .is_none());
+        assert!(
+            listener_frontend_validation(Some(&serde_json::json!({"frontend": "not-object"})), 443)
+                .is_none()
+        );
     }
 
     #[test]

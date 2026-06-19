@@ -199,11 +199,7 @@ pub fn export_to_file(model: &ExportedModel, path: &Path) -> Result<()> {
 
 /// Sanitize a float for Rust source: replace NaN/Inf with 0.0.
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() {
-        v
-    } else {
-        0.0
-    }
+    if v.is_finite() { v } else { 0.0 }
 }
 
 fn write_f32_array(s: &mut String, name: &str, values: &[f32]) {

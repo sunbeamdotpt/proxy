@@ -15,7 +15,7 @@ use crate::ir::{ListenerConfig, RouteTable};
 use crate::proxy::{CompiledRewrites, SunbeamProxy};
 use arc_swap::ArcSwap;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -379,9 +379,11 @@ mod tests {
         mgr.apply("gateway-api", route_table_for_host("example.com"))
             .unwrap();
         let current = mgr.current().load();
-        assert!(current
-            .lookup("example.com", 0, "/", "GET", &Default::default(), None)
-            .is_some());
+        assert!(
+            current
+                .lookup("example.com", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
     }
 
     #[test]
@@ -402,22 +404,25 @@ mod tests {
         mgr.apply("gateway-api", route_table_for_host("v2.test"))
             .unwrap();
 
-        assert!(mgr
-            .current()
-            .load()
-            .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
-            .is_some());
+        assert!(
+            mgr.current()
+                .load()
+                .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
         assert!(mgr.rollback(1));
-        assert!(mgr
-            .current()
-            .load()
-            .lookup("v1.test", 0, "/", "GET", &Default::default(), None)
-            .is_some());
-        assert!(mgr
-            .current()
-            .load()
-            .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
-            .is_none());
+        assert!(
+            mgr.current()
+                .load()
+                .lookup("v1.test", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
+        assert!(
+            mgr.current()
+                .load()
+                .lookup("v2.test", 0, "/", "GET", &Default::default(), None)
+                .is_none()
+        );
         assert_eq!(mgr.versions().len(), 1);
     }
 
@@ -442,11 +447,12 @@ mod tests {
         assert_eq!(mgr.versions().len(), 2);
         // Oldest version was evicted; rollback(1) should go to b.test.
         assert!(mgr.rollback(1));
-        assert!(mgr
-            .current()
-            .load()
-            .lookup("b.test", 0, "/", "GET", &Default::default(), None)
-            .is_some());
+        assert!(
+            mgr.current()
+                .load()
+                .lookup("b.test", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
     }
 
     #[test]
@@ -511,11 +517,12 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(mgr
-            .current()
-            .load()
-            .lookup("spawn.test", 0, "/", "GET", &Default::default(), None)
-            .is_some());
+        assert!(
+            mgr.current()
+                .load()
+                .lookup("spawn.test", 0, "/", "GET", &Default::default(), None)
+                .is_some()
+        );
     }
 
     #[test]

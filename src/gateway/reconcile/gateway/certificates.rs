@@ -5,8 +5,8 @@
 
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use k8s_openapi::api::core::v1::Secret;
-use kube::api::Api;
 use kube::Client;
+use kube::api::Api;
 
 /// Certificate validation outcome for a single listener.
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +59,7 @@ pub async fn validate_listener_certificates(
                 return Some(CertValidation {
                     reason: "InvalidCertificateRef",
                     message: "CertificateRef name is required",
-                })
+                });
             }
         };
         let ns = cert
@@ -91,7 +91,7 @@ pub async fn validate_listener_certificates(
                 return Some(CertValidation {
                     reason: "InvalidCertificateRef",
                     message: "CertificateRef Secret not found",
-                })
+                });
             }
         };
         if !secret_data_valid(&secret) {
@@ -126,7 +126,7 @@ pub(crate) fn secret_data_valid(secret: &Secret) -> bool {
 mod tests {
     use super::*;
     use crate::gateway::reconcile::gateway::test_helpers::{
-        cross_ns_grant, fake_kube_client, CERT_B64, KEY_B64,
+        CERT_B64, KEY_B64, cross_ns_grant, fake_kube_client,
     };
 
     #[test]

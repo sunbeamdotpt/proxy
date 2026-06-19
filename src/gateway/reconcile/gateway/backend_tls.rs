@@ -4,13 +4,13 @@
 //! Backend / client TLS validation for Gateways.
 
 use crate::gateway::api::gateway::Gateway;
-use crate::gateway::reconcile::gateway::certificates::{secret_data_valid, CertValidation};
+use crate::gateway::reconcile::gateway::certificates::{CertValidation, secret_data_valid};
 use crate::gateway::reconcile::gateway::listeners::listener_frontend_validation;
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::ir::compile::CompiledL4Config;
 use k8s_openapi::api::core::v1::Secret;
-use kube::api::Api;
 use kube::Client;
+use kube::api::Api;
 use std::sync::Arc;
 
 /// Returns true when the compiled L4 dataplane has applied this Gateway's
@@ -131,7 +131,7 @@ pub async fn validate_gateway_backend_tls(
             return Some(CertValidation {
                 reason: "InvalidClientCertificateRef",
                 message: "Gateway backend clientCertificateRef name is required",
-            })
+            });
         }
     };
     let gw_ns = gw.metadata.namespace.as_deref().unwrap_or("default");
@@ -172,7 +172,7 @@ pub async fn validate_gateway_backend_tls(
             return Some(CertValidation {
                 reason: "InvalidClientCertificateRef",
                 message: "Gateway backend clientCertificateRef Secret not found",
-            })
+            });
         }
     }
 
@@ -183,7 +183,7 @@ pub async fn validate_gateway_backend_tls(
 mod tests {
     use super::*;
     use crate::gateway::reconcile::gateway::test_helpers::{
-        cross_ns_grant, fake_kube_client, CERT_B64, KEY_B64, TEST_CERT_PEM,
+        CERT_B64, KEY_B64, TEST_CERT_PEM, cross_ns_grant, fake_kube_client,
     };
 
     #[tokio::test]

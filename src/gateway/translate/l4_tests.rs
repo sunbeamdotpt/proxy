@@ -192,18 +192,26 @@ fn translate_l4_routes_creates_listeners_and_routes() {
     assert!(ids.contains(&"default/gw-1/tcp"));
     assert!(ids.contains(&"default/gw-1/udp"));
     assert!(ids.contains(&"default/gw-1/tls"));
-    assert!(routes
-        .iter()
-        .any(|r| matches!(r.action, crate::ir::L4Action::TcpRelay(_))));
-    assert!(routes
-        .iter()
-        .any(|r| matches!(r.action, crate::ir::L4Action::UdpRelay(_))));
-    assert!(routes
-        .iter()
-        .any(|r| matches!(r.action, crate::ir::L4Action::TlsPassthrough(_))));
-    assert!(routes
-        .iter()
-        .any(|r| matches!(r.match_, crate::ir::L4Match::Sni(_))));
+    assert!(
+        routes
+            .iter()
+            .any(|r| matches!(r.action, crate::ir::L4Action::TcpRelay(_)))
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|r| matches!(r.action, crate::ir::L4Action::UdpRelay(_)))
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|r| matches!(r.action, crate::ir::L4Action::TlsPassthrough(_)))
+    );
+    assert!(
+        routes
+            .iter()
+            .any(|r| matches!(r.match_, crate::ir::L4Match::Sni(_)))
+    );
 }
 
 fn http_gateway() -> GatewayState {
@@ -383,7 +391,9 @@ fn translate_l4_routes_uses_passthrough_action_for_passthrough_listener() {
         ..Default::default()
     };
     let (_listeners, routes) = translate_l4_routes(&view);
-    assert!(routes
-        .iter()
-        .any(|r| matches!(r.action, crate::ir::L4Action::TlsPassthrough(_))));
+    assert!(
+        routes
+            .iter()
+            .any(|r| matches!(r.action, crate::ir::L4Action::TlsPassthrough(_)))
+    );
 }

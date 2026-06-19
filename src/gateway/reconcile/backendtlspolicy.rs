@@ -16,7 +16,7 @@ use crate::gateway::model::{
 use crate::gateway::reconcile::gatewayclass::CONTROLLER_NAME;
 use crate::gateway::reconcile::refgrant::GrantIndex;
 use crate::gateway::status::patch::patch_status_if_changed;
-use crate::gateway::status::{conditions, ConditionStatus};
+use crate::gateway::status::{ConditionStatus, conditions};
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::api::Api;

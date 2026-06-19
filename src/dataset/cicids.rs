@@ -193,29 +193,33 @@ fn parse_csv_file(
 
         // Flow Duration (microseconds in CIC-IDS2017) → we treat as burst duration.
         if let Some(col) = col_flow_duration
-            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok()) {
-                // Convert microseconds to seconds.
-                acc.burst_duration.push(val / 1_000_000.0);
-            }
+            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            // Convert microseconds to seconds.
+            acc.burst_duration.push(val / 1_000_000.0);
+        }
 
         // Flow IAT Mean (microseconds) → inter-arrival time.
         if let Some(col) = col_iat_mean
-            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok()) {
-                acc.inter_arrival.push(val / 1_000_000.0);
-            }
+            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            acc.inter_arrival.push(val / 1_000_000.0);
+        }
 
         // Flow IAT Std → used as inter_arrival_std contribution.
         if let Some(col) = col_iat_std
-            && let Some(_val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok()) {
-                // The per-flow IAT std contributes to the overall std via Welford above.
-                // We use the IAT Mean values; std is computed from those.
-            }
+            && let Some(_val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            // The per-flow IAT std contributes to the overall std via Welford above.
+            // We use the IAT Mean values; std is computed from those.
+        }
 
         // Flow Bytes/s.
         if let Some(col) = col_bytes_per_sec
-            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok()) {
-                acc.flow_bytes_per_sec.push(val);
-            }
+            && let Some(val) = record.get(col).and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            acc.flow_bytes_per_sec.push(val);
+        }
     }
 
     Ok(())

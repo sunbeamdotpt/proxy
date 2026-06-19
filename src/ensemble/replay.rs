@@ -5,10 +5,10 @@
 
 use crate::audit::AuditLogLine;
 use crate::ddos::audit_log;
-use crate::ddos::features::{method_to_u8, LogIpState};
+use crate::ddos::features::{LogIpState, method_to_u8};
 use crate::ddos::model::DDoSAction;
-use crate::ensemble::ddos::{ddos_ensemble_predict, DDoSEnsemblePath};
-use crate::ensemble::scanner::{scanner_ensemble_predict, EnsemblePath};
+use crate::ensemble::ddos::{DDoSEnsemblePath, ddos_ensemble_predict};
+use crate::ensemble::scanner::{EnsemblePath, scanner_ensemble_predict};
 use crate::scanner::features::{self, fx_hash_bytes};
 use crate::scanner::model::ScannerAction;
 

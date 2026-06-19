@@ -22,9 +22,9 @@ use http::header::{CONNECTION, EXPECT, HOST, UPGRADE};
 use pingora_cache::{
     CacheKey, CacheMeta, ForcedFreshness, HitHandler, NoCacheReason, RespCacheable,
 };
+use pingora_core::Result;
 use pingora_core::upstreams::peer::{HttpPeer, Scheme};
 use pingora_core::utils::tls::CertKey;
-use pingora_core::Result;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use regex::Regex;
@@ -44,7 +44,7 @@ mod upstream_tls;
 
 pub use ctx::RequestCtx;
 use match_::{build_redirect_location_ir, cors_allow_origin, pick_weighted_backend_ir_index};
-use upstream_tls::{alpn_for_protocol, DynamicUpstreamL4};
+use upstream_tls::{DynamicUpstreamL4, alpn_for_protocol};
 
 /// Build an HttpPeer with configurable timeouts and optional TLS settings.
 ///
@@ -376,17 +376,19 @@ impl SunbeamProxy {
 
         for header in &["cf-connecting-ip", "x-real-ip"] {
             if let Some(val) = headers.get(*header).and_then(|v| v.to_str().ok())
-                && let Ok(ip) = val.trim().parse::<IpAddr>() {
-                    return Some(ip);
-                }
+                && let Ok(ip) = val.trim().parse::<IpAddr>()
+            {
+                return Some(ip);
+            }
         }
 
         // X-Forwarded-For: client, proxy1, proxy2 — take the first entry
         if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
             && let Some(first) = val.split(',').next()
-                && let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return Some(ip);
-                }
+            && let Ok(ip) = first.trim().parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
 
         Some(socket_ip)
     }
@@ -434,19 +436,20 @@ fn https_terminate_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Opti
     for route in &l4_config.https_routes {
         if let L4Action::TerminateAndHttp(target) = &route.action
             && let Ok(target_addr) = target.as_ref().parse::<SocketAddr>()
-                && target_addr == local
-                    && let Some(listener) = l4_config
-                        .listeners
-                        .iter()
-                        .find(|l| l.id.as_ref() == route.listener_id.as_ref())
-                        && matches!(listener.protocol, Protocol::Https | Protocol::Tls) {
-                            return listener
-                                .bind_addr
-                                .as_ref()
-                                .rsplit(':')
-                                .next()
-                                .and_then(|p| p.parse().ok());
-                        }
+            && target_addr == local
+            && let Some(listener) = l4_config
+                .listeners
+                .iter()
+                .find(|l| l.id.as_ref() == route.listener_id.as_ref())
+            && matches!(listener.protocol, Protocol::Https | Protocol::Tls)
+        {
+            return listener
+                .bind_addr
+                .as_ref()
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok());
+        }
     }
     None
 }
@@ -458,19 +461,20 @@ fn http_relay_port(l4_config: &CompiledL4Config, local: SocketAddr) -> Option<u1
     for route in &l4_config.http_routes {
         if let L4Action::HttpRelay(target) = &route.action
             && let Ok(target_addr) = target.as_ref().parse::<SocketAddr>()
-                && target_addr == local
-                    && let Some(listener) = l4_config
-                        .listeners
-                        .iter()
-                        .find(|l| l.id.as_ref() == route.listener_id.as_ref())
-                        && listener.protocol == Protocol::Http {
-                            return listener
-                                .bind_addr
-                                .as_ref()
-                                .rsplit(':')
-                                .next()
-                                .and_then(|p| p.parse().ok());
-                        }
+            && target_addr == local
+            && let Some(listener) = l4_config
+                .listeners
+                .iter()
+                .find(|l| l.id.as_ref() == route.listener_id.as_ref())
+            && listener.protocol == Protocol::Http
+        {
+            return listener
+                .bind_addr
+                .as_ref()
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok());
+        }
     }
     None
 }
@@ -646,9 +650,10 @@ impl ProxyHttp for SunbeamProxy {
         };
 
         if code > 0
-            && let Err(err) = session.respond_error(code).await {
-                tracing::error!(%err, "failed to send error response to downstream");
-            }
+            && let Err(err) = session.respond_error(code).await
+        {
+            tracing::error!(%err, "failed to send error response to downstream");
+        }
 
         pingora_proxy::FailToProxy {
             error_code: code,
@@ -1252,12 +1257,16 @@ mod tests {
             false,
         )]));
         let headers = http::header::HeaderMap::new();
-        assert!(proxy
-            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("other.com", 0, "/", "GET", &headers, None)
-            .is_none());
+        assert!(
+            proxy
+                .lookup_plan("example.com", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("other.com", 0, "/", "GET", &headers, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1268,12 +1277,16 @@ mod tests {
             false,
         )]));
         let headers = http::header::HeaderMap::new();
-        assert!(proxy
-            .lookup_plan("foo.example.com", 0, "/", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("example.com", 0, "/", "GET", &headers, None)
-            .is_none());
+        assert!(
+            proxy
+                .lookup_plan("foo.example.com", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("example.com", 0, "/", "GET", &headers, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1375,15 +1388,21 @@ mod tests {
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
-        assert!(proxy
-            .lookup_plan("", 0, "/", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("first.com", 0, "/", "GET", &headers, None)
-            .is_some());
+        assert!(
+            proxy
+                .lookup_plan("", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("first.com", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
         assert!(proxy.has_matching_gateway_api_listener("sub.third.com", 0));
         assert!(proxy.has_matching_gateway_api_listener("first.com", 0));
     }
@@ -1439,12 +1458,16 @@ mod tests {
         .unwrap();
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
-        assert!(proxy
-            .lookup_plan("first.com", 0, "/", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
-            .is_none());
+        assert!(
+            proxy
+                .lookup_plan("first.com", 0, "/", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("sub.third.com", 0, "/", "GET", &headers, None)
+                .is_none()
+        );
         assert!(proxy.has_matching_gateway_api_listener("first.com", 0));
         assert!(!proxy.has_matching_gateway_api_listener("sub.third.com", 0));
     }
@@ -1541,19 +1564,27 @@ mod tests {
         let proxy = make_proxy(table);
         let headers = http::header::HeaderMap::new();
         // Empty-listener route is used when no more specific listener matches.
-        assert!(proxy
-            .lookup_plan("bar.com", 0, "/empty", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("bar.example.com", 0, "/empty", "GET", &headers, None)
-            .is_none());
+        assert!(
+            proxy
+                .lookup_plan("bar.com", 0, "/empty", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("bar.example.com", 0, "/empty", "GET", &headers, None)
+                .is_none()
+        );
         // Wildcard-listener route is used for matching hosts.
-        assert!(proxy
-            .lookup_plan("bar.example.com", 0, "/wildcard", "GET", &headers, None)
-            .is_some());
-        assert!(proxy
-            .lookup_plan("bar.com", 0, "/wildcard", "GET", &headers, None)
-            .is_none());
+        assert!(
+            proxy
+                .lookup_plan("bar.example.com", 0, "/wildcard", "GET", &headers, None)
+                .is_some()
+        );
+        assert!(
+            proxy
+                .lookup_plan("bar.com", 0, "/wildcard", "GET", &headers, None)
+                .is_none()
+        );
     }
 
     #[test]

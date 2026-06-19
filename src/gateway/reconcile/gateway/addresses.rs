@@ -7,7 +7,7 @@ use crate::gateway::api::gateway::Gateway;
 use crate::gateway::api::gatewayclass::GatewayClass;
 use crate::gateway::reconcile::gateway::certificates::CertValidation;
 use crate::gateway::reconcile::gatewayclass::CONTROLLER_NAME;
-use crate::gateway::status::{conditions, ConditionStatus, ConditionType, StatusCondition};
+use crate::gateway::status::{ConditionStatus, ConditionType, StatusCondition, conditions};
 
 /// A Gateway address requested in `spec.addresses`.
 #[derive(Clone, Debug)]

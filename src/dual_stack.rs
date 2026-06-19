@@ -29,9 +29,9 @@ pin_project_lite::pin_project! {
 }
 
 impl<
-        F: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
-        F2: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
-    > std::future::Future for AcceptFut<F, F2>
+    F: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
+    F2: std::future::Future<Output = Result<(TcpStream, SocketAddr)>>,
+> std::future::Future for AcceptFut<F, F2>
 {
     type Output = Result<(TcpStream, SocketAddr)>;
 
@@ -201,8 +201,10 @@ mod tests {
 
     #[tokio::test]
     async fn bind_bad_address_returns_error() {
-        assert!(DualStackTcpListener::bind("not-an-addr", "127.0.0.1:0")
-            .await
-            .is_err());
+        assert!(
+            DualStackTcpListener::bind("not-an-addr", "127.0.0.1:0")
+                .await
+                .is_err()
+        );
     }
 }

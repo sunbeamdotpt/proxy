@@ -3,8 +3,8 @@
 
 use kube::runtime::controller::Action;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use sunbeam_proxy::gateway::api::listenerset::{ListenerSet, ListenerSetListeners};
 use sunbeam_proxy::gateway::api::{Gateway, HTTPRoute};
@@ -341,9 +341,11 @@ fn build_listener_set_status_accepted() {
     let listeners = status.get("listeners").unwrap().as_array().unwrap();
     assert_eq!(listeners.len(), 1);
     let conditions = listeners[0].get("conditions").unwrap().as_array().unwrap();
-    assert!(conditions
-        .iter()
-        .any(|c| c.get("type").unwrap() == "Accepted"));
+    assert!(
+        conditions
+            .iter()
+            .any(|c| c.get("type").unwrap() == "Accepted")
+    );
 }
 
 #[test]
@@ -352,9 +354,11 @@ fn build_listener_set_status_not_allowed() {
     state.reason = Arc::from("NotAllowed");
     let status = build_listener_set_status(&state, &[], &std::collections::HashSet::new());
     let conditions = status.get("conditions").unwrap().as_array().unwrap();
-    assert!(conditions
-        .iter()
-        .any(|c| c.get("reason").unwrap() == "NotAllowed"));
+    assert!(
+        conditions
+            .iter()
+            .any(|c| c.get("reason").unwrap() == "NotAllowed")
+    );
 }
 
 #[test]
@@ -366,13 +370,15 @@ fn build_listener_set_status_conflicted_listener() {
         .insert(Arc::from("http"), Arc::from("HostnameConflict"));
     let status = build_listener_set_status(&state, &[0], &std::collections::HashSet::new());
     let listeners = status.get("listeners").unwrap().as_array().unwrap();
-    assert!(listeners[0]
-        .get("conditions")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c.get("type").unwrap() == "Conflicted"));
+    assert!(
+        listeners[0]
+            .get("conditions")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.get("type").unwrap() == "Conflicted")
+    );
 }
 
 #[test]
@@ -383,9 +389,11 @@ fn build_listener_set_status_kind_error() {
     let status = build_listener_set_status(&state, &[0], &std::collections::HashSet::new());
     let listeners = status.get("listeners").unwrap().as_array().unwrap();
     let conditions = listeners[0].get("conditions").unwrap().as_array().unwrap();
-    assert!(conditions
-        .iter()
-        .any(|c| c.get("type").unwrap() == "ResolvedRefs"));
+    assert!(
+        conditions
+            .iter()
+            .any(|c| c.get("type").unwrap() == "ResolvedRefs")
+    );
 }
 
 #[test]
@@ -396,9 +404,11 @@ fn build_listener_set_status_cert_error() {
     let status = build_listener_set_status(&state, &[0], &std::collections::HashSet::new());
     let listeners = status.get("listeners").unwrap().as_array().unwrap();
     let conditions = listeners[0].get("conditions").unwrap().as_array().unwrap();
-    assert!(conditions
-        .iter()
-        .any(|c| c.get("reason").unwrap() == "RefNotPermitted"));
+    assert!(
+        conditions
+            .iter()
+            .any(|c| c.get("reason").unwrap() == "RefNotPermitted")
+    );
 }
 
 #[test]

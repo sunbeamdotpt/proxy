@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 use sunbeam_proxy::dataset::sample::{
-    load_dataset, DataSource, DatasetManifest, DatasetStats, TrainingSample,
+    DataSource, DatasetManifest, DatasetStats, TrainingSample, load_dataset,
 };
 use sunbeam_proxy::ensemble::crown::certified_radius;
 use sunbeam_proxy::ensemble::ddos_crown::ddos_certified_radius;

@@ -36,7 +36,7 @@ use crate::gateway::model::{
     TLSRouteState, UDPRouteState, WeightedBackend,
 };
 use crate::gateway::reconcile::backend::{
-    resolve_backend_refs_async, BackendResolutionStatus, RuleBackendResolution,
+    BackendResolutionStatus, RuleBackendResolution, resolve_backend_refs_async,
 };
 use crate::gateway::reconcile::gateway::build_gateway_state;
 use crate::gateway::reconcile::grpcroute::{
@@ -46,11 +46,11 @@ use crate::gateway::reconcile::httproute::{
     parse_httproute_state, reconcile_httproutes_with_context,
 };
 use crate::gateway::reconcile::l4route::{
-    parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state, parse_udproute,
-    parse_udproute_state, reconcile_tcproutes, reconcile_tlsroutes, reconcile_udproutes,
-    resolve_l4_backends_async, ReconciledL4Route,
+    ReconciledL4Route, parse_tcproute, parse_tcproute_state, parse_tlsroute, parse_tlsroute_state,
+    parse_udproute, parse_udproute_state, reconcile_tcproutes, reconcile_tlsroutes,
+    reconcile_udproutes, resolve_l4_backends_async,
 };
-use crate::gateway::reconcile::refgrant::{reconcile_reference_grants, GrantIndex};
+use crate::gateway::reconcile::refgrant::{GrantIndex, reconcile_reference_grants};
 use crate::gateway::reconcile::route::{ReconciledRoute, RouteResource};
 use kube::api::Api;
 use std::collections::HashMap;

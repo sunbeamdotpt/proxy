@@ -6,14 +6,14 @@
 use gateway_api::grpcroutes::GrpcRouteRulesBackendRefs;
 use kube::runtime::controller::Action;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
-use sunbeam_proxy::gateway::api::grpcroute::GRPCRouteStatus;
 use sunbeam_proxy::gateway::api::GRPCRoute;
+use sunbeam_proxy::gateway::api::grpcroute::GRPCRouteStatus;
 use sunbeam_proxy::gateway::model::{GatewayState, ListenerState};
 use sunbeam_proxy::gateway::reconcile::backend::{
-    resolve_backend_refs, resolve_backend_refs_async, BackendResolutionStatus,
+    BackendResolutionStatus, resolve_backend_refs, resolve_backend_refs_async,
 };
 use sunbeam_proxy::gateway::reconcile::context::ReconcilerContext;
 use sunbeam_proxy::gateway::reconcile::refgrant::GrantIndex;

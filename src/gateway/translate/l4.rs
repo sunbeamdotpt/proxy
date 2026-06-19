@@ -131,9 +131,10 @@ pub(crate) fn translate_l4_routes(
                     continue;
                 }
                 if let Some(section) = section_filter
-                    && listener.name.as_ref() != section {
-                        continue;
-                    }
+                    && listener.name.as_ref() != section
+                {
+                    continue;
+                }
                 let listener_match = listener
                     .hostname
                     .as_deref()
@@ -306,9 +307,10 @@ fn add_l4_routes_for_parents<S, F>(
                 continue;
             }
             if let Some(section) = section_filter
-                && listener.name.as_ref() != section {
-                    continue;
-                }
+                && listener.name.as_ref() != section
+            {
+                continue;
+            }
             add_l4_listener(listeners, gateway, listener);
             let id: Arc<str> = Arc::from(format!(
                 "{}/{}/{}",

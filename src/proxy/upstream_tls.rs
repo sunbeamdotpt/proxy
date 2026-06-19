@@ -24,10 +24,10 @@ use pingora_core::upstreams::peer::ALPN;
 use pingora_core::utils::tls::CertKey;
 use pingora_core::{Error, ErrorType, OrErr, Result};
 use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    client::WebPkiServerVerifier,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
     CertificateError, DigitallySignedStruct, Error as RustlsError, RootCertStore,
+    client::WebPkiServerVerifier,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
 };
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -95,7 +95,7 @@ impl Connect for DynamicUpstreamL4 {
                 return Error::e_explain(
                     ErrorType::ConnectError,
                     "unsupported upstream address for dynamic TLS",
-                )
+                );
             }
         };
 
@@ -367,24 +367,25 @@ fn first_server_name(
 fn san_values(cert: &CertificateDer<'_>) -> Vec<String> {
     let mut names = Vec::new();
     if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref())
-        && let Ok(Some(san)) = parsed.subject_alternative_name() {
-            for name in &san.value.general_names {
-                match name {
-                    x509_parser::extensions::GeneralName::DNSName(d) => {
-                        names.push(d.to_string());
-                    }
-                    x509_parser::extensions::GeneralName::IPAddress(octets) => {
-                        if let Some(ip) = ip_addr_from_octets(octets) {
-                            names.push(ip.to_string());
-                        }
-                    }
-                    x509_parser::extensions::GeneralName::URI(uri) => {
-                        names.push(uri.to_string());
-                    }
-                    _ => {}
+        && let Ok(Some(san)) = parsed.subject_alternative_name()
+    {
+        for name in &san.value.general_names {
+            match name {
+                x509_parser::extensions::GeneralName::DNSName(d) => {
+                    names.push(d.to_string());
                 }
+                x509_parser::extensions::GeneralName::IPAddress(octets) => {
+                    if let Some(ip) = ip_addr_from_octets(octets) {
+                        names.push(ip.to_string());
+                    }
+                }
+                x509_parser::extensions::GeneralName::URI(uri) => {
+                    names.push(uri.to_string());
+                }
+                _ => {}
             }
         }
+    }
     names
 }
 

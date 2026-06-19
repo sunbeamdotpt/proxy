@@ -3,8 +3,8 @@
 
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Per-node atomic bandwidth counters. Zero contention on the hot path
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn limiter_rejects_over_cap() {
         let meter = std::sync::Arc::new(BandwidthMeter::new(1)); // 1s window
-                                                                 // 200 MB total in 1s window = 200 MB/s > 125 MB/s (1 Gbps)
+        // 200 MB total in 1s window = 200 MB/s > 125 MB/s (1 Gbps)
         meter.record_sample(100_000_000, 100_000_000);
         let limiter = BandwidthLimiter::new(meter, gbps_to_bytes_per_sec(1.0));
         assert_eq!(limiter.check(), BandwidthLimitResult::Reject);

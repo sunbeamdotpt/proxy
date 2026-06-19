@@ -15,12 +15,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::sync::{RwLock, mpsc};
+use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, warn};
 
 use crate::cluster::gateway_topics::GatewayStateDigest;
-use crate::gateway::model::{compute_digest, ReconciledView, RouteTableDigest};
+use crate::gateway::model::{ReconciledView, RouteTableDigest, compute_digest};
 
 /// Minimum time between two gossip broadcasts of the local digest.
 const MIN_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);

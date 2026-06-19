@@ -85,9 +85,10 @@ fn parse_csic_content(content: &str) -> Vec<ParsedRequest> {
         }
     }
     if !current_lines.is_empty()
-        && let Some(req) = parse_single_request(&current_lines) {
-            requests.push(req);
-        }
+        && let Some(req) = parse_single_request(&current_lines)
+    {
+        requests.push(req);
+    }
     requests
 }
 
@@ -225,11 +226,7 @@ fn to_audit_fields(req: &ParsedRequest, label: &str, hosts: &[&str], rng: &mut R
             "-".to_string()
         } else {
             let al = req.accept_language.clone();
-            if al == "-" {
-                "-".to_string()
-            } else {
-                al
-            }
+            if al == "-" { "-".to_string() } else { al }
         };
         let r = rng.next_f64();
         let user_agent = if r < 0.15 {

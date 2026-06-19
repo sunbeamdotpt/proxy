@@ -20,11 +20,11 @@ use burn::record::CompactRecorder;
 use burn::train::metric::{AccuracyMetric, LossMetric};
 use burn::train::{Learner, SupervisedTraining};
 
-use crate::dataset::sample::{load_dataset, TrainingSample};
+use crate::dataset::sample::{TrainingSample, load_dataset};
 use crate::training::batch::{SampleBatcher, SampleDataset};
-use crate::training::export::{export_to_file, ExportedModel};
+use crate::training::export::{ExportedModel, export_to_file};
 use crate::training::mlp::MlpConfig;
-use crate::training::tree::{train_tree, tree_predict, TreeConfig, TreeDecision};
+use crate::training::tree::{TreeConfig, TreeDecision, train_tree, tree_predict};
 
 /// Number of scanner features (matches `crate::scanner::features::NUM_SCANNER_FEATURES`).
 const NUM_FEATURES: usize = 12;

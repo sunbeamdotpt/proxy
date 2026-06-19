@@ -645,10 +645,12 @@ fn translate_view_to_ir_cors_filter() {
     let table = translate_view_to_ir(&view);
     let rule = &table.hosts[0].rules[0];
     if let crate::ir::Action::Route(action) = &rule.action {
-        assert!(action
-            .response_filters
-            .iter()
-            .any(|f| matches!(f, crate::ir::ResponseFilter::Cors(_))));
+        assert!(
+            action
+                .response_filters
+                .iter()
+                .any(|f| matches!(f, crate::ir::ResponseFilter::Cors(_)))
+        );
     } else {
         panic!("expected Route action");
     }

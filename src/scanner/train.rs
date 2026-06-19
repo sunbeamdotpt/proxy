@@ -3,8 +3,8 @@
 
 use crate::ddos::audit_log::{AuditFields, AuditLog};
 use crate::scanner::features::{
-    self, fx_hash_bytes, ScannerFeatureVector, ScannerNormParams, NUM_SCANNER_FEATURES,
-    NUM_SCANNER_WEIGHTS,
+    self, NUM_SCANNER_FEATURES, NUM_SCANNER_WEIGHTS, ScannerFeatureVector, ScannerNormParams,
+    fx_hash_bytes,
 };
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
@@ -31,8 +31,8 @@ pub struct ScannerModel {
 
 impl ScannerModel {
     pub fn save(&self, path: &Path) -> Result<()> {
-        let data = rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .context("serializing scanner model")?;
+        let data =
+            rkyv::to_bytes::<rkyv::rancor::Error>(self).context("serializing scanner model")?;
         std::fs::write(path, data.as_slice())
             .with_context(|| format!("writing scanner model to {}", path.display()))?;
         Ok(())

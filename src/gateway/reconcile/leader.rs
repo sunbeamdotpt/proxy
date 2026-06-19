@@ -12,20 +12,20 @@
 //! every local reconcile produces a gossip digest and resource-change
 //! notifications are broadcast to peers.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 
+use crate::cluster::ClusterHandle;
 use crate::cluster::gateway_topics::GatewayResourceNotify;
 use crate::cluster::messages::{ClusterMessage, Payload};
-use crate::cluster::ClusterHandle;
 use crate::gateway::election::{Election, LeaderState};
-use crate::gateway::gossip::digest_publisher::{publish_digest, DigestEvent, DigestPublisher};
-use crate::gateway::gossip::resource_notify::{handle_notify, NotifyEvent, ResourceNotifier};
+use crate::gateway::gossip::digest_publisher::{DigestEvent, DigestPublisher, publish_digest};
+use crate::gateway::gossip::resource_notify::{NotifyEvent, ResourceNotifier, handle_notify};
 use crate::gateway::model::ReconciledView;
 use crate::gateway::reconcile::gateway::run_gateway_controller;
 use crate::gateway::reconcile::gatewayclass::run_gatewayclass_controller;
@@ -38,7 +38,7 @@ use crate::gateway::reconcile::listenerset::run_listenerset_controller;
 use crate::gateway::reconcile::reconcile_tick_with_leader;
 use crate::gateway::translate::translate_view_to_ir;
 use crate::ir;
-use crate::tls::{merge_cert_store, CertSource, DiskCertSource, GatewayCertSource, TlsRegistry};
+use crate::tls::{CertSource, DiskCertSource, GatewayCertSource, TlsRegistry, merge_cert_store};
 use kube::Client;
 
 /// Run the full reconcile loop.
@@ -187,11 +187,12 @@ pub async fn run_reconcile_loop(
         // If we hold a token but the background lease task invalidated it,
         // drop it and update the flag immediately.
         if let Some(ref t) = token
-            && !t.is_leader() {
-                token = None;
-                is_leader.store(false, Ordering::Relaxed);
-                tracing::info!("LeaderToken invalidated — status writeback disabled");
-            }
+            && !t.is_leader()
+        {
+            token = None;
+            is_leader.store(false, Ordering::Relaxed);
+            tracing::info!("LeaderToken invalidated — status writeback disabled");
+        }
 
         // Full reconcile tick: fetch, translate, and send to proxy.
         let leader = is_leader.load(Ordering::Relaxed);
@@ -505,15 +506,21 @@ mod tests {
         );
         let notifies = diff_view(&None, &new);
         assert_eq!(notifies.len(), 3);
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "Gateway" && n.name == "gw-1"));
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "HTTPRoute" && n.name == "route-1"));
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "Gateway" && n.name == "gw-1")
+        );
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "HTTPRoute" && n.name == "route-1")
+        );
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1")
+        );
     }
 
     #[test]
@@ -559,15 +566,21 @@ mod tests {
         );
         let notifies = diff_view(&Some(old), &new);
         assert_eq!(notifies.len(), 3);
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "Gateway" && n.name == "gw-2"));
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "HTTPRoute" && n.name == "route-2"));
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1"));
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "Gateway" && n.name == "gw-2")
+        );
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "HTTPRoute" && n.name == "route-2")
+        );
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "ReferenceGrant" && n.name == "grant-1")
+        );
     }
 
     #[test]
@@ -597,12 +610,16 @@ mod tests {
 
         let notifies = diff_view(&Some(old), &new);
         assert_eq!(notifies.len(), 2);
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "TCPRoute" && n.name == "tcp-1" && n.generation == 2));
-        assert!(notifies
-            .iter()
-            .any(|n| n.kind == "UDPRoute" && n.name == "udp-2"));
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "TCPRoute" && n.name == "tcp-1" && n.generation == 2)
+        );
+        assert!(
+            notifies
+                .iter()
+                .any(|n| n.kind == "UDPRoute" && n.name == "udp-2")
+        );
     }
 
     #[test]
@@ -710,10 +727,10 @@ mod tests {
     #[tokio::test]
     async fn run_reconcile_loop_broadcasts_digest_and_notify_events() {
         use crate::cluster::{
+            ClusterHandle,
             bandwidth::{
                 BandwidthLimiter, BandwidthMeter, BandwidthTracker, ClusterBandwidthState,
             },
-            ClusterHandle,
         };
         use crate::tls::{DiskCertSource, GatewayCertSource, TlsRegistry};
         use std::time::Duration;
