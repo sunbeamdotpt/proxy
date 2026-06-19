@@ -284,6 +284,34 @@ fn resolve_listener_set_conflicts_prefers_gateway() {
 }
 
 #[test]
+fn resolve_listener_set_conflicts_rejects_reserved_port() {
+    use sunbeam_proxy::gateway::reconcile::listener_common::set_reserved_ports;
+    set_reserved_ports(std::collections::HashSet::from([9090]));
+    let gw = sample_gateway_state("gw", vec![]);
+    let ls = sample_listener_set_state(
+        "ls",
+        vec![ListenerState {
+            name: Arc::from("http"),
+            protocol: Arc::from("HTTP"),
+            port: 9090,
+            hostname: None,
+            tls_mode: None,
+            frontend_validation: None,
+            programmed: true,
+        }],
+        true,
+    );
+    let mut slice = [ls];
+    resolve_listener_set_conflicts(&mut slice, &[gw]);
+    let ls = slice.into_iter().next().unwrap();
+    assert_eq!(
+        ls.conflicts.get("http").map(|r| r.as_ref()),
+        Some("PortUnavailable")
+    );
+    set_reserved_ports(std::collections::HashSet::new());
+}
+
+#[test]
 fn resolve_listener_set_conflicts_detects_protocol_conflict() {
     let gw = sample_gateway_state(
         "gw",

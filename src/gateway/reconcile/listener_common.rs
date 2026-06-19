@@ -9,7 +9,7 @@ use crate::gateway::model::{
 };
 use crate::gateway::status::builder::condition_json;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// Parse the TLS termination mode from a raw listener object.
 ///
@@ -158,15 +158,40 @@ pub fn listener_supported_kinds(
     }
 }
 
+static RESERVED_PORTS: LazyLock<std::sync::Mutex<HashSet<u16>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// Set the ports that are reserved for internal use (metrics, health, etc.).
+/// Gateway listeners on these ports are rejected with `PortUnavailable`.
+pub fn set_reserved_ports(ports: HashSet<u16>) {
+    if let Ok(mut guard) = RESERVED_PORTS.lock() {
+        *guard = ports;
+    }
+}
+
+/// Returns true if the given port is reserved for internal use and cannot be
+/// used by Gateway API listeners.
+pub fn is_port_reserved(port: u16) -> bool {
+    RESERVED_PORTS.lock().is_ok_and(|g| g.contains(&port))
+}
+
 /// Compute the `Accepted` condition for a listener.
 pub fn listener_accepted(
     name: &str,
     protocol: &str,
+    port: u16,
     tls_mode: Option<TlsMode>,
     mixed_conflict_names: &HashSet<String>,
     supports_tls_terminate: bool,
     supports_tls_mixed: bool,
 ) -> (&'static str, &'static str, &'static str) {
+    if is_port_reserved(port) {
+        return (
+            "False",
+            "PortUnavailable",
+            "Port is reserved for internal use",
+        );
+    }
     if protocol == "TLS" {
         if mixed_conflict_names.contains(name) {
             if supports_tls_mixed {
@@ -311,4 +336,34 @@ pub fn standard_listener_conditions(
             now,
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_accepted_allows_arbitrary_port() {
+        set_reserved_ports(HashSet::new());
+        let (status, reason, _) =
+            listener_accepted("http", "HTTP", 12345, None, &HashSet::new(), false, false);
+        assert_eq!(status, "True");
+        assert_eq!(reason, "Accepted");
+    }
+
+    #[test]
+    fn listener_accepted_rejects_reserved_port() {
+        set_reserved_ports(HashSet::from([9090]));
+        let (status, reason, message) =
+            listener_accepted("http", "HTTP", 9090, None, &HashSet::new(), false, false);
+        assert_eq!(status, "False");
+        assert_eq!(reason, "PortUnavailable");
+        assert!(message.contains("reserved"));
+    }
+
+    #[test]
+    fn listener_accepted_resets_between_tests() {
+        set_reserved_ports(HashSet::new());
+        assert!(!is_port_reserved(9090));
+    }
 }

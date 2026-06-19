@@ -20,6 +20,7 @@ pub mod accepted_reason {
     pub const NOT_RECONCILED: &str = "NotReconciled";
     pub const PENDING: &str = "Pending";
     pub const UNSUPPORTED_VALUE: &str = "UnsupportedValue";
+    pub const PORT_UNAVAILABLE: &str = "PortUnavailable";
 }
 
 /// Reasons for the `Programmed` condition on a **Gateway**.

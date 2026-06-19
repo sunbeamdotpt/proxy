@@ -10,9 +10,9 @@ use crate::gateway::model::{
 };
 use crate::gateway::reconcile::httproute::{parse_parent_refs, parse_route_hostnames};
 use crate::gateway::reconcile::listener_common::{
-    build_listener_allowed_map_key, build_listener_state_from_obj, listener_status_json,
-    listener_supported_kinds, parse_allowed_routes, standard_listener_conditions,
-    validate_listener_kinds,
+    build_listener_allowed_map_key, build_listener_state_from_obj, is_port_reserved,
+    listener_status_json, listener_supported_kinds, parse_allowed_routes,
+    standard_listener_conditions, validate_listener_kinds,
 };
 use crate::gateway::reconcile::parent::{
     listener_allows_kind, listener_hostname_intersects, namespace_allowed,
@@ -374,6 +374,10 @@ pub fn resolve_listener_set_conflicts(
         let parent_gw_name = ls.parent_ref.name.as_ref();
 
         for l in &ls.listeners {
+            if is_port_reserved(l.port) {
+                conflicts_to_add.push((ls_idx, Arc::clone(&l.name), Arc::from("PortUnavailable")));
+                continue;
+            }
             let mut conflict_reason: Option<&'static str> = None;
             for active in &accepted {
                 if !same_parent_gateway(active, listener_sets, parent_gw_ns, parent_gw_name) {

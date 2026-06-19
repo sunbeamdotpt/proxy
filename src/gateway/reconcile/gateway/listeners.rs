@@ -147,9 +147,11 @@ pub fn build_listener_status(
             programmed_message = "Listener has unresolved certificate references";
         }
 
+        let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
         let (mut accepted_status, mut accepted_reason, mut accepted_message) = listener_accepted(
             name,
             protocol,
+            port,
             parse_tls_mode(obj, protocol),
             &mixed_conflict_names,
             supports_tls_terminate,
@@ -520,6 +522,68 @@ mod tests {
             first.get("observedGeneration").and_then(|v| v.as_i64()),
             Some(3)
         );
+    }
+
+    #[test]
+    fn listener_status_rejects_reserved_port() {
+        use crate::gateway::reconcile::listener_common::set_reserved_ports;
+        set_reserved_ports(std::collections::HashSet::from([9090]));
+        let yaml = r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: reserved-port-gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 9090
+        "#;
+        let gw: Gateway = serde_yaml::from_str(yaml).expect("deserializes");
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
+        let accepted = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c.get("type").and_then(|v| v.as_str()) == Some("Accepted"))
+            .unwrap();
+        assert_eq!(accepted["status"], "False");
+        assert_eq!(accepted["reason"], "PortUnavailable");
+        // Clear reserved ports so later tests are not affected.
+        set_reserved_ports(std::collections::HashSet::new());
+    }
+
+    #[test]
+    fn listener_status_accepts_arbitrary_port() {
+        use crate::gateway::reconcile::listener_common::set_reserved_ports;
+        set_reserved_ports(std::collections::HashSet::new());
+        let yaml = r#"
+            apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            metadata:
+              name: arbitrary-port-gw
+              namespace: default
+              generation: 1
+            spec:
+              gatewayClassName: test-gc
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 12345
+        "#;
+        let gw: Gateway = serde_yaml::from_str(yaml).expect("deserializes");
+        let statuses = build_listener_status(&gw, None, 1, &[], &[], &empty_features());
+        let accepted = statuses[0]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c.get("type").and_then(|v| v.as_str()) == Some("Accepted"))
+            .unwrap();
+        assert_eq!(accepted["status"], "True");
+        assert_eq!(accepted["reason"], "Accepted");
     }
 
     #[test]

@@ -301,6 +301,15 @@ fn run_serve(upgrade: bool, caddyfile: Option<&str>, caddyfile_dir: Option<&str>
         std::env::var("SUNBEAM_CONFIG").unwrap_or_else(|_| "/etc/pingora/config.toml".to_string());
     let cfg = config::Config::load(&config_path)?;
 
+    // Reserve ports used by internal services so Gateway API listeners cannot
+    // claim them. If a Gateway listener references a reserved port, its
+    // Accepted condition is set to False with reason PortUnavailable.
+    let mut reserved_ports = std::collections::HashSet::new();
+    if cfg.telemetry.metrics_port > 0 {
+        reserved_ports.insert(cfg.telemetry.metrics_port);
+    }
+    sunbeam_proxy::gateway::reconcile::listener_common::set_reserved_ports(reserved_ports);
+
     if !cfg.routes.is_empty() {
         return Err(anyhow::anyhow!(
             "config.toml [[routes]] has been removed; migrate routes to a Caddyfile \
