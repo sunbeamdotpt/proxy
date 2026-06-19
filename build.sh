@@ -18,14 +18,14 @@
 #   ./build.sh [VERSION]
 #
 # Environment overrides:
-#   VERSION   default: v0.2.0
+#   VERSION   default: v0.2.1
 #   IMAGE     default: ghcr.io/sunbeamdotpt/proxy
 #   PLATFORMS default: linux/amd64,linux/arm64
 #   BASE_IMAGE default: pinned distroless/cc-debian12
 
 set -euo pipefail
 
-VERSION="${VERSION:-v0.2.0}"
+VERSION="${VERSION:-v0.2.1}"
 IMAGE="${IMAGE:-ghcr.io/sunbeamdotpt/proxy}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BASE_IMAGE="${BASE_IMAGE:-gcr.io/distroless/cc-debian12@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985}"

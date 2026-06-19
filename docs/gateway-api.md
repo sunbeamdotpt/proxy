@@ -199,3 +199,7 @@ Modes include `AllowValidOnly` and `AllowInsecureFallback`. Cross-namespace CA r
 ## Running the reconciler
 
 Sunbeam pods elect a leader via a Kubernetes `Lease`. The leader reconciles Gateway API resources and broadcasts a state digest over the cluster gossip protocol. Followers apply the same view locally, so every pod programs identical routes without relying on the API server for every request.
+
+## Known limitations
+
+Sunbeam currently merges all reconciled `Gateway` resources into a single shared proxy address. That means if two or more Gateways have overlapping listeners without a `hostname` filter (for example, wildcard HTTPS listeners on port 443), the route precedence between those Gateways is implementation-defined rather than isolated per Gateway. This behavior will be resolved once mesh-style Gateway isolation is supported. Until then, avoid overlapping wildcard listeners across separate Gateways when you need strict per-Gateway routing boundaries.

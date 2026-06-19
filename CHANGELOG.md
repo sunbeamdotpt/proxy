@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.1] - 2026-06-19
+
+### Features
+- feat(caddyfile): add Caddyfile route source support
+
+### Bug Fixes
+- fix(gateway): accept arbitrary listener ports and reject reserved ports with PortUnavailable
+
+### Refactoring
+- refactor(deps): inline workspace dependencies and replace bincode with rkyv
+
+### Build & CI
+- build(deps): bump non-burn dependencies and adapt to API changes
+- build(deps): bump opentelemetry to 0.32 and tracing-opentelemetry to 0.33
+
+### Styling
+- style: apply rustfmt
+
 ## [0.2.0] - 2026-06-18
 
 ### Features

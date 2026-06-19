@@ -32,7 +32,7 @@ The `training` feature enables GPU-accelerated training via burn-rs and wgpu. Th
 The release script bumps the version, regenerates the changelog, runs checks, and builds a release binary:
 
 ```sh
-./scripts/release.sh 0.2.0
+./scripts/release.sh 0.2.1
 ```
 
 Multi-arch container images are built and pushed by the GitHub Actions release workflow on tag pushes.
@@ -58,10 +58,10 @@ Conformance tests run against a local k3s cluster in a Multipass VM. The suite c
 
 ```sh
 # Use the published release image (no local build)
-DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run -p
+DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.1 ./scripts/conformance.sh run -p
 
 # Local image build + conformance
-DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.0 ./scripts/conformance.sh run
+DOCKER_TAG=ghcr.io/sunbeamdotpt/proxy:v0.2.1 ./scripts/conformance.sh run
 ```
 
 The upstream conformance report is written to `target/conformance-report.yaml`, and a detailed per-test summary is written to `target/conformance-report-detailed.yaml`. The official report used for upstream submissions lives in `conformance/reports/v1.5/sunbeam-proxy/`.
