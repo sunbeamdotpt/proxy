@@ -71,6 +71,8 @@ RUN case "${TARGETARCH}" in \
 # Pinned digest for gcr.io/distroless/cc-debian12:nonroot (multi-arch index).
 FROM gcr.io/distroless/cc-debian12@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985
 
+LABEL org.opencontainers.image.source="https://github.com/sunbeamdotpt/proxy"
+
 COPY --from=builder --chown=65532:65532 /tini                       /tini
 COPY --from=builder --chown=65532:65532 /sunbeam-proxy              /usr/local/bin/sunbeam-proxy
 COPY --from=builder --chown=65532:65532 /runtime-libs/libgcc_s.so.1 /lib/libgcc_s.so.1
