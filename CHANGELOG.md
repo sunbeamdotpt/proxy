@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.2] - 2026-06-24
+
+### Features
+- feat(config,ir): add respect_cache_headers option and propagate to CachePolicy
+- feat(cache): add parsing helpers for Cache-Control directives, Age, and Expires
+- feat(proxy): honor upstream cache headers in response cache filter
+
+### Chores
+- chore(dockerfile): add org.opencontainers.image.source label
+
 ## [0.2.1] - 2026-06-19
 
 ### Features
