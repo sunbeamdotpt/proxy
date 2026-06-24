@@ -111,36 +111,79 @@ impl SunbeamProxy {
             }
         };
 
-        // Respect Cache-Control: no-store, private.
-        if let Some(cc) = resp
-            .headers
-            .get("cache-control")
-            .and_then(|v| v.to_str().ok())
-        {
-            let cc_lower = cc.to_ascii_lowercase();
-            if cc_lower.contains("no-store") || cc_lower.contains("private") {
-                return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
-            }
-            if let Some(ttl) = crate::cache::parse_cache_ttl(&cc_lower) {
-                if ttl == 0 {
+        let mut ttl = cache_cfg.default_ttl_secs;
+        let mut stale_while_revalidate = cache_cfg.stale_while_revalidate_secs;
+
+        if cache_cfg.respect_cache_headers {
+            if let Some(cc) = resp
+                .headers
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok())
+            {
+                let cc_lower = cc.to_ascii_lowercase();
+
+                if crate::cache::cache_control_has_directive(&cc_lower, "no-store")
+                    || crate::cache::cache_control_has_directive(&cc_lower, "private")
+                    || crate::cache::cache_control_has_directive(&cc_lower, "no-cache")
+                {
                     return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
                 }
-                let meta = CacheMeta::new(
-                    SystemTime::now() + Duration::from_secs(ttl),
-                    SystemTime::now(),
-                    cache_cfg.stale_while_revalidate_secs,
-                    0,
-                    resp.clone(),
-                );
-                return Ok(RespCacheable::Cacheable(meta));
+
+                if crate::cache::cache_control_has_directive(&cc_lower, "must-revalidate")
+                    || crate::cache::cache_control_has_directive(&cc_lower, "proxy-revalidate")
+                {
+                    stale_while_revalidate = 0;
+                }
+
+                if let Some(header_ttl) = crate::cache::parse_cache_ttl(&cc_lower) {
+                    if header_ttl == 0 {
+                        return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+                    }
+                    ttl = header_ttl;
+                } else if let Some(expires) =
+                    resp.headers.get("expires").and_then(|v| v.to_str().ok())
+                {
+                    match crate::cache::parse_expires_ttl(expires) {
+                        Some(0) | None => {
+                            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+                        }
+                        Some(expires_ttl) => {
+                            ttl = expires_ttl;
+                        }
+                    }
+                }
+            } else if let Some(expires) = resp.headers.get("expires").and_then(|v| v.to_str().ok())
+            {
+                match crate::cache::parse_expires_ttl(expires) {
+                    Some(0) | None => {
+                        return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+                    }
+                    Some(expires_ttl) => {
+                        ttl = expires_ttl;
+                    }
+                }
+            }
+
+            // Subtract elapsed Age so we don't cache a response for longer than
+            // the upstream intended.
+            if let Some(age) = resp
+                .headers
+                .get("age")
+                .and_then(|v| v.to_str().ok())
+                .and_then(crate::cache::parse_age)
+            {
+                ttl = ttl.saturating_sub(age);
             }
         }
 
-        // No Cache-Control or no max-age: use route's default TTL.
+        if ttl == 0 {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
+        }
+
         let meta = CacheMeta::new(
-            SystemTime::now() + Duration::from_secs(cache_cfg.default_ttl_secs),
+            SystemTime::now() + Duration::from_secs(ttl),
             SystemTime::now(),
-            cache_cfg.stale_while_revalidate_secs,
+            stale_while_revalidate,
             0,
             resp.clone(),
         );
@@ -199,6 +242,22 @@ mod tests {
         stale_while_revalidate_secs: u32,
         max_file_size: usize,
     ) -> Arc<CompiledPlan> {
+        cache_plan_with_respect(
+            enabled,
+            default_ttl_secs,
+            true,
+            stale_while_revalidate_secs,
+            max_file_size,
+        )
+    }
+
+    fn cache_plan_with_respect(
+        enabled: bool,
+        default_ttl_secs: u64,
+        respect_cache_headers: bool,
+        stale_while_revalidate_secs: u32,
+        max_file_size: usize,
+    ) -> Arc<CompiledPlan> {
         Arc::new(CompiledPlan {
             precedence: 0,
             rule_order: 0,
@@ -214,6 +273,7 @@ mod tests {
             cache: Some(crate::ir::CachePolicy {
                 enabled,
                 default_ttl_secs,
+                respect_cache_headers,
                 stale_while_revalidate_secs,
                 max_file_size,
             }),
@@ -441,6 +501,14 @@ mod tests {
         resp
     }
 
+    fn response_with_headers(status: u16, headers: &[(&'static str, &str)]) -> ResponseHeader {
+        let mut resp = ResponseHeader::build(status, None).unwrap();
+        for (name, value) in headers {
+            resp.insert_header(*name, *value).unwrap();
+        }
+        resp
+    }
+
     #[tokio::test]
     async fn response_cache_filter_uncacheable_non_2xx() {
         let proxy = make_proxy();
@@ -568,6 +636,121 @@ mod tests {
             RespCacheable::Cacheable(meta) => {
                 assert!(
                     meta.fresh_until() >= std::time::SystemTime::now() + Duration::from_secs(80)
+                );
+            }
+            _ => panic!("expected Cacheable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_respects_no_cache() {
+        let proxy = make_proxy();
+        let resp = response_with_cache_control(200, Some("no-cache"));
+        let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        assert!(matches!(
+            result,
+            RespCacheable::Uncacheable(NoCacheReason::OriginNotCache)
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_uses_expires_ttl() {
+        let proxy = make_proxy();
+        let future = chrono::Utc::now() + chrono::Duration::seconds(300);
+        let expires = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let resp = response_with_headers(200, &[("expires", &expires)]);
+        let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        match result {
+            RespCacheable::Cacheable(meta) => {
+                assert!(
+                    meta.fresh_until() >= std::time::SystemTime::now() + Duration::from_secs(295)
+                );
+            }
+            _ => panic!("expected Cacheable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_expires_past_uncacheable() {
+        let proxy = make_proxy();
+        let past = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let expires = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let resp = response_with_headers(200, &[("expires", &expires)]);
+        let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        assert!(matches!(
+            result,
+            RespCacheable::Uncacheable(NoCacheReason::OriginNotCache)
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_subtracts_age() {
+        let proxy = make_proxy();
+        let resp = response_with_headers(200, &[("cache-control", "max-age=100"), ("age", "30")]);
+        let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 0, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        match result {
+            RespCacheable::Cacheable(meta) => {
+                assert!(
+                    meta.fresh_until() <= std::time::SystemTime::now() + Duration::from_secs(75)
+                );
+                assert!(
+                    meta.fresh_until() >= std::time::SystemTime::now() + Duration::from_secs(65)
+                );
+            }
+            _ => panic!("expected Cacheable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_must_revalidate_disables_stale() {
+        let proxy = make_proxy();
+        let resp = response_with_cache_control(200, Some("max-age=60, must-revalidate"));
+        let mut ctx = make_ctx_with_plan(cache_plan(true, 60, 30, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        match result {
+            RespCacheable::Cacheable(meta) => {
+                // CacheMeta does not expose stale-while-revalidate directly; just
+                // ensure the response is still cacheable.
+                assert!(
+                    meta.fresh_until() >= std::time::SystemTime::now() + Duration::from_secs(55)
+                );
+            }
+            _ => panic!("expected Cacheable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_cache_filter_ignores_headers_when_respect_disabled() {
+        let proxy = make_proxy();
+        let resp = response_with_cache_control(200, Some("no-store"));
+        let mut ctx = make_ctx_with_plan(cache_plan_with_respect(true, 60, false, 0, 0));
+        let session = make_session("GET", "/", "example.com").await;
+        let result = proxy
+            .response_cache_filter_inner(&session, &resp, &mut ctx)
+            .unwrap();
+        match result {
+            RespCacheable::Cacheable(meta) => {
+                assert!(
+                    meta.fresh_until() >= std::time::SystemTime::now() + Duration::from_secs(55)
                 );
             }
             _ => panic!("expected Cacheable"),
