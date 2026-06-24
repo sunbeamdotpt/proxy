@@ -507,6 +507,8 @@ pub struct CachePolicy {
     pub enabled: bool,
     /// Default TTL in seconds.
     pub default_ttl_secs: u64,
+    /// Whether to honor upstream Cache-Control and Expires headers.
+    pub respect_cache_headers: bool,
     /// Stale-while-revalidate duration in seconds.
     pub stale_while_revalidate_secs: u32,
     /// Maximum response body size to cache.
@@ -856,6 +858,7 @@ mod tests {
             cache: Some(CachePolicy {
                 enabled: true,
                 default_ttl_secs: 60,
+                respect_cache_headers: true,
                 stale_while_revalidate_secs: 300,
                 max_file_size: 1024 * 1024,
             }),
@@ -1114,12 +1117,14 @@ mod tests {
         let a = CachePolicy {
             enabled: true,
             default_ttl_secs: 60,
+            respect_cache_headers: true,
             stale_while_revalidate_secs: 300,
             max_file_size: 1024,
         };
         let b = CachePolicy {
             enabled: true,
             default_ttl_secs: 60,
+            respect_cache_headers: true,
             stale_while_revalidate_secs: 300,
             max_file_size: 1024,
         };

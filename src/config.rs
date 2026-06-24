@@ -478,6 +478,10 @@ pub struct CacheConfig {
     /// Default TTL in seconds when the upstream response has no Cache-Control header.
     #[serde(default = "default_cache_ttl")]
     pub default_ttl_secs: u64,
+    /// When true, honor upstream Cache-Control and Expires headers. When false,
+    /// use default_ttl_secs regardless of origin headers.
+    #[serde(default = "default_respect_cache_headers")]
+    pub respect_cache_headers: bool,
     /// Seconds to serve stale content while revalidating in the background.
     #[serde(default)]
     pub stale_while_revalidate_secs: u32,
@@ -491,6 +495,9 @@ fn default_cache_enabled() -> bool {
 }
 fn default_cache_ttl() -> u64 {
     60
+}
+fn default_respect_cache_headers() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -828,6 +835,7 @@ listen = "0.0.0.0:8080"
         assert_eq!(default_metrics_port(), 9_090);
         assert!(default_cache_enabled());
         assert_eq!(default_cache_ttl(), 60);
+        assert!(default_respect_cache_headers());
 
         assert!(default_cluster_enabled());
         assert_eq!(default_gossip_port(), 11_204);
@@ -850,6 +858,43 @@ telemetry = { otlp_endpoint = "http://otel:4317" }
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.telemetry.metrics_port, 9_090);
         assert_eq!(cfg.telemetry.otlp_endpoint, "http://otel:4317");
+    }
+
+    #[test]
+    fn cache_config_deserializes_with_defaults() {
+        let raw = r#"
+listen = { http = "0.0.0.0:80", https = "0.0.0.0:443" }
+tls = { cert_path = "/c/cert.pem", key_path = "/c/key.pem" }
+telemetry = { otlp_endpoint = "http://otel:4317" }
+[[routes]]
+host_prefix = "foo"
+backend = "http://foo"
+[routes.cache]
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let cache = cfg.routes[0].cache.as_ref().unwrap();
+        assert!(cache.enabled);
+        assert_eq!(cache.default_ttl_secs, 60);
+        assert!(cache.respect_cache_headers);
+        assert_eq!(cache.stale_while_revalidate_secs, 0);
+        assert_eq!(cache.max_file_size, 0);
+    }
+
+    #[test]
+    fn cache_config_deserializes_respect_cache_headers() {
+        let raw = r#"
+listen = { http = "0.0.0.0:80", https = "0.0.0.0:443" }
+tls = { cert_path = "/c/cert.pem", key_path = "/c/key.pem" }
+telemetry = { otlp_endpoint = "http://otel:4317" }
+[[routes]]
+host_prefix = "foo"
+backend = "http://foo"
+[routes.cache]
+respect_cache_headers = false
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let cache = cfg.routes[0].cache.as_ref().unwrap();
+        assert!(!cache.respect_cache_headers);
     }
 
     #[test]
