@@ -205,6 +205,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     cache: route.cache.as_ref().map(|c| CachePolicy {
                         enabled: c.enabled,
                         default_ttl_secs: c.default_ttl_secs,
+                        respect_cache_headers: c.respect_cache_headers,
                         stale_while_revalidate_secs: c.stale_while_revalidate_secs,
                         max_file_size: c.max_file_size,
                     }),
@@ -278,6 +279,7 @@ pub fn from_route_configs(routes: &[RouteConfig]) -> RouteTable {
                     cache: route.cache.as_ref().map(|c| CachePolicy {
                         enabled: c.enabled,
                         default_ttl_secs: c.default_ttl_secs,
+                        respect_cache_headers: c.respect_cache_headers,
                         stale_while_revalidate_secs: c.stale_while_revalidate_secs,
                         max_file_size: c.max_file_size,
                     }),
@@ -945,6 +947,7 @@ mod tests {
             cache: Some(crate::config::CacheConfig {
                 enabled: true,
                 default_ttl_secs: 120,
+                respect_cache_headers: true,
                 stale_while_revalidate_secs: 60,
                 max_file_size: 1024,
             }),
@@ -988,6 +991,7 @@ mod tests {
             cache: Some(crate::config::CacheConfig {
                 enabled: false,
                 default_ttl_secs: 120,
+                respect_cache_headers: true,
                 stale_while_revalidate_secs: 0,
                 max_file_size: 0,
             }),
