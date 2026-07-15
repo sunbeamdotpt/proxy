@@ -511,18 +511,21 @@ Nd0eL2/ZJMO7IbezjQbjJLtaut1VhYS9T+wqiqSjkmJlUwAzlNp2LseF
 -----END PRIVATE KEY-----
 "#;
 
-    const NOT_YET_VALID_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
-MIIBhjCCAS2gAwIBAgIBZTAKBggqhkjOPQQDAjAiMSAwHgYDVQQDExd0ZXN0LWZ1
-dHVyZS5leGFtcGxlLmNvbTAeFw0yNjA2MTkyMzAwMDBaFw0yNzA2MTkyMzAwMDBa
-MCIxIDAeBgNVBAMTF3Rlc3QtZnV0dXJlLmV4YW1wbGUuY29tMFkwEwYHKoZIzj0C
-AQYIKoZIzj0DAQcDQgAEIVzYubWsYHl1Gy5gBgweSVeUeCbf0TXdHi9v2STDuyG3
-s40G4yS7WrrdVYWEvU/sKoqko5JiZVMAM5Tadi7HhaNUMFIwDAYDVR0TAQH/BAIw
-ADATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0OBBYE
-FMH099Lj61Hw95Y0E4vGIyMINp/YMAoGCCqGSM49BAMCA0cAMEQCIGEMmNvRuPn0
-5/21UUQ+9IFLasI5J4MRREIT9gCmcaIuAiAc1LSyGr8RtPT9o7stLJ5D5mXW2+Iq
-g49PpqbyDpG6kQ==
------END CERTIFICATE-----
-"#;
+    /// Generate a self-signed server-auth certificate with the given validity
+    /// window, so temporal-validation tests can't rot with the wall clock.
+    fn self_signed_cert(
+        not_before: time::OffsetDateTime,
+        not_after: time::OffsetDateTime,
+    ) -> (String, String) {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(vec!["test-future.example.com".to_string()]).unwrap();
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let cert = params.self_signed(&key_pair).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
 
     const NO_SERVER_AUTH_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIIBrDCCAVKgAwIBAgIUSuMah+1CsnRTmIaz1VENZhyhLHYwCgYIKoZIzj0EAwIw
@@ -1067,10 +1070,10 @@ NtgBPIYTDhCNyDb1hwuXfjeYui6hRANCAAQoSizArljQBDm0OsNMHXSD/44aCuRL
     #[test]
     fn certified_key_from_pem_rejects_not_yet_valid_cert() {
         ensure_provider();
-        let result = certified_key_from_pem(
-            NOT_YET_VALID_CERT_PEM.as_bytes(),
-            EXPIRED_KEY_PEM.as_bytes(),
-        );
+        let now = time::OffsetDateTime::now_utc();
+        let (cert_pem, key_pem) =
+            self_signed_cert(now + time::Duration::days(1), now + time::Duration::days(2));
+        let result = certified_key_from_pem(cert_pem.as_bytes(), key_pem.as_bytes());
         assert!(result.is_err());
     }
 

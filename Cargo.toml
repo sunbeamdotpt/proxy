@@ -113,6 +113,8 @@ proptest      = "1"
 tempfile      = "3"
 reqwest       = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 http-body-util = "0.1"
+rcgen         = "0.14"
+time          = "0.3"
 
 [[test]]
 name = "gateway_reconcile"
