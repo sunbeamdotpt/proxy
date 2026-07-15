@@ -176,6 +176,21 @@ cargo fmt -- --check
 log "Running cargo clippy"
 cargo clippy -- -D warnings
 
+# Container-backed integration tests (tests/otel.rs) talk to the Docker API
+# via DOCKER_HOST; testcontainers does not honor docker CLI contexts.
+if [[ -z "${DOCKER_HOST:-}" ]]; then
+    for sock in /var/run/docker.sock "${HOME}/.lima/docker/sock/docker.sock" "${HOME}/.colima/default/docker.sock" "${HOME}/.docker/run/docker.sock"; do
+        if [[ -S "${sock}" ]] && curl -sf --unix-socket "${sock}" http://localhost/_ping >/dev/null 2>&1; then
+            export DOCKER_HOST="unix://${sock}"
+            log "Detected Docker socket: ${DOCKER_HOST}"
+            break
+        fi
+    done
+    if [[ -z "${DOCKER_HOST:-}" ]]; then
+        log "WARNING: no Docker daemon found; container-backed tests will be skipped"
+    fi
+fi
+
 log "Running cargo test"
 cargo test
 
