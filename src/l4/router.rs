@@ -363,6 +363,7 @@ async fn http_relay(
                     listener_id: Arc::clone(&ctx.listener_id),
                     listener_port: ctx.local_addr.port(),
                     secure: false,
+                    client_addr: ctx.remote_addr,
                 },
             );
     }
@@ -504,6 +505,7 @@ async fn terminate_and_http(
                     listener_id: Arc::clone(&ctx.listener_id),
                     listener_port: ctx.local_addr.port(),
                     secure: true,
+                    client_addr: ctx.remote_addr,
                 },
             );
     }

@@ -1271,6 +1271,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn l4_relay_context_supplies_real_client_ip() {
+        let proxy = make_proxy();
+        let (mut session, _server) =
+            make_session_pair("GET", "/", "example.com", &[("x-real-ip", "192.0.2.42")]).await;
+        let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        set_peer_addr(&mut session, peer);
+        proxy
+            .http_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                peer,
+                crate::l4::context::HttpRelayContext {
+                    listener_id: "https".into(),
+                    listener_port: 8443,
+                    secure: true,
+                    client_addr: "203.0.113.7:54321".parse().unwrap(),
+                },
+            );
+        // The relayed address wins over the loopback peer, and the spoofed
+        // header is ignored because the real client is not a trusted proxy.
+        assert_eq!(
+            proxy.extract_client_ip(&session),
+            Some("203.0.113.7".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn https_ddos_block_returns_429() {
         let mut proxy = make_proxy();
         proxy.ddos_detector = Some(Arc::new(DDoSDetector::new(&DDoSConfig {

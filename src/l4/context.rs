@@ -32,6 +32,9 @@ pub struct HttpRelayContext {
     pub listener_port: u16,
     /// True when the connection was accepted over TLS (HTTPS termination).
     pub secure: bool,
+    /// Real downstream client address. The relay reaches the proxy over
+    /// loopback, so without this the proxy would see every peer as 127.0.0.1.
+    pub client_addr: SocketAddr,
 }
 
 impl L4Context {

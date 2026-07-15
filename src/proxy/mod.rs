@@ -363,13 +363,20 @@ fn socket_client_ip(session: &Session) -> Option<IpAddr> {
 impl SunbeamProxy {
     /// Extract the real client IP.
     ///
-    /// If the immediate downstream TCP peer is inside one of the configured
+    /// Public traffic reaches Pingora through the L4 relay over loopback; when
+    /// a relay context exists for this connection it carries the real client
+    /// address. Otherwise the raw socket peer is used.
+    ///
+    /// If the resulting address is inside one of the configured
     /// `trusted_proxy_cidrs`, proxy headers are consulted in order:
     /// CF-Connecting-IP → X-Real-IP → X-Forwarded-For (first entry).
     /// Otherwise the raw socket address is returned, preventing IP spoofing by
     /// untrusted clients.
     fn extract_client_ip(&self, session: &Session) -> Option<IpAddr> {
-        let socket_ip = socket_client_ip(session)?;
+        let socket_ip = match self.http_relay_context(session) {
+            Some(relay) => relay.client_addr.ip(),
+            None => socket_client_ip(session)?,
+        };
 
         if !crate::rate_limit::cidr::is_bypassed(socket_ip, &self.trusted_proxy_cidrs) {
             return Some(socket_ip);
