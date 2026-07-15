@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.4] - 2026-07-15
+
+### Bug Fixes
+- fix(proxy): recover real client IP from L4 relay context
+
+### Build & CI
+- build(deps): fetch sunbeam-test over https
+
 ## [0.2.3] - 2026-07-15
 
 ### Features
