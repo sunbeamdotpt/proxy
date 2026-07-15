@@ -12,6 +12,32 @@
 
 ## [0.2.1] - 2026-06-19
 
+### Caddyfile Configuration Support
+
+**Added Caddyfile as a route source**, enabling users to define routing rules using Caddy's familiar configuration format alongside Kubernetes Gateway API and TOML-based configuration.
+
+This resolves a v0.2.0 issue where `[[routes]]` had been removed from TOML-based configurations, disallowing static file configs, despite the proxy being able to serve local, or non-GWAPI, configurations.
+
+---
+
+### Gateway Listener Port Handling
+
+**Improved listener port validation** to accept arbitrary ports while properly rejecting reserved ports with a `PortUnavailable` status condition, providing clearer feedback for configuration errors.
+
+This resolves an issue discovered in kubernetes-sigs/gateway-api#4988 around unavailable ports being listed as available.
+
+---
+
+### Performance & Dependencies
+
+**Replaced bincode with rkyv** for faster serialization and reduced memory overhead. **Inlined workspace dependencies** to simplify the build graph and improve compile times. This is also due to deprecation notices discovered with v3.0.0 of bincode on docs.rs.
+
+**Updated telemetry stack** to OpenTelemetry 0.32 and tracing-opentelemetry 0.33 for compatibility with the latest observability ecosystem.
+
+**Updated gossip networking** to Iroh 1.0.0 for QUIC multi-pathing & production support.
+
+---
+
 ### Features
 - feat(caddyfile): add Caddyfile route source support
 
@@ -29,6 +55,121 @@
 - style: apply rustfmt
 
 ## [0.2.0] - 2026-06-18
+
+### Initial Public Release
+
+### Gateway API Support & Kubernetes Integration
+
+**Sunbeam Proxy now fully supports Kubernetes Gateway API v1.5.1**, enabling dynamic routing configuration through native Kubernetes resources. The proxy translates Gateway API resources (HTTPRoute, GRPCRoute, L4 routes, and BackendTLSPolicy) into internal routing rules, with complete status synchronization and leader-based reconciliation.
+
+Key additions:
+- **HTTPRoute and GRPCRoute reconciliation** with EndpointSlice resolution
+- **BackendTLSPolicy support** for dynamic upstream TLS verification and client certificates
+- **L4 route management** for TCP/TLS passthrough and plain HTTP Gateway listeners
+- **Certificate management** with CA bundle support and automatic TLS credential wiring
+- **Event-driven reconciliation** with lease-based leader election
+
+---
+
+### Network & Transport
+
+**Added native dual-stack IPv4/IPv6 support** with proper socket configuration to prevent address conflicts. **SNI-based TLS passthrough** now enables mTLS communication to backend services without terminating encrypted connections.
+
+Key additions:
+- **SSH TCP passthrough** for secure tunneling
+- **HTTPS listener reconciliation** with h2 and http/1.1 ALPN protocol negotiation
+- **Static address and optional value support** for flexible listener configuration
+
+---
+
+### Detection & Rate Limiting Pipeline
+
+**Integrated machine learning detection into the request pipeline** with hot-reloadable models for DDoS and bot scanning. The system includes **per-identity leaky bucket rate limiting** and **verified bot allowlist** support.
+
+Key additions:
+- **Per-request scanner detector** with logistic regression classifier
+- **KNN-based DDoS detection** module
+- **Model hot-reload capability** without service interruption
+
+---
+
+### Ensemble Machine Learning & Formal Verification
+
+**Deployed production ensemble architecture** combining decision tree and MLP inference for more robust threat detection. **IEEE-754 formal verification** in Lean 4 proves soundness of the 2-layer MLP on binary32 hardware, with **CROWN certified radius verification** at runtime.
+
+Key additions:
+- **MLP-only verdict path** with Bayesian hyperparameter optimization
+- **Certified adversarial robustness** via interval bound propagation
+- **Sign-constraint monotonicity** enforced during training
+- **Formal proofs** of ensemble stability, forward error bounds, and Lipschitz sensitivity
+
+---
+
+### Observability & Metrics
+
+**Added comprehensive request tracing and metrics**. Sunbeam now exports Prometheus metrics for gateway state drift, cluster gossip activity, and bandwidth usage. **Request IDs and tracing spans** provide end-to-end observability.
+
+Key additions:
+- **Source line number tracking** in telemetry logs
+- **Metrics scrape endpoint** for Prometheus integration
+- **Graceful OTLP exporter initialization** without blocking startup
+
+---
+
+### Cluster & Gossip Communication
+
+**Implemented peer-to-peer cluster subsystem** using iroh gossip for distributed state synchronization. Nodes discover each other via Kubernetes headless services and exchange membership, election, and bandwidth data.
+
+Key additions:
+- **Lease-based leader election** for coordinated operations
+- **Gossip-based cluster membership** tracking
+- **Prometheus metrics** for cluster health monitoring
+
+---
+
+### Proxy & Request Handling
+
+**Introduced modular phase-based proxy architecture** with separate managers for HTTP, GRPC, and L4 traffic. **Atomic route table hot-reload** via ArcSwap enables zero-downtime configuration updates.
+
+Key additions:
+- **IR compiler and route manager** for efficient traffic translation
+- **Per-route disable_secure_redirection** option
+- **Query string preservation** in HTTP redirects
+- **Expect: 100-continue handling** for large uploads
+- **X-Forwarded-Proto header insertion** with E2E test coverage
+
+---
+
+### Static File Serving & Middleware
+
+**Added static file serving with SPA fallback, URL rewrites, and request body rewriting**. Authentication subrequests enable delegating auth decisions to external services.
+
+---
+
+### Build, Testing & Documentation
+
+**Expanded conformance testing** with Gateway API v1.5.1 test suite and integration test harness. **Dockerfiles and cloud-init scripts** standardize deployment environments. **Property-based testing** covers new proxy features with comprehensive validation.
+
+**Published research paper** with formal verification methodology, evaluation results, and complete architecture documentation. **TIERS.md glossary** explains the verification stack from ML through formal proofs.
+
+---
+
+### Dependencies & Security
+
+**Upgraded pingora from 0.7 to 0.8** and aws-lc-sys to patch CVEs. **Restructured Cargo workspace** to unify CLI, proxy, and protocol dependencies. **Relicensed to AGPL-3.0-or-later** with updated SPDX headers.
+
+---
+
+### Bug Fixes & Refinements
+
+- **Fixed DNS backend port preservation** and isolated TLS listener hostname matching
+- **Corrected HTTP/2 ALPN negotiation** so clients properly detect h2 support
+- **Fixed TLS private key permissions** (0o600) for security
+- **Improved per-connection context handling** for HTTP relay listeners
+- **Enhanced dataset realism** with proper class overlap in synthetic samples
+- **Fixed burn weight transpose** and scatter index selection in training export
+
+---
 
 ### Features
 - feat(telemetry): append source line number to log target
