@@ -63,6 +63,19 @@ impl OtelGuard {
     }
 }
 
+/// The OTLP/HTTP exporter in opentelemetry-otlp 0.32 posts to the configured
+/// endpoint verbatim — it does not append the signal path. Users configure
+/// the collector base URL (`http://host:4318`), so append `/v1/traces`
+/// unless it's already there.
+fn normalize_otlp_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with("/v1/traces") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1/traces")
+    }
+}
+
 /// Build the OTLP tracer provider on a dedicated OS thread with its own
 /// current-thread Tokio runtime. The batch span processor spawns its flush
 /// task onto the runtime that was entered when the provider was built, so the
@@ -75,7 +88,7 @@ fn build_otlp_provider(
     use opentelemetry_otlp::WithExportConfig;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let endpoint = endpoint.to_string();
+    let endpoint = normalize_otlp_endpoint(endpoint);
     std::thread::Builder::new()
         .name("otlp-exporter".into())
         .spawn(move || {
@@ -143,7 +156,8 @@ where
 
 /// Initialize structured logging. JSON logs are always emitted. When
 /// `otlp_endpoint` is non-empty, spans are additionally exported over
-/// OTLP/HTTP protobuf (the collector's 4318 port). Any exporter initialization failure degrades to JSON-only
+/// OTLP/HTTP protobuf (the collector's 4318 port; `/v1/traces` is appended
+/// automatically). Any exporter initialization failure degrades to JSON-only
 /// logging — telemetry must never crash the proxy.
 ///
 /// Returns a guard that keeps the tracer provider alive; `None` when OTLP is
@@ -207,6 +221,22 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    #[test]
+    fn otlp_endpoint_gets_traces_path() {
+        assert_eq!(
+            normalize_otlp_endpoint("http://collector:4318"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            normalize_otlp_endpoint("http://collector:4318/"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            normalize_otlp_endpoint("http://collector:4318/v1/traces"),
+            "http://collector:4318/v1/traces"
+        );
     }
 
     /// Regression test for the span-fields panic: events logged inside a span
