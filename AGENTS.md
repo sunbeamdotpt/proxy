@@ -117,6 +117,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 # Run all tests (unit + e2e)
 cargo test
 
+# tests/otel.rs needs the Docker API via DOCKER_HOST (no docker CLI contexts)
+DOCKER_HOST=unix://$HOME/.lima/docker/sock/docker.sock cargo test
+
 # Run unit tests only (no e2e, which needs port 18889)
 cargo test --lib
 

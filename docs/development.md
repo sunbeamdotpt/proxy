@@ -27,6 +27,16 @@ cargo clippy -- -D warnings          # lint
 
 The `training` feature enables GPU-accelerated training via burn-rs and wgpu. The default build omits these dependencies and uses the compiled-in model weights.
 
+## Container-backed tests
+
+`tests/otel.rs` starts a real OpenTelemetry collector via testcontainers, so it needs a Docker-compatible daemon. Testcontainers talks to the Docker API through `DOCKER_HOST` and does not honor docker CLI contexts — on lima/colima setups you must export the socket explicitly:
+
+```sh
+DOCKER_HOST=unix://$HOME/.lima/docker/sock/docker.sock cargo test
+```
+
+When the daemon is unreachable the test skips itself and prints this hint.
+
 ## Release builds
 
 The release script bumps the version, regenerates the changelog, runs checks, and builds a release binary:
