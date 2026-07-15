@@ -141,6 +141,7 @@ fn start_proxy_once(backend_port: u16) {
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
             trusted_proxy_cidrs: vec![],
+            x_forwarded_for: false,
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,

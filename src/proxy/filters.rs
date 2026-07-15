@@ -26,6 +26,22 @@ impl SunbeamProxy {
                 )
             })?;
 
+        // Optionally inform backends of the real client IP. The resolved value
+        // replaces any client-supplied header to prevent spoofing.
+        if self.x_forwarded_for
+            && let Some(ip) = self.extract_client_ip(session)
+        {
+            upstream_req
+                .insert_header("x-forwarded-for", ip.to_string())
+                .map_err(|e| {
+                    pingora_core::Error::because(
+                        pingora_core::ErrorType::InternalError,
+                        "failed to insert x-forwarded-for",
+                        e,
+                    )
+                })?;
+        }
+
         // Forward X-Request-Id to upstream.
         upstream_req
             .insert_header("x-request-id", &ctx.request_id)
@@ -701,6 +717,18 @@ mod tests {
         }
     }
 
+    fn set_peer_addr(session: &mut Session, addr: std::net::SocketAddr) {
+        use pingora_core::protocols::SocketDigest;
+        use pingora_core::protocols::l4::socket::SocketAddr as PSocketAddr;
+        let digest = session.as_downstream_mut().digest_mut().unwrap();
+        let socket_digest = SocketDigest::from_raw_fd(-1);
+        socket_digest
+            .peer_addr
+            .set(Some(PSocketAddr::Inet(addr)))
+            .ok();
+        digest.socket_digest = Some(Arc::new(socket_digest));
+    }
+
     async fn session_with_headers(method: &str, path: &str, headers: &[(&str, &str)]) -> Session {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -740,6 +768,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
             trusted_proxy_cidrs: vec![],
+            x_forwarded_for: false,
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,
@@ -783,6 +812,70 @@ mod tests {
             "req-42"
         );
         assert!(upstream_req.headers.get("expect").is_none());
+    }
+
+    #[tokio::test]
+    async fn upstream_request_filter_sets_x_forwarded_for_when_enabled() {
+        let mut proxy = make_proxy();
+        proxy.x_forwarded_for = true;
+        let mut session = session_with_headers("GET", "/", &[]).await;
+        set_peer_addr(&mut session, "127.0.0.1:41000".parse().unwrap());
+        let mut upstream_req = RequestHeader::build("GET", b"/api", None).unwrap();
+        // Client-supplied (potentially spoofed) value must be replaced.
+        upstream_req
+            .insert_header("x-forwarded-for", "192.0.2.99")
+            .unwrap();
+        let mut ctx = make_ctx_with_plan(Arc::new(base_plan()));
+
+        proxy
+            .upstream_request_filter_inner(&mut session, &mut upstream_req, &mut ctx)
+            .await
+            .unwrap();
+
+        // The session runs over loopback, so the socket IP is 127.0.0.1.
+        assert_eq!(
+            upstream_req
+                .headers
+                .get("x-forwarded-for")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            upstream_req
+                .headers
+                .get_all("x-forwarded-for")
+                .iter()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_request_filter_leaves_x_forwarded_for_when_disabled() {
+        let proxy = make_proxy();
+        let mut session = session_with_headers("GET", "/", &[]).await;
+        let mut upstream_req = RequestHeader::build("GET", b"/api", None).unwrap();
+        upstream_req
+            .insert_header("x-forwarded-for", "192.0.2.99")
+            .unwrap();
+        let mut ctx = make_ctx_with_plan(Arc::new(base_plan()));
+
+        proxy
+            .upstream_request_filter_inner(&mut session, &mut upstream_req, &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            upstream_req
+                .headers
+                .get("x-forwarded-for")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "192.0.2.99"
+        );
     }
 
     #[tokio::test]

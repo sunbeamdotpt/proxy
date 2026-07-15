@@ -833,6 +833,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
             trusted_proxy_cidrs: crate::rate_limit::cidr::parse_cidrs(&["127.0.0.0/8".into()]),
+            x_forwarded_for: false,
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,

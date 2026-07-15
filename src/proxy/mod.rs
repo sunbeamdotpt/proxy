@@ -148,6 +148,9 @@ pub struct SunbeamProxy {
     /// client IP are only trusted when the immediate TCP peer is in one of
     /// these ranges.
     pub trusted_proxy_cidrs: Vec<crate::rate_limit::cidr::CidrBlock>,
+    /// When true, set `X-Forwarded-For` on upstream requests to the resolved
+    /// client IP, replacing any client-supplied value.
+    pub x_forwarded_for: bool,
     /// Optional cluster handle for multi-node bandwidth tracking.
     pub cluster: Option<Arc<ClusterHandle>>,
     /// When true, DDoS detector logs decisions but never blocks traffic.
@@ -1209,6 +1212,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             pipeline_bypass_cidrs: vec![],
             trusted_proxy_cidrs: vec![],
+            x_forwarded_for: false,
             cluster: None,
             ddos_observe_only: false,
             scanner_observe_only: false,

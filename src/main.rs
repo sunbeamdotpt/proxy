@@ -681,6 +681,7 @@ fn run_serve(upgrade: bool, caddyfile: Option<&str>, caddyfile_dir: Option<&str>
                 .unwrap_or_default(),
         ),
         trusted_proxy_cidrs: crate::rate_limit::cidr::parse_cidrs(&cfg.trusted_proxy_cidrs),
+        x_forwarded_for: cfg.x_forwarded_for,
         cluster: cluster_handle.clone(),
         ddos_observe_only: cfg.ddos.as_ref().map(|d| d.observe_only).unwrap_or(false),
         scanner_observe_only: cfg

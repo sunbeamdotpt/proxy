@@ -41,6 +41,17 @@ otlp_endpoint = ""          # OpenTelemetry OTLP endpoint (empty = disabled)
 metrics_port  = 9090         # Prometheus scrape port (0 = disabled)
 ```
 
+## Forwarding
+
+```toml
+x_forwarded_for = true  # default: false
+```
+
+When enabled, the proxy sets the `X-Forwarded-For` header on upstream requests
+to the resolved client IP (resolved via `trusted_proxy_cidrs` rules). Any
+client-supplied value is replaced, preventing header spoofing. Disabled by
+default.
+
 ## Kubernetes
 
 Resource names and namespaces for the cert/config watchers and ACME Ingress routing.

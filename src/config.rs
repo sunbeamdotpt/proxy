@@ -55,6 +55,12 @@ pub struct Config {
     /// Otherwise the socket address is used, preventing header spoofing.
     #[serde(default)]
     pub trusted_proxy_cidrs: Vec<String>,
+    /// When true, set the `X-Forwarded-For` header on upstream requests to the
+    /// resolved client IP (see `trusted_proxy_cidrs` for resolution rules).
+    /// Any client-supplied value is replaced, preventing header spoofing.
+    /// Disabled by default.
+    #[serde(default)]
+    pub x_forwarded_for: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -846,6 +852,29 @@ listen = "0.0.0.0:8080"
         assert_eq!(default_model_dir(), "/models");
         assert_eq!(default_max_model_size(), 52_428_800);
         assert_eq!(default_chunk_size(), 65_536);
+    }
+
+    #[test]
+    fn x_forwarded_for_defaults_to_disabled() {
+        let raw = r#"
+listen = { http = "0.0.0.0:80", https = "0.0.0.0:443" }
+tls = { cert_path = "/c/cert.pem", key_path = "/c/key.pem" }
+telemetry = { otlp_endpoint = "http://otel:4317" }
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(!cfg.x_forwarded_for);
+    }
+
+    #[test]
+    fn x_forwarded_for_deserializes_enabled() {
+        let raw = r#"
+listen = { http = "0.0.0.0:80", https = "0.0.0.0:443" }
+tls = { cert_path = "/c/cert.pem", key_path = "/c/key.pem" }
+telemetry = { otlp_endpoint = "http://otel:4317" }
+x_forwarded_for = true
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.x_forwarded_for);
     }
 
     #[test]
