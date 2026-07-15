@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+- feat(config): add `x_forwarded_for` option (disabled by default) to set the `X-Forwarded-For` header on upstream requests from the resolved client IP
+- feat(telemetry): export spans to an OTLP collector over OTLP/HTTP, batched on a dedicated runtime thread; degrades to JSON logs on failure
+
+### Testing
+- test(otel): add testcontainers integration test (via `sunbeam-test`'s `OtelCollector`) verifying the production request span reaches a real OpenTelemetry collector
+
+### Bug Fixes
+- fix(telemetry): configure the JSON log layer with JsonFields so events logged inside spans no longer panic in debug builds or emit `field_error` in release
+- fix(telemetry): append `/v1/traces` to `otlp_endpoint` when missing — opentelemetry-otlp 0.32 posts to the configured endpoint verbatim, so a bare collector URL got 404s and every batch was dropped
+
+### Build & CI
+- build(deps): enable `rt-tokio` for opentelemetry_sdk, add testcontainers dev-dependency
+- build(deps): add git `sunbeam-test` dev-dependency and `net.git-fetch-with-cli` for ssh fetch
+
 ## [0.2.2] - 2026-06-24
 
 ### Features
