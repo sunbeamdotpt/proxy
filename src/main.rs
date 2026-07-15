@@ -1,12 +1,12 @@
 // Copyright Sunbeam Studios 2026
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-mod telemetry;
 mod watcher;
 
 use sunbeam_proxy::proxy::SunbeamProxy;
 use sunbeam_proxy::rate_limit;
 use sunbeam_proxy::scanner;
+use sunbeam_proxy::telemetry;
 use sunbeam_proxy::tls::{
     CertSource, CertStore, DiskCertSource, GatewayCertSource, TlsRegistry, merge_cert_store,
 };
@@ -317,8 +317,9 @@ fn run_serve(upgrade: bool, caddyfile: Option<&str>, caddyfile_dir: Option<&str>
         ));
     }
 
-    // 1. Init telemetry (JSON logs + optional OTEL traces).
-    telemetry::init(&cfg.telemetry.otlp_endpoint);
+    // 1. Init telemetry (JSON logs + optional OTEL traces). The guard must
+    // outlive the server so the tracer provider is never shut down early.
+    let _otel_guard = telemetry::init(&cfg.telemetry.otlp_endpoint);
 
     // Shared Tokio runtime for all application async work. Pingora still manages
     // its own runtime internally via server.run_forever().

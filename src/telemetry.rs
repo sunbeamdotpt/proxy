@@ -50,6 +50,76 @@ where
     }
 }
 
+/// Keeps the OTLP tracer provider alive. On drop, the provider flushes and
+/// shuts down the batch span processor.
+pub struct OtelGuard {
+    provider: opentelemetry_sdk::trace::SdkTracerProvider,
+}
+
+impl OtelGuard {
+    /// Force-flush buffered spans to the collector.
+    pub fn force_flush(&self) {
+        let _ = self.provider.force_flush();
+    }
+}
+
+/// Build the OTLP tracer provider on a dedicated OS thread with its own
+/// current-thread Tokio runtime. The batch span processor spawns its flush
+/// task onto the runtime that was entered when the provider was built, so the
+/// runtime must outlive the provider — the thread parks inside `block_on`
+/// forever. Neither Pingora's runtime nor the shared application runtime is
+/// touched, so exporter failures can never take down request handling.
+fn build_otlp_provider(
+    endpoint: &str,
+) -> Result<opentelemetry_sdk::trace::SdkTracerProvider, String> {
+    use opentelemetry_otlp::WithExportConfig;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let endpoint = endpoint.to_string();
+    std::thread::Builder::new()
+        .name("otlp-exporter".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("failed to build OTLP runtime: {e}")));
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let result = (|| {
+                    let exporter = opentelemetry_otlp::SpanExporter::builder()
+                        .with_http()
+                        .with_endpoint(&endpoint)
+                        .build()
+                        .map_err(|e| format!("failed to build OTLP exporter: {e}"))?;
+                    let resource = opentelemetry_sdk::Resource::builder()
+                        .with_service_name("sunbeam-proxy")
+                        .build();
+                    Ok::<_, String>(
+                        opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                            .with_resource(resource)
+                            .with_batch_exporter(exporter)
+                            .build(),
+                    )
+                })();
+                let ok = result.is_ok();
+                if tx.send(result).is_err() || !ok {
+                    return;
+                }
+                // Keep the runtime alive so the batch processor's flush task
+                // keeps running for the lifetime of the process.
+                std::future::pending::<()>().await
+            });
+        })
+        .map_err(|e| format!("failed to spawn OTLP exporter thread: {e}"))?;
+    rx.recv()
+        .map_err(|e| format!("OTLP exporter thread died: {e}"))?
+}
+
 /// The JSON fmt layer used by [`init`]. `Layer::json()` sets `JsonFields` so
 /// span fields are stored as JSON — required because the event format embeds
 /// the current span (`with_current_span`) and parses stored span fields as
@@ -71,21 +141,48 @@ where
         .with_writer(writer)
 }
 
-/// Initialize structured logging. If `otlp_endpoint` is set, tracing output
-/// would be shipped to an OTLP collector, but this path is currently TODO —
-/// `opentelemetry-otlp` 0.27 changed the `SpanExporter::builder()` API surface
-/// and the previous `.with_http()` call no longer compiles. Until the OTLP
-/// exporter plumbing is rewritten for 0.27, we emit JSON logs only, even when
-/// an OTLP endpoint is provided. Tracked separately.
-pub fn init(_otlp_endpoint: &str) {
+/// Initialize structured logging. JSON logs are always emitted. When
+/// `otlp_endpoint` is non-empty, spans are additionally exported over
+/// OTLP/HTTP protobuf (the collector's 4318 port). Any exporter initialization failure degrades to JSON-only
+/// logging — telemetry must never crash the proxy.
+///
+/// Returns a guard that keeps the tracer provider alive; `None` when OTLP is
+/// disabled or failed to initialize.
+pub fn init(otlp_endpoint: &str) -> Option<OtelGuard> {
     let fmt_layer = json_fmt_layer(std::io::stdout);
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt_layer)
-        .init();
+        .with(fmt_layer);
+
+    let provider = if otlp_endpoint.is_empty() {
+        None
+    } else {
+        Some(build_otlp_provider(otlp_endpoint))
+    };
+
+    match provider {
+        Some(Ok(provider)) => {
+            use opentelemetry::trace::TracerProvider as _;
+            let tracer = provider.tracer("sunbeam-proxy");
+            registry
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .init();
+            tracing::info!(endpoint = %otlp_endpoint, "OTLP tracing enabled");
+            Some(OtelGuard { provider })
+        }
+        Some(Err(msg)) => {
+            registry.init();
+            tracing::warn!(error = %msg, "OTLP initialization failed; JSON logs only");
+            None
+        }
+        None => {
+            registry.init();
+            None
+        }
+    }
 }
 
 #[cfg(test)]

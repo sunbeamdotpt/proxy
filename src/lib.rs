@@ -53,6 +53,8 @@ pub mod sni;
 pub mod ssh;
 /// Static files.
 pub mod static_files;
+/// Telemetry (JSON logging + OTLP tracing).
+pub mod telemetry;
 /// TLS registry and utilities.
 pub mod tls;
 /// Tls passthrough.

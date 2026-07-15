@@ -41,6 +41,7 @@ sunbeam-proxy is a TLS-terminating reverse proxy built on [Pingora](https://gith
 - **SSH TCP passthrough**: raw TCP proxy for SSH traffic (port 22 to Gitea)
 - **HTTP-to-HTTPS redirect**: with per-route opt-out via `disable_secure_redirection`
 - **X-Forwarded-For**: optional client-IP header on upstream requests, disabled by default
+- **OTLP tracing**: batched span export over OTLP/HTTP from a dedicated thread; degrades to JSON logs on failure
 
 See [README.md](README.md) for full feature documentation and configuration reference.
 

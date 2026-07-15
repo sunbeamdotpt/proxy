@@ -37,9 +37,15 @@ key_path  = "/etc/ssl/tls.key"
 
 ```toml
 [telemetry]
-otlp_endpoint = ""          # OpenTelemetry OTLP endpoint (empty = disabled)
-metrics_port  = 9090         # Prometheus scrape port (0 = disabled)
+otlp_endpoint = "http://otel-collector:4318"  # OTLP/HTTP endpoint (empty = disabled)
+metrics_port  = 9090                          # Prometheus scrape port (0 = disabled)
 ```
+
+When `otlp_endpoint` is set, request spans are exported to an OTLP collector
+over HTTP/protobuf (`/v1/traces` is appended automatically — use the
+collector's HTTP port, 4318). Spans are flushed in batches from a dedicated
+background thread; if the collector is unreachable or initialization fails,
+the proxy logs a warning and continues with JSON logs only.
 
 ## Forwarding
 
