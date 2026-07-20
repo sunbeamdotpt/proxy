@@ -7,7 +7,7 @@
 //! Docker; skipped otherwise.
 
 use sunbeam_proxy::telemetry;
-use sunbeam_test::OtelCollector;
+use sdk::testing::OtelCollector;
 
 /// Checks the Docker API the same way testcontainers will (bollard honors
 /// `DOCKER_HOST`, not docker CLI contexts), and prints setup guidance when
