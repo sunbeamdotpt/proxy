@@ -1420,3 +1420,18 @@ fn unprogrammed_invalid_backend_route_returns_500() {
         plan.upstream
     );
 }
+
+#[test]
+fn translate_view_to_ir_is_deterministic_across_calls() {
+    // Regression test for the route-table republish storm: `hosts` was built
+    // from a HashMap, so identical views produced differently-ordered tables
+    // and the RouteManager's no-op dedup never engaged.
+    let view = make_view(vec![
+        simple_route(vec!["a.example.com", "b.example.com"], "10.0.0.1:80"),
+        simple_route(vec!["c.example.com", "d.example.com"], "10.0.0.2:80"),
+    ]);
+    let first = translate_view_to_ir(&view);
+    for _ in 0..50 {
+        assert_eq!(first, translate_view_to_ir(&view));
+    }
+}

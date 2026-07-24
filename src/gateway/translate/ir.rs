@@ -139,8 +139,11 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
     // Key: (listener_hostname_prefix, route_hostname_prefix, listener_port) —
     // merge rules from multiple HTTPRoutes attached to the same listener with
     // the same hostname and port.
-    let mut groups: std::collections::HashMap<(String, String, Option<u16>), ir::HostRoute> =
-        std::collections::HashMap::new();
+    // BTreeMap keeps `hosts` deterministically ordered so identical views
+    // translate to byte-identical RouteTables and the RouteManager's no-op
+    // dedup engages (a HashMap would randomize the Vec order every call).
+    let mut groups: std::collections::BTreeMap<(String, String, Option<u16>), ir::HostRoute> =
+        std::collections::BTreeMap::new();
 
     for http_route in &view.http_routes {
         if http_route.parent_refs.is_empty() {
@@ -217,10 +220,10 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
                 eff.listener_port,
             );
             match groups.entry(key) {
-                std::collections::hash_map::Entry::Occupied(mut e) => {
+                std::collections::btree_map::Entry::Occupied(mut e) => {
                     e.get_mut().rules.extend(rules);
                 }
-                std::collections::hash_map::Entry::Vacant(e) => {
+                std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(ir::HostRoute {
                         hostname,
                         listener_ids: if listener_id.is_empty() {
@@ -306,10 +309,10 @@ pub fn translate_view_to_ir(view: &GatewayView) -> ir::RouteTable {
                 eff.listener_port,
             );
             match groups.entry(key) {
-                std::collections::hash_map::Entry::Occupied(mut e) => {
+                std::collections::btree_map::Entry::Occupied(mut e) => {
                     e.get_mut().rules.extend(rules);
                 }
-                std::collections::hash_map::Entry::Vacant(e) => {
+                std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(ir::HostRoute {
                         hostname,
                         listener_ids: if listener_id.is_empty() {

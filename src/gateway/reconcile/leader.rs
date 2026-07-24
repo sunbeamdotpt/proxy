@@ -161,7 +161,7 @@ pub async fn run_reconcile_loop(
         tokio::select! {
             _ = tick.tick() => {}
             _ = force_notify.notified() => {
-                tracing::debug!("forced reconcile triggered by gossip event");
+                tracing::debug!("forced reconcile triggered by watch event");
             }
         }
 
@@ -197,18 +197,21 @@ pub async fn run_reconcile_loop(
         // Full reconcile tick: fetch, translate, and send to proxy.
         let leader = is_leader.load(Ordering::Relaxed);
         if let Some(view) = reconcile_tick_with_leader(&client, leader).await {
-            let routes = translate_view_to_ir(&view);
-            let _ = routes_tx.send(routes);
+            // Only translate and push a new route table when the reconciled
+            // view actually changed. This avoids repeatedly compiling and
+            // swapping the route table on every tick, and repeatedly fetching
+            // Secrets and ConfigMaps from the API server.
+            let view_changed = prev_view.as_ref() != Some(&view);
+
+            if view_changed {
+                let routes = translate_view_to_ir(&view);
+                let _ = routes_tx.send(routes);
+            }
 
             // Publish digest for cross-replica validation.
             publish_digest(&digest_publisher, &view).await;
 
             // Emit resource notifications for anything that changed.
-            // Only refresh certificates when the reconciled view changed. This
-            // avoids repeatedly fetching Secrets and ConfigMaps from the API
-            // server on every 500ms tick.
-            let view_changed = prev_view.as_ref() != Some(&view);
-
             for notify in diff_view(&prev_view, &view) {
                 handle_notify(&resource_notifier, notify).await;
             }
