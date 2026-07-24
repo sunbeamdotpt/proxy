@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] - 2026-07-24
+
+### Features
+- feat(config): validate cluster tenant as ULID, add SUNBEAM_TENANT_ID
+
+### Bug Fixes
+- fix(l4): wait for complete ClientHello before SNI extraction
+- fix(gateway): stop route table republish storm
+
+### Chores
+- chore(deps): replace sunbeam-test with sdk testing feature
+
+### Styling
+- style(otel): reorder imports to satisfy cargo fmt
+
 ## [0.2.4] - 2026-07-15
 
 ### Bug Fixes

@@ -1,6 +1,6 @@
 [package]
 name        = "sunbeam-proxy"
-version = "0.2.4"
+version = "0.3.0"
 edition     = "2024"
 description = "A cloud-native reverse proxy with ML-powered security"
 license     = "AGPL-3.0-or-later"
