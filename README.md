@@ -116,7 +116,7 @@ rate  = 10.0
 
 [cluster]
 enabled     = true
-tenant      = "your-tenant-uuid"
+tenant      = "<your-tenant-ulid>"  # or set SUNBEAM_TENANT_ID; keep the value out of git
 gossip_port = 11204
 
 [cluster.discovery]

@@ -61,6 +61,9 @@ prometheus  = "0.14"
 # Request IDs
 uuid = "1"
 
+# Tenant identifiers (cluster gossip isolation)
+ulid = "1"
+
 # Static file serving and body rewriting
 bytes = "1"
 regex = "1"

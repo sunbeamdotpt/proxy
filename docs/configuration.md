@@ -135,10 +135,13 @@ rate  = 10.0
 
 Gossip-based multi-node coordination. Nodes discover each other through k8s headless DNS and share bandwidth telemetry.
 
+The `tenant` must be a ULID (26-character Crockford base32). It scopes every gossip topic, isolating unrelated deployments. You can generate one yourself (e.g. `ulid` CLI or any ULID library), but it is tied to your Sunbeam license: the tenant ID identifies your Sunbeam customer tenant, so use the same value across all deployments under that license. Treat it as semi-private — **do not commit it to git**. The `SUNBEAM_TENANT_ID` environment variable overrides the TOML value — prefer injecting it from a Kubernetes Secret rather than putting it in the ConfigMap or a config file. Startup fails if the cluster is enabled and no valid tenant ULID is available. Note that topic scoping is isolation-by-unguessability, not access control: any holder of the tenant ULID can subscribe.
+
 ```toml
 [cluster]
 enabled     = true
-tenant      = "your-tenant-uuid"
+# Prefer SUNBEAM_TENANT_ID (Secret → env). If set here, keep this file out of git.
+tenant      = "<your-tenant-ulid>"
 gossip_port = 11204
 
 [cluster.discovery]
@@ -150,3 +153,15 @@ broadcast_interval_secs = 1
 stale_peer_timeout_secs = 30
 meter_window_secs       = 30
 ```
+
+Example Kubernetes wiring (Secret → env, keeping the tenant out of the ConfigMap):
+
+```yaml
+env:
+  - name: SUNBEAM_TENANT_ID
+    valueFrom:
+      secretKeyRef:
+        name: sunbeam-gossip-tenant
+        key: tenant
+```
+

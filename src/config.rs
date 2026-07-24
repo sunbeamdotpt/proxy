@@ -582,7 +582,9 @@ pub struct ClusterConfig {
     #[serde(default = "default_cluster_enabled")]
     /// Enabled.
     pub enabled: bool,
-    /// Tenant UUID — isolates unrelated deployments.
+    /// Tenant ULID — isolates unrelated deployments. Overridden by the
+    /// `SUNBEAM_TENANT_ID` environment variable when set; validated at load.
+    #[serde(default)]
     pub tenant: String,
     /// UDP port for gossip protocol.
     #[serde(default = "default_gossip_port")]
@@ -606,6 +608,35 @@ fn default_cluster_enabled() -> bool {
 }
 fn default_gossip_port() -> u16 {
     11204
+}
+
+impl ClusterConfig {
+    /// Resolve the tenant ULID: `env_tenant` (from `SUNBEAM_TENANT_ID`) wins
+    /// over the TOML value. When the cluster is enabled, fails closed if no
+    /// tenant is configured or the value is not a valid ULID; the canonical
+    /// string is stored back so topic derivation is case-stable.
+    fn resolve_tenant(&mut self, env_tenant: Option<String>) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if let Some(t) = env_tenant.filter(|t| !t.is_empty()) {
+            self.tenant = t;
+        }
+        if self.tenant.is_empty() {
+            anyhow::bail!(
+                "cluster is enabled but no tenant is configured: \
+                 set SUNBEAM_TENANT_ID or `tenant` in [cluster] to a ULID"
+            );
+        }
+        let ulid = ulid::Ulid::from_string(&self.tenant).map_err(|_| {
+            anyhow::anyhow!(
+                "invalid cluster tenant {:?}: expected a 26-character ULID",
+                self.tenant
+            )
+        })?;
+        self.tenant = ulid.to_string();
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -731,7 +762,11 @@ impl Config {
         let raw =
             fs::read_to_string(path).with_context(|| format!("reading config from {path}"))?;
         reject_deprecated_tables(&raw)?;
-        toml::from_str(&raw).with_context(|| "parsing config.toml")
+        let mut cfg: Config = toml::from_str(&raw).with_context(|| "parsing config.toml")?;
+        if let Some(cluster) = &mut cfg.cluster {
+            cluster.resolve_tenant(std::env::var("SUNBEAM_TENANT_ID").ok())?;
+        }
+        Ok(cfg)
     }
 }
 
@@ -1068,5 +1103,59 @@ backend = "b"
         assert_eq!(d.method, "k8s");
         assert!(d.headless_service.is_none());
         assert!(d.bootstrap_peers.is_none());
+    }
+
+    fn cluster_cfg(enabled: bool, tenant: &str) -> ClusterConfig {
+        ClusterConfig {
+            enabled,
+            tenant: tenant.to_string(),
+            gossip_port: 11_204,
+            key_path: None,
+            discovery: DiscoveryConfig::default(),
+            bandwidth: None,
+            models: None,
+        }
+    }
+
+    #[test]
+    fn tenant_env_overrides_toml() {
+        let mut cfg = cluster_cfg(true, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        cfg.resolve_tenant(Some("01BX5ZZKBKACTAV9WEVGEMMVRZ".to_string()))
+            .unwrap();
+        assert_eq!(cfg.tenant, "01BX5ZZKBKACTAV9WEVGEMMVRZ");
+    }
+
+    #[test]
+    fn tenant_toml_used_when_env_absent() {
+        let mut cfg = cluster_cfg(true, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        cfg.resolve_tenant(None).unwrap();
+        assert_eq!(cfg.tenant, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    #[test]
+    fn tenant_lowercase_is_canonicalized() {
+        let mut cfg = cluster_cfg(true, "01arz3ndektsv4rrffq69g5fav");
+        cfg.resolve_tenant(None).unwrap();
+        assert_eq!(cfg.tenant, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    #[test]
+    fn tenant_invalid_ulid_rejected() {
+        let mut cfg = cluster_cfg(true, "test-tenant");
+        let err = cfg.resolve_tenant(None).unwrap_err();
+        assert!(format!("{err}").contains("ULID"), "{err}");
+    }
+
+    #[test]
+    fn tenant_missing_fails_when_enabled() {
+        let mut cfg = cluster_cfg(true, "");
+        let err = cfg.resolve_tenant(None).unwrap_err();
+        assert!(format!("{err}").contains("SUNBEAM_TENANT_ID"), "{err}");
+    }
+
+    #[test]
+    fn tenant_missing_ok_when_disabled() {
+        let mut cfg = cluster_cfg(false, "");
+        cfg.resolve_tenant(None).unwrap();
     }
 }
