@@ -70,6 +70,14 @@ pub fn parse_client_hello_sni(buf: &[u8]) -> Option<&str> {
     None
 }
 
+/// Total length in bytes of the first TLS record (5-byte header + payload),
+/// once the full record header is present. Returns `None` when fewer than 5
+/// bytes are available. Does not validate the content type.
+pub fn record_total_len(buf: &[u8]) -> Option<usize> {
+    let record_len = u16::from_be_bytes([*buf.get(3)?, *buf.get(4)?]) as usize;
+    Some(5 + record_len)
+}
+
 /// Parse the SNI extension payload to extract the hostname.
 ///
 /// Format: 2-byte list length, then entries of (1-byte type, 2-byte name
@@ -102,71 +110,101 @@ fn parse_sni_extension(data: &[u8]) -> Option<&str> {
 }
 
 #[cfg(test)]
+pub(crate) fn build_client_hello(sni: Option<&str>) -> Vec<u8> {
+    build_client_hello_inner(sni, 0)
+}
+
+/// Build a ClientHello with `pad` bytes of padding extension (type 0x0015),
+/// to simulate large TLS 1.3 / post-quantum hellos.
+#[cfg(test)]
+pub(crate) fn build_client_hello_padded(sni: Option<&str>, pad: usize) -> Vec<u8> {
+    build_client_hello_inner(sni, pad)
+}
+
+#[cfg(test)]
+fn build_client_hello_inner(sni: Option<&str>, pad: usize) -> Vec<u8> {
+    // ClientHello body (after handshake header):
+    //   ProtocolVersion + Random + SessionID + CipherSuites + Compression + Extensions
+    let mut ch = Vec::new();
+
+    // ProtocolVersion: TLS 1.2
+    ch.extend_from_slice(&[0x03, 0x03]);
+    // Random: 32 zero bytes
+    ch.extend_from_slice(&[0u8; 32]);
+    // Session ID: empty
+    ch.push(0x00);
+    // Cipher Suites: 2 bytes length + one suite (TLS_AES_128_GCM_SHA256)
+    ch.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+    // Compression Methods: 1 entry (null)
+    ch.extend_from_slice(&[0x01, 0x00]);
+
+    // Extensions
+    let mut exts = Vec::new();
+
+    if let Some(hostname) = sni {
+        // SNI extension (type 0x0000)
+        let name_bytes = hostname.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let entry_len = 1 + 2 + name_len; // type(1) + name_len(2) + name
+        let sni_data_len = 2 + entry_len; // list_len field + entry
+
+        exts.extend_from_slice(&[0x00, 0x00]); // ext type = SNI
+        exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes()); // ext data length
+        exts.extend_from_slice(&((entry_len) as u16).to_be_bytes()); // server_name_list_length
+        exts.push(0x00); // name type = hostname
+        exts.extend_from_slice(&name_len.to_be_bytes()); // name length
+        exts.extend_from_slice(name_bytes); // name
+    }
+
+    if pad > 0 {
+        exts.extend_from_slice(&[0x00, 0x15]); // ext type = padding
+        exts.extend_from_slice(&(pad as u16).to_be_bytes());
+        exts.extend_from_slice(&vec![0u8; pad]);
+    }
+
+    // Add a dummy extension after SNI to test we stop at the right one
+    exts.extend_from_slice(&[0x00, 0x17]); // extended_master_secret
+    exts.extend_from_slice(&[0x00, 0x00]); // 0 bytes of data
+
+    // Extensions length prefix
+    let ext_len = exts.len() as u16;
+    ch.extend_from_slice(&ext_len.to_be_bytes());
+    ch.extend_from_slice(&exts);
+
+    // Handshake header: type(1) + length(3)
+    let mut hs = Vec::new();
+    hs.push(0x01); // ClientHello
+    let ch_len = ch.len() as u32;
+    hs.push((ch_len >> 16) as u8);
+    hs.push((ch_len >> 8) as u8);
+    hs.push(ch_len as u8);
+    hs.extend_from_slice(&ch);
+
+    // TLS record header: type(1) + version(2) + length(2)
+    let mut record = Vec::new();
+    record.push(0x16); // Handshake
+    record.extend_from_slice(&[0x03, 0x01]); // TLS 1.0 record version
+    let hs_len = hs.len() as u16;
+    record.extend_from_slice(&hs_len.to_be_bytes());
+    record.extend_from_slice(&hs);
+
+    record
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build a minimal TLS ClientHello with the given SNI hostname.
-    fn build_client_hello(sni: Option<&str>) -> Vec<u8> {
-        // ClientHello body (after handshake header):
-        //   ProtocolVersion + Random + SessionID + CipherSuites + Compression + Extensions
-        let mut ch = Vec::new();
-
-        // ProtocolVersion: TLS 1.2
-        ch.extend_from_slice(&[0x03, 0x03]);
-        // Random: 32 zero bytes
-        ch.extend_from_slice(&[0u8; 32]);
-        // Session ID: empty
-        ch.push(0x00);
-        // Cipher Suites: 2 bytes length + one suite (TLS_AES_128_GCM_SHA256)
-        ch.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
-        // Compression Methods: 1 entry (null)
-        ch.extend_from_slice(&[0x01, 0x00]);
-
-        // Extensions
-        let mut exts = Vec::new();
-
-        if let Some(hostname) = sni {
-            // SNI extension (type 0x0000)
-            let name_bytes = hostname.as_bytes();
-            let name_len = name_bytes.len() as u16;
-            let entry_len = 1 + 2 + name_len; // type(1) + name_len(2) + name
-            let sni_data_len = 2 + entry_len; // list_len field + entry
-
-            exts.extend_from_slice(&[0x00, 0x00]); // ext type = SNI
-            exts.extend_from_slice(&(sni_data_len as u16).to_be_bytes()); // ext data length
-            exts.extend_from_slice(&((entry_len) as u16).to_be_bytes()); // server_name_list_length
-            exts.push(0x00); // name type = hostname
-            exts.extend_from_slice(&name_len.to_be_bytes()); // name length
-            exts.extend_from_slice(name_bytes); // name
-        }
-
-        // Add a dummy extension after SNI to test we stop at the right one
-        exts.extend_from_slice(&[0x00, 0x17]); // extended_master_secret
-        exts.extend_from_slice(&[0x00, 0x00]); // 0 bytes of data
-
-        // Extensions length prefix
-        let ext_len = exts.len() as u16;
-        ch.extend_from_slice(&ext_len.to_be_bytes());
-        ch.extend_from_slice(&exts);
-
-        // Handshake header: type(1) + length(3)
-        let mut hs = Vec::new();
-        hs.push(0x01); // ClientHello
-        let ch_len = ch.len() as u32;
-        hs.push((ch_len >> 16) as u8);
-        hs.push((ch_len >> 8) as u8);
-        hs.push(ch_len as u8);
-        hs.extend_from_slice(&ch);
-
-        // TLS record header: type(1) + version(2) + length(2)
-        let mut record = Vec::new();
-        record.push(0x16); // Handshake
-        record.extend_from_slice(&[0x03, 0x01]); // TLS 1.0 record version
-        let hs_len = hs.len() as u16;
-        record.extend_from_slice(&hs_len.to_be_bytes());
-        record.extend_from_slice(&hs);
-
-        record
+    #[test]
+    fn record_total_len_reads_record_header() {
+        assert_eq!(record_total_len(&[]), None);
+        assert_eq!(record_total_len(&[0x16, 0x03, 0x01]), None);
+        assert_eq!(
+            record_total_len(&[0x16, 0x03, 0x01, 0x01, 0x00]),
+            Some(5 + 256)
+        );
+        let hello = build_client_hello(Some("example.com"));
+        assert_eq!(record_total_len(&hello), Some(hello.len()));
     }
 
     #[test]

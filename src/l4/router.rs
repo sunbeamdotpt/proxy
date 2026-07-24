@@ -28,8 +28,13 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{Duration, timeout};
 
-/// Maximum bytes to peek from a TCP stream for SNI extraction.
-const PEEK_BUF_SIZE: usize = 1536;
+/// Maximum bytes to peek from a TCP stream for SNI extraction: the largest
+/// possible TLS record (16384) plus its 5-byte header. TLS 1.3 ClientHellos
+/// with post-quantum key shares exceed smaller buffers.
+const PEEK_BUF_SIZE: usize = 16389;
+
+/// Overall timeout for waiting on a fragmented ClientHello.
+const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default timeout for UDP relay responses.
 const UDP_RELAY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,6 +88,40 @@ impl Router {
     }
 }
 
+/// Peek the ClientHello, waiting until the full first TLS record has arrived.
+///
+/// A single `peek()` can return a fragmented hello (slow or lossy clients),
+/// which used to fail SNI extraction and drop the connection. Peek does not
+/// consume, so each retry sees every byte received so far.
+async fn peek_client_hello_sni(stream: &TcpStream) -> Option<Arc<str>> {
+    timeout(SNI_PEEK_TIMEOUT, async {
+        let mut buf = [0u8; PEEK_BUF_SIZE];
+        loop {
+            let n = stream.peek(&mut buf).await.ok()?;
+            let data = &buf[..n];
+            match data.first() {
+                // Orderly shutdown before any bytes.
+                None => return None,
+                Some(&0x16) => {}
+                // Not a TLS handshake — fail fast instead of waiting.
+                Some(_) => return None,
+            }
+            if let Some(total) = crate::sni::record_total_len(data)
+                && n >= total.min(PEEK_BUF_SIZE)
+            {
+                return crate::sni::parse_client_hello_sni(data).map(Arc::from);
+            }
+            // Incomplete record — wait for more bytes and peek again.
+            if stream.readable().await.is_err() {
+                return None;
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[async_trait]
 impl L4Router for Router {
     async fn handle_tcp(&self, ctx: L4Context, stream: TcpStream) {
@@ -96,14 +135,7 @@ impl L4Router for Router {
         let sni: Option<Arc<str>> = if let Some(sni) = ctx.sni.clone() {
             Some(sni)
         } else if matches!(ctx.protocol, Protocol::Tls | Protocol::Https) {
-            let mut buf = [0u8; PEEK_BUF_SIZE];
-            match stream.peek(&mut buf).await {
-                Ok(n) => crate::sni::parse_client_hello_sni(&buf[..n]).map(Arc::from),
-                Err(e) => {
-                    tracing::debug!(error = %e, "l4 router: peek failed");
-                    None
-                }
-            }
+            peek_client_hello_sni(&stream).await
         } else {
             None
         };
@@ -652,6 +684,52 @@ mod tests {
         let accept = listener.accept();
         let (client, accepted) = tokio::join!(connect, accept);
         (client.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn peek_sni_extracts_from_single_segment_hello() {
+        let (mut client, server) = connected_pair().await;
+        client
+            .write_all(&crate::sni::build_client_hello(Some("one.example.com")))
+            .await
+            .unwrap();
+        let sni = peek_client_hello_sni(&server).await;
+        assert_eq!(sni.as_deref(), Some("one.example.com"));
+    }
+
+    #[tokio::test]
+    async fn peek_sni_waits_for_fragmented_client_hello() {
+        let (mut client, server) = connected_pair().await;
+        let hello = crate::sni::build_client_hello(Some("frag.example.com"));
+        let split = hello.len() / 2;
+        let first = hello[..split].to_vec();
+        let second = hello[split..].to_vec();
+        let writer = tokio::spawn(async move {
+            client.write_all(&first).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client.write_all(&second).await.unwrap();
+        });
+        let sni = peek_client_hello_sni(&server).await;
+        assert_eq!(sni.as_deref(), Some("frag.example.com"));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peek_sni_handles_hello_larger_than_old_buffer() {
+        // TLS 1.3 / post-quantum ClientHellos exceed the old 1536-byte buffer.
+        let (mut client, server) = connected_pair().await;
+        let hello = crate::sni::build_client_hello_padded(Some("pq.example.com"), 4096);
+        assert!(hello.len() > 1536);
+        client.write_all(&hello).await.unwrap();
+        let sni = peek_client_hello_sni(&server).await;
+        assert_eq!(sni.as_deref(), Some("pq.example.com"));
+    }
+
+    #[tokio::test]
+    async fn peek_sni_fails_fast_on_non_tls_data() {
+        let (mut client, server) = connected_pair().await;
+        client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        assert!(peek_client_hello_sni(&server).await.is_none());
     }
 
     #[test]
