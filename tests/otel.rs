@@ -6,8 +6,8 @@
 //! production request span from `src/proxy/request_filter.rs`. Requires
 //! Docker; skipped otherwise.
 
-use sunbeam_proxy::telemetry;
 use sdk::testing::OtelCollector;
+use sunbeam_proxy::telemetry;
 
 /// Checks the Docker API the same way testcontainers will (bollard honors
 /// `DOCKER_HOST`, not docker CLI contexts), and prints setup guidance when
