@@ -14,6 +14,9 @@ visibility: public
 
 # Sunbeam Proxy
 
+[![Matrix](https://img.shields.io/badge/chat-%23hello%3Asunbeam.pt-0dbd8b?logo=matrix)](https://matrix.to/#/#hello:sunbeam.pt)
+[![License](https://img.shields.io/github/license/sunbeamdotpt/proxy)](LICENSE)
+
 A cloud-native reverse proxy with adaptive ML threat detection. Built in Rust by [Sunbeam Studios](https://sunbeam.pt).
 
 Sunbeam Proxy learns what normal traffic looks like *for your infrastructure* and adapts its defenses automatically. Instead of relying on generic rulesets written for someone else's problems, it trains on your own audit logs to build behavioral models that protect against the threats you actually face.

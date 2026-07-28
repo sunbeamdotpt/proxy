@@ -8,6 +8,7 @@ tags:
   - index
 status: published
 visibility: public
+updated_at: "2026-07-28"
 ---
 
 # Sunbeam Proxy Documentation
@@ -23,7 +24,7 @@ visibility: public
 
 - [CLI commands](./cli.md)
 - [Development](./development.md)
-- [Tiers](./tiers.md) — the four-tier formal verification stack for ensemble models.
+- [Tiers](./TIERS.md) — the four-tier formal verification stack for ensemble models.
 
 ## Project documents
 
