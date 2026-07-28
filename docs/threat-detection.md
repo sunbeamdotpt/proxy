@@ -11,9 +11,10 @@ tags:
   - scanner
 status: published
 visibility: public
+updated_at: "2026-07-28"
 related:
   - observability.md
-  - tiers.md
+  - TIERS.md
 ---
 
 # Threat Detection

@@ -9,9 +9,10 @@ tags:
   - internals
 status: published
 visibility: public
+updated_at: "2026-07-28"
 related:
   - development.md
-  - tiers.md
+  - TIERS.md
 ---
 
 # Architecture
